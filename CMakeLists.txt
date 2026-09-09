@@ -8,23 +8,48 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ---------------------------------------------------------------------------
 # libapollo checkout.
 #
-# Defaults to a sibling clone of apollo-lib, which is the layout CI uses and
-# the same pattern the console apps follow (they check apollo-lib out next to
-# themselves). Override for a checkout somewhere else:
+# Two layouts are supported, because CI and local development differ:
+#
+#   ./apollo-lib    in-tree. What CI produces: actions/checkout's `path:` is
+#                   relative to $GITHUB_WORKSPACE, which IS this repo's root.
+#                   Also where a submodule would sit.
+#   ../apollo-lib   a sibling clone, the usual local-dev layout and the same
+#                   pattern the console apps follow.
+#
+# Or name it explicitly:
 #
 #   cmake -S . -B build -DAPOLLO_ROOT=/path/to/apollo-lib
 # ---------------------------------------------------------------------------
-set(APOLLO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../apollo-lib"
-    CACHE PATH "Path to the apollo-lib checkout")
-get_filename_component(APOLLO_ROOT "${APOLLO_ROOT}" ABSOLUTE)
+set(APOLLO_ROOT "" CACHE PATH "Path to the apollo-lib checkout")
 
-if(NOT EXISTS "${APOLLO_ROOT}/include/apollo.h")
+if(APOLLO_ROOT)
+    set(_apollo_candidates "${APOLLO_ROOT}")
+else()
+    set(_apollo_candidates
+        "${CMAKE_CURRENT_SOURCE_DIR}/apollo-lib"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../apollo-lib")
+endif()
+
+set(_apollo_found "")
+foreach(_dir IN LISTS _apollo_candidates)
+    if(EXISTS "${_dir}/include/apollo.h")
+        set(_apollo_found "${_dir}")
+        break()
+    endif()
+endforeach()
+
+if(NOT _apollo_found)
+    string(REPLACE ";" "\n  " _apollo_tried "${_apollo_candidates}")
     message(FATAL_ERROR
-        "apollo-lib not found at ${APOLLO_ROOT}\n"
+        "apollo-lib not found. Looked for include/apollo.h under:\n"
+        "  ${_apollo_tried}\n"
         "Clone it next to this repo:\n"
-        "  git clone https://github.com/bucanero/apollo-lib ${APOLLO_ROOT}\n"
+        "  git clone https://github.com/bucanero/apollo-lib ${CMAKE_CURRENT_SOURCE_DIR}/../apollo-lib\n"
         "or point at an existing checkout with -DAPOLLO_ROOT=/path/to/apollo-lib")
 endif()
+
+get_filename_component(APOLLO_ROOT "${_apollo_found}" ABSOLUTE)
+message(STATUS "Using apollo-lib at ${APOLLO_ROOT}")
 
 set(MBEDTLS_DIR "${APOLLO_ROOT}/mbedtls-2.16.12")
 

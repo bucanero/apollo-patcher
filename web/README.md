@@ -24,7 +24,7 @@ Requires the [Emscripten SDK](https://emscripten.org/docs/getting_started/) on
 `PATH` and a wasm build of libapollo in the apollo-lib checkout:
 
 ```bash
-cd ../../apollo-lib
+cd ../../apollo-lib             # or ../apollo-lib for an in-tree checkout
 make -f Makefile.wasm mbedtls    # once
 make -f Makefile.wasm            # build-wasm/libapollo.a
 cd -
@@ -32,7 +32,8 @@ make          # -> dist/
 make serve    # build, then serve dist/ on http://localhost:8000
 ```
 
-Override the library location with `make APOLLO_LIB=/path/to/apollo-lib`.
+The checkout is found the same way `CMakeLists.txt` finds it — in-tree first,
+then a sibling clone. Override with `make APOLLO_LIB=/path/to/apollo-lib`.
 
 ## How it fits together
 

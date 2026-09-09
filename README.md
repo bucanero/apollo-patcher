@@ -41,8 +41,11 @@ git clone https://github.com/bucanero/apollo-lib
 git clone https://github.com/bucanero/apollo-patcher
 ```
 
-Point at a checkout elsewhere with `-DAPOLLO_ROOT=/path/to/apollo-lib`
-(CMake) or `APOLLO_LIB=/path/to/apollo-lib` (the web Makefile).
+Both build systems look for it in two places: `./apollo-lib` inside this repo
+first (which is what CI produces, and where a submodule would sit), then
+`../apollo-lib` as above. Point at a checkout elsewhere with
+`-DAPOLLO_ROOT=/path/to/apollo-lib` (CMake) or `APOLLO_LIB=/path/to/apollo-lib`
+(the web Makefile).
 
 ### Desktop GUI
 
