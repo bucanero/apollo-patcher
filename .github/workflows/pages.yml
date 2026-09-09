@@ -54,11 +54,17 @@ jobs:
           make -f Makefile.wasm mbedtls
           make -f Makefile.wasm
 
+      # web/Makefile finds the in-tree apollo-lib checkout on its own.
       - name: Build the site
         working-directory: web
-        run: make APOLLO_LIB=../apollo-lib
+        run: make
 
+      # enablement: turn Pages on via the API if it is not configured yet.
+      # Without it this step hard-fails with "Get Pages site failed" on a repo
+      # where Pages has never been switched on.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:

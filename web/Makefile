@@ -11,13 +11,18 @@
 # Requires the Emscripten SDK on PATH, plus a wasm build of libapollo in the
 # apollo-lib checkout:
 #
-#   cd ../../apollo-lib
+#   cd $(APOLLO_LIB)
 #   make -f Makefile.wasm mbedtls
 #   make -f Makefile.wasm
 #
-# Override the library location with APOLLO_LIB=/path/to/apollo-lib.
+# The checkout is found the same way CMakeLists.txt finds it: in-tree
+# (../apollo-lib from here, which is what CI produces) first, then a sibling
+# clone (../../apollo-lib, the local-dev layout). Override with
+# APOLLO_LIB=/path/to/apollo-lib.
 
-APOLLO_LIB ?= ../../apollo-lib
+APOLLO_LIB ?= $(patsubst %/include/apollo.h,%,$(firstword \
+			  $(wildcard ../apollo-lib/include/apollo.h ../../apollo-lib/include/apollo.h) \
+			  ../../apollo-lib/include/apollo.h))
 
 LIBAPOLLO   = $(APOLLO_LIB)/build-wasm/libapollo.a
 LIBMBED     = $(APOLLO_LIB)/mbedtls-2.16.12/build-wasm/library/libmbedcrypto.a
@@ -65,8 +70,14 @@ $(MODULE): $(SRCS) $(LIBAPOLLO) $(LIBMBED) Makefile | $(DIST)
 
 $(LIBAPOLLO) $(LIBMBED):
 	@echo "missing $@"
-	@echo "build libapollo for wasm first:"
-	@echo "    cd $(APOLLO_LIB) && make -f Makefile.wasm mbedtls && make -f Makefile.wasm"
+	@echo "using apollo-lib at: $(APOLLO_LIB)"
+	@if [ ! -f "$(APOLLO_LIB)/include/apollo.h" ]; then \
+		echo "...which is not an apollo-lib checkout. Clone it next to this repo,"; \
+		echo "or pass APOLLO_LIB=/path/to/apollo-lib."; \
+	else \
+		echo "build libapollo for wasm first:"; \
+		echo "    cd $(APOLLO_LIB) && make -f Makefile.wasm mbedtls && make -f Makefile.wasm"; \
+	fi
 	@exit 2
 
 # Static assets are copied rather than referenced so that dist/ is a complete,
