@@ -181,6 +181,31 @@ function selectable(code) {
     return !code.parent && !(code.flags & FLAG.EMPTY);
 }
 
+/*
+ * Ticking any code pulls in every [R] code in the file.
+ *
+ * "(Required)" entries are the wrappers a patch needs around whatever else you
+ * choose — typically a pair that decompresses a payload before the real codes
+ * run and recompresses it afterwards — so picking one code without them
+ * produces a save the game cannot read. The desktop GUI has always done this
+ * (auto_enable_required in gui/src/main.cpp); the web app had not.
+ *
+ * Only additive, and only on check: unticking leaves them alone, so they can
+ * still be turned off deliberately.
+ *
+ * Returns true if anything changed, so the caller knows to re-render.
+ */
+function enableRequired() {
+    let changed = false;
+    state.codes.forEach((code, i) => {
+        if ((code.flags & FLAG.REQUIRED) && selectable(code) && !state.checked.has(i)) {
+            state.checked.add(i);
+            changed = true;
+        }
+    });
+    return changed;
+}
+
 function selectDefaults() {
     state.checked = new Set(
         state.codes.map((c, i) => (c.activated && selectable(c) ? i : -1)).filter((i) => i >= 0),
@@ -220,9 +245,11 @@ function renderCodes() {
             box.checked = state.checked.has(index);
             box.addEventListener('change', () => {
                 toggle(index, box.checked);
-                /* Ticking a code with option groups changes how they render
-                 * (an unanswered one is flagged only while ticked). */
-                if (code.options.length) renderCodes();
+                const pulled = box.checked && enableRequired();
+                /* Re-render when a required code was pulled in (its box has to
+                 * show as ticked), or when this code has option groups — an
+                 * unanswered one is flagged only while ticked. */
+                if (pulled || code.options.length) renderCodes();
                 refreshApplyButton();
             });
             row.append(box);
@@ -235,6 +262,7 @@ function renderCodes() {
             box.indeterminate = on > 0 && on < kids.length;
             box.addEventListener('change', () => {
                 kids.forEach((i) => toggle(i, box.checked));
+                if (box.checked) enableRequired();
                 renderCodes();
                 refreshApplyButton();
             });
