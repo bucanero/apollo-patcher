@@ -10,12 +10,13 @@ Published to GitHub Pages from `main` (see `.github/workflows/pages.yml`).
 ## Layout
 
 ```
-src/apollo_wasm.c   Emscripten binding over core/apollo_ctrl.[ch]
-public/index.html   the page
-public/app.js       UI: state + DOM, no framework
-public/worker.js    owns the wasm module, runs every engine call
-public/style.css    light + dark
-dist/               build output — exactly what gets published
+src/apollo_wasm.c    Emscripten binding over core/apollo_ctrl.[ch]
+tools/build-index.py generates the browsable patch index at build time
+public/index.html    the page
+public/app.js        UI: state + DOM, no framework
+public/worker.js     owns the wasm module, runs every engine call
+public/style.css     light + dark
+dist/                build output — exactly what gets published
 ```
 
 ## Building
@@ -68,6 +69,36 @@ previous runs.
   ticked code has a value — the same rule the desktop GUI enforces. Defaulting
   to the first value would silently choose a user profile or character slot on
   the player's behalf.
+
+## The patch database browser
+
+Users should not have to go and find a `.savepatch` first, so the page can
+search the ~2200 patches in
+[apollo-patches](https://github.com/bucanero/apollo-patches) by game name or
+title ID and fetch the one they pick.
+
+The split between build time and run time is deliberate:
+
+- **The index is built in.** `tools/build-index.py` reads the second line of
+  every patch file (where the game name lives) and writes `dist/patches.json` —
+  2240 rows, 24KB gzipped, fetched the first time the dialog opens. Reading
+  2200 files is trivial here and impossible from a browser, and the GitHub API
+  would neither give game names nor survive the rate limit.
+- **The patches are fetched live**, from
+  `cdn.jsdelivr.net/gh/bucanero/apollo-patches@main`, so a patch fixed upstream
+  reaches users without redeploying this site. jsDelivr rather than
+  `raw.githubusercontent.com`, which answers 503 to cross-origin requests from
+  the Pages origin.
+
+The consequence to keep in mind: a patch added upstream is not listed until this
+site is rebuilt. A listed patch that has since been renamed 404s, which the
+dialog reports while pointing at the drop zone as the fallback.
+
+Two details in `build-index.py` that came from the real data: 245 patch files
+are Windows-1252 rather than UTF-8 (game names with ™ / ®), so a strict decode
+would drop them; and the leading `;` on the name line is a convention, not a
+guarantee. The index's decoded name is also preferred over the engine's for
+display, since the engine hands back raw bytes.
 
 ## Scope
 

@@ -9,7 +9,7 @@ drive the same `libapollo` engine the console apps use.
 | Front-end | What it is |
 |-----------|------------|
 | [`gui/`](gui/README.md) | Native desktop app (Dear ImGui + GLFW) for Windows, macOS and Linux |
-| [`web/`](web/README.md) | The engine compiled to WebAssembly, running in a browser tab |
+| [`web/`](web/README.md) | The engine compiled to WebAssembly, running in a browser tab — with the patch database searchable in-page |
 
 The command-line tools (`patcher`, `dumper`) and the engine itself live in
 [apollo-lib](https://github.com/bucanero/apollo-lib).

@@ -110,10 +110,10 @@ function wireDropZone(zoneId, inputId, onFile) {
     });
 }
 
-async function loadPatch(file) {
+async function loadPatch(file, displayName) {
     const buffer = await file.arrayBuffer();
     state.patchName = file.name;
-    $('patch-name').textContent = file.name;
+    $('patch-name').textContent = displayName || file.name;
     $('drop-patch').classList.add('filled');
 
     clearLog();
@@ -134,7 +134,10 @@ async function loadPatch(file) {
         if (c.options.length) state.options[i] = c.options.map((o) => o.sel);
     });
 
-    $('game-name').textContent = res.game.trim() || file.name;
+    /* Prefer the index's name when the patch came from the database: the
+     * engine hands back raw bytes, and 245 patches are Windows-1252, so their
+     * ™/® characters arrive mojibaked through UTF8ToString. */
+    $('game-name').textContent = displayName || res.game.trim() || file.name;
     $('code-count').textContent = `${res.codes.length} codes`;
     $('workspace').hidden = false;
     $('intro').hidden = true;
@@ -419,6 +422,150 @@ function download() {
 }
 
 /* ---------------------------------------------------------------------------
+ * Patch database browser
+ *
+ * dist/patches.json is generated at build time from a checkout of
+ * apollo-patches (see web/tools/build-index.py) — ~2200 rows, 24KB gzipped,
+ * fetched the first time the dialog opens. The patches themselves are fetched
+ * from a CDN on demand, so an upstream patch fix reaches users without a
+ * redeploy here.
+ * ------------------------------------------------------------------------- */
+
+const CDN = 'https://cdn.jsdelivr.net/gh/bucanero/apollo-patches@main';
+const MAX_ROWS = 200;   /* rendering all 2200 is pointless; refine instead */
+
+const db = { rows: null, loading: null, platform: null, generated: null };
+
+async function loadIndex() {
+    if (db.rows) return db.rows;
+    if (!db.loading) {
+        db.loading = (async () => {
+            const res = await fetch('./patches.json');
+            if (!res.ok) throw new Error(`index unavailable (${res.status})`);
+            const doc = await res.json();
+            db.rows = doc.patches.map(([platform, id, name]) => ({
+                platform, id, name,
+                /* precomputed once: the filter runs on every keystroke */
+                haystack: `${name} ${id}`.toLowerCase(),
+            }));
+            db.generated = doc.generated;
+            db.counts = doc.counts || {};
+            return db.rows;
+        })();
+    }
+    return db.loading;
+}
+
+function dbPlatforms() {
+    const host = $('db-plats');
+    if (host.childElementCount) return;
+
+    const make = (label, value) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'chip';
+        b.textContent = label;
+        b.setAttribute('aria-pressed', String(db.platform === value));
+        b.addEventListener('click', () => {
+            db.platform = value;
+            [...host.children].forEach((c) => c.setAttribute('aria-pressed', 'false'));
+            b.setAttribute('aria-pressed', 'true');
+            dbRender();
+        });
+        host.append(b);
+    };
+
+    make('All', null);
+    for (const p of Object.keys(db.counts || {})) make(p, p);
+}
+
+function dbRender() {
+    const list = $('db-results');
+    const needle = $('db-search').value.trim().toLowerCase();
+    list.textContent = '';
+
+    let matches = db.rows || [];
+    if (db.platform) matches = matches.filter((r) => r.platform === db.platform);
+    if (needle) matches = matches.filter((r) => r.haystack.includes(needle));
+
+    for (const row of matches.slice(0, MAX_ROWS)) {
+        const li = document.createElement('li');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'db-row';
+
+        const name = document.createElement('span');
+        name.className = 'db-name';
+        name.textContent = row.name;
+
+        const plat = document.createElement('span');
+        plat.className = 'badge';
+        plat.textContent = row.platform;
+
+        const id = document.createElement('span');
+        id.className = 'db-id';
+        id.textContent = row.id;
+
+        btn.append(name, plat, id);
+        btn.addEventListener('click', () => dbPick(row));
+        li.append(btn);
+        list.append(li);
+    }
+
+    const shown = Math.min(matches.length, MAX_ROWS);
+    const more = matches.length - shown;
+    $('db-status').textContent = matches.length
+        ? `${matches.length} match${matches.length === 1 ? '' : 'es'}` +
+          (more > 0 ? ` — showing ${shown}, keep typing to narrow` : '')
+        : 'No match';
+}
+
+async function openDb() {
+    const dialog = $('db-dialog');
+    $('db-status').textContent = 'Loading the index…';
+    $('db-results').textContent = '';
+    dialog.showModal();
+
+    try {
+        await loadIndex();
+    } catch (err) {
+        $('db-status').textContent =
+            `${err.message}. You can still drop a .savepatch file instead.`;
+        return;
+    }
+
+    dbPlatforms();
+    dbRender();
+    $('db-search').focus();
+}
+
+/* Fetch one patch and hand it to the normal load path. */
+async function dbPick(row) {
+    /* The dialog stays open until the fetch lands, so a second Enter or click
+     * would start a competing download. */
+    if (db.fetching) return;
+    db.fetching = true;
+
+    const url = `${CDN}/${row.platform}/${row.id}.savepatch`;
+    $('db-status').textContent = `Fetching ${row.id}…`;
+
+    try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`${res.status}`);
+        const buffer = await res.arrayBuffer();
+
+        $('db-dialog').close();
+        await loadPatch(new File([buffer], `${row.id}.savepatch`), row.name);
+    } catch (err) {
+        $('db-status').textContent =
+            `Could not fetch ${row.id} (${err.message}). It may have been renamed ` +
+            `upstream since this index was built — dropping the file still works.`;
+    } finally {
+        db.fetching = false;
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * Wire up
  * ------------------------------------------------------------------------- */
 
@@ -435,6 +582,18 @@ $('select-none').addEventListener('click', () => {
 $('apply').addEventListener('click', apply);
 $('download').addEventListener('click', download);
 $('dialog-close').addEventListener('click', () => $('code-dialog').close());
+
+$('open-db').addEventListener('click', openDb);
+$('db-close').addEventListener('click', () => $('db-dialog').close());
+$('db-search').addEventListener('input', dbRender);
+$('db-search').addEventListener('keydown', (e) => {
+    /* Enter takes the top hit — the common case is typing a game and pressing
+     * return, not reaching for the mouse. */
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        $('db-results').querySelector('.db-row')?.click();
+    }
+});
 
 call('version').then(({ version }) => {
     if (version) $('version').textContent = `Apollo engine ${version}`;

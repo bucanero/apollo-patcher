@@ -24,23 +24,32 @@ APOLLO_LIB ?= $(patsubst %/include/apollo.h,%,$(firstword \
 			  $(wildcard ../apollo-lib/include/apollo.h ../../apollo-lib/include/apollo.h) \
 			  ../../apollo-lib/include/apollo.h))
 
-# Python helper modules that Python patches `import` (rijndael, umsgpack, and
-# the per-game ones). They live in the patch database, not in the library, and
-# version together with the patches that import them:
+# The patch database, https://github.com/bucanero/apollo-patches. Two things
+# come from it:
 #
-#   https://github.com/bucanero/apollo-patches  ->  python/
+#   python/       helper modules Python patches `import` (rijndael, umsgpack,
+#                 and per-game ones) — embedded into the wasm module. They live
+#                 here rather than in the library because they version together
+#                 with the patches that import them.
+#   PS3/ PS4/ ... the ~2200 .savepatch files themselves, which the page lets
+#                 users browse. Only an INDEX is built in (dist/patches.json);
+#                 the patches are fetched from a CDN at runtime, so a patch fix
+#                 upstream does not need a redeploy here.
 #
 # Found in-tree first, then as a sibling clone, matching APOLLO_LIB above.
-# Override with PYTHON_MODULES=/path/to/python.
-PYTHON_MODULES ?= $(firstword \
+# Override with APOLLO_PATCHES=/path/to/apollo-patches.
+APOLLO_PATCHES ?= $(patsubst %/python,%,$(firstword \
 			  $(wildcard ../apollo-patches/python ../../apollo-patches/python) \
-			  ../../apollo-patches/python)
+			  ../../apollo-patches/python))
+
+PYTHON_MODULES = $(APOLLO_PATCHES)/python
 
 LIBAPOLLO   = $(APOLLO_LIB)/build-wasm/libapollo.a
 LIBMBED     = $(APOLLO_LIB)/mbedtls-2.16.12/build-wasm/library/libmbedcrypto.a
 
 DIST        = dist
 MODULE      = $(DIST)/apollo.mjs
+INDEX       = $(DIST)/patches.json
 
 SRCS        = src/apollo_wasm.c ../core/apollo_ctrl.c
 STATIC      = $(wildcard public/*)
@@ -74,19 +83,25 @@ LDFLAGS     = -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=worker \
 
 .PHONY: all serve clean
 
-all: $(MODULE) static
+all: $(MODULE) $(INDEX) static
 
 $(MODULE): $(SRCS) $(LIBAPOLLO) $(LIBMBED) $(PYTHON_MODULES) Makefile | $(DIST)
 	$(CC) $(CFLAGS) $(SRCS) $(LIBAPOLLO) $(LIBMBED) $(LDFLAGS) -o $@
 	@echo "built $@"
 
+# The browsable index of the database. Reading ~2200 files is trivial here and
+# impossible from a browser, so the page fetches this instead of crawling.
+$(INDEX): tools/build-index.py $(PYTHON_MODULES) | $(DIST)
+	@python3 tools/build-index.py $(APOLLO_PATCHES) $@
+
 # Named as a prerequisite above, so a missing checkout stops here with this
 # message instead of failing deep inside emcc's file_packager.
 $(PYTHON_MODULES):
-	@echo "missing $@ — the Python helper modules Python patches import."
-	@echo "clone the patch database next to this repo:"
+	@echo "missing $@ — the patch database (Python helper modules and the"
+	@echo "browsable patch index both come from it)."
+	@echo "clone it next to this repo:"
 	@echo "    git clone https://github.com/bucanero/apollo-patches"
-	@echo "or pass PYTHON_MODULES=/path/to/python"
+	@echo "or pass APOLLO_PATCHES=/path/to/apollo-patches"
 	@exit 2
 
 $(LIBAPOLLO) $(LIBMBED):

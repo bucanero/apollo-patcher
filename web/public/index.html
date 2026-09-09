@@ -33,6 +33,13 @@
       <span class="drop-hint">or click to browse</span>
       <input type="file" id="file-save" hidden>
     </div>
+
+    <div class="find">
+      <button type="button" id="open-db" class="primary">Find a game&hellip;</button>
+      <span class="find-hint">
+        Search the patch database by game or title ID — no download needed.
+      </span>
+    </div>
   </section>
 
   <section id="workspace" hidden>
@@ -77,16 +84,17 @@
       A browser front-end for the
       <a href="https://github.com/bucanero/apollo-lib">Apollo save-patch engine</a> —
       the same C library the console apps and the desktop GUI use, compiled to
-      WebAssembly. It reads a <code>.savepatch</code> file, shows you the codes
-      it contains, and applies the ones you pick to your save data.
+      WebAssembly. Search the patch database for your game, or drop in a
+      <code>.savepatch</code> file of your own; either way it shows you the
+      codes it contains and applies the ones you pick to your save data.
     </p>
     <h3>What you need</h3>
     <p>
-      A <strong>decrypted</strong> save file. This tool patches save data; it
-      cannot decrypt or re-sign console saves — use the Apollo app on the
-      console itself for that. Patch files for most games live in the
+      A <strong>decrypted</strong> save file, and nothing else — the patches
+      themselves are searchable above, fetched straight from the
       <a href="https://github.com/bucanero/apollo-patches">apollo-patches</a>
-      repository.
+      database. This tool patches save data; it cannot decrypt or re-sign
+      console saves — use the Apollo app on the console itself for that.
     </p>
     <h3>Privacy</h3>
     <p>
@@ -95,6 +103,28 @@
     </p>
   </section>
 </main>
+
+<dialog id="db-dialog" aria-label="Patch database">
+  <header>
+    <strong>Patch database</strong>
+    <button type="button" id="db-close" aria-label="Close">&times;</button>
+  </header>
+
+  <div class="db-controls">
+    <input type="search" id="db-search" placeholder="Game name or title ID&hellip;"
+           autocomplete="off" aria-label="Search the patch database">
+    <div class="db-plats" id="db-plats" role="group" aria-label="Platform"></div>
+  </div>
+
+  <ul id="db-results" class="db-results"></ul>
+
+  <footer class="db-foot">
+    <span id="db-status"></span>
+    <a href="https://github.com/bucanero/apollo-patches" target="_blank" rel="noopener">
+      apollo-patches
+    </a>
+  </footer>
+</dialog>
 
 <dialog id="code-dialog">
   <header>
