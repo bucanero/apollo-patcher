@@ -59,12 +59,7 @@ jobs:
         working-directory: web
         run: make
 
-      # enablement: turn Pages on via the API if it is not configured yet.
-      # Without it this step hard-fails with "Get Pages site failed" on a repo
-      # where Pages has never been switched on.
-      - uses: actions/configure-pages@v5
-        with:
-          enablement: true
+- uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
         with:
