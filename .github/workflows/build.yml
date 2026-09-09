@@ -99,7 +99,8 @@ jobs:
 
     - name: Bundle the patch database
       run: |
-        ./tools/make-bundle.sh apollo-patches dist/apollo-patches.zip
+        py=$(command -v python3 || command -v python)
+        "$py" tools/make-bundle.py apollo-patches dist/apollo-patches.zip
         # macOS: also inside the .app, so a dragged-out bundle is self-contained.
         if [ "${{ matrix.os }}" = "macos-latest" ]; then
           cp dist/apollo-patches.zip dist/apollo_patcher_gui.app/Contents/Resources/

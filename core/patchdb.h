@@ -46,7 +46,7 @@ void        patchdb_close(patchdb_t *db);
 /* Where the open archive was found, for the UI to show. */
 const char *patchdb_path(const patchdb_t *db);
 
-/* Why the last patchdb_open() failed. Static string, never NULL. */
+/* Why the last patchdb call failed (open or extract). Static, never NULL. */
 const char *patchdb_last_error(void);
 
 int                    patchdb_count(const patchdb_t *db);

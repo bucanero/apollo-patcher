@@ -2,7 +2,7 @@
  * patchdb - read-only access to the bundled patch database. See patchdb.h.
  *
  * The zip reading here is deliberately minimal: we produce the archive
- * ourselves (tools/make-bundle.sh), so only stored and deflated entries need
+ * ourselves (tools/make-bundle.py), so only stored and deflated entries need
  * handling, and zip64 cannot occur at ~2.8MB. It is still defensive about
  * offsets and sizes — a truncated download should report an error, not crash.
  *
@@ -10,6 +10,7 @@
  * keeping a file handle and seeking, and it makes bounds checking a single
  * comparison against one buffer.
  */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +46,15 @@
 #define METHOD_STORED   0
 #define METHOD_DEFLATE  8
 
+/*
+ * Path budget. PDB_DIR_MAX is what we accept for a *directory*; every buffer a
+ * directory is joined into is declared larger, so the compiler can see that no
+ * snprintf can truncate. A path longer than this simply reads as "no bundle
+ * there", which is the same outcome as not finding one.
+ */
+#define PDB_DIR_MAX   768
+#define PDB_PATH_MAX  1024
+
 typedef struct {
     const char *name;       /* into the archive buffer, NOT NUL-terminated */
     size_t      name_len;
@@ -66,7 +76,7 @@ struct patchdb {
     int           *list_zip;    /* row -> entries[] index         */
     int            list_count;
 
-    char           path[1024];
+    char           path[PDB_PATH_MAX];
 };
 
 static const char *g_error = "";
@@ -368,7 +378,7 @@ static int locate(char *out, size_t cap)
         return 0;
     }
 
-    char dir[1024];
+    char dir[PDB_DIR_MAX];
     if (exe_dir(dir, sizeof(dir))) {
         snprintf(out, cap, "%s%c%s", dir, PATH_SEP, BUNDLE_NAME);
         if (readable(out)) return 1;
@@ -470,17 +480,61 @@ int patchdb_read(const patchdb_t *db, int index, char **buf, size_t *len)
     return read_zip_entry(db, &db->entries[db->list_zip[index]], buf, len);
 }
 
+/*
+ * mkdir -p. The cache directory is several levels deep and its parents are not
+ * guaranteed to exist — a fresh Linux account has no ~/.cache at all, which is
+ * how this first showed up: every module failed to open, and extraction
+ * reported -1.
+ *
+ * Intermediate failures are ignored: they are usually EEXIST, and on Windows
+ * the first component is a drive root that cannot be created. Only the final
+ * component's result decides.
+ */
+static int make_dirs(const char *path)
+{
+    char tmp[PDB_PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+
+    size_t n = strlen(tmp);
+    if (n == 0) return 0;
+
+    /* Without this the last component would be treated as a parent and never
+     * created — patchdb_cache_dir() deliberately ends with a separator. */
+    while (n > 1 && (tmp[n - 1] == '/' || tmp[n - 1] == '\\'))
+        tmp[--n] = '\0';
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/' && *p != '\\') continue;
+        char sep = *p;
+        *p = '\0';
+        MKDIR(tmp);
+        *p = sep;
+    }
+
+    if (MKDIR(tmp) != 0 && errno != EEXIST)
+        return 0;
+    return 1;
+}
+
 int patchdb_extract_python(const patchdb_t *db, const char *dir)
 {
     if (!db || !dir || !*dir) return -1;
 
-    char py_dir[1024];
-    snprintf(py_dir, sizeof(py_dir), "%s%cpython", dir, PATH_SEP);
+    /* Trim any trailing separator so the join below does not double it. */
+    char base[PDB_DIR_MAX];
+    snprintf(base, sizeof(base), "%s", dir);
+    size_t bn = strlen(base);
+    while (bn > 1 && (base[bn - 1] == '/' || base[bn - 1] == '\\'))
+        base[--bn] = '\0';
 
-    /* Both may already exist; only a real failure matters, which the first
-     * fopen() below will surface anyway. */
-    MKDIR(dir);
-    MKDIR(py_dir);
+    char py_dir[sizeof(base) + 16];
+    snprintf(py_dir, sizeof(py_dir), "%s%cpython", base, PATH_SEP);
+
+    /* Creates the whole chain, including <cache>/python itself. */
+    if (!make_dirs(py_dir)) {
+        g_error = "could not create the cache directory for the Python modules";
+        return -1;
+    }
 
     int written = 0;
     for (int i = 0; i < db->entry_count; i++) {
@@ -492,16 +546,16 @@ int patchdb_extract_python(const patchdb_t *db, const char *dir)
         if (base_len == 0 || base_len >= 256) continue;
         if (memchr(e->name + 7, '/', base_len)) continue;
 
-        char base[256];
-        memcpy(base, e->name + 7, base_len);
-        base[base_len] = '\0';
+        char base_name[256];
+        memcpy(base_name, e->name + 7, base_len);
+        base_name[base_len] = '\0';
 
         char *data = NULL;
         size_t data_len = 0;
         if (!read_zip_entry(db, e, &data, &data_len)) continue;
 
-        char out_path[1280];
-        snprintf(out_path, sizeof(out_path), "%s%c%s", py_dir, PATH_SEP, base);
+        char out_path[sizeof(py_dir) + sizeof(base_name) + 2];
+        snprintf(out_path, sizeof(out_path), "%s%c%s", py_dir, PATH_SEP, base_name);
 
         FILE *fp = fopen(out_path, "wb");
         if (fp) {
@@ -511,12 +565,14 @@ int patchdb_extract_python(const patchdb_t *db, const char *dir)
         free(data);
     }
 
+    if (!written)
+        g_error = "no Python modules could be written to the cache directory";
     return written ? written : -1;
 }
 
 const char *patchdb_cache_dir(void)
 {
-    static char dir[1024];
+    static char dir[PDB_DIR_MAX];
 
 #if defined(_WIN32)
     const char *base = getenv("LOCALAPPDATA");

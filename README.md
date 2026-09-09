@@ -22,7 +22,7 @@ core/     apollo_ctrl.[ch] — stdio-free engine facade, shared by both front-en
 gui/      Dear ImGui desktop app
 web/      WebAssembly build + static site
 tools/    build-index.py   — patch index, for both front-ends
-          make-bundle.sh   — apollo-patches.zip, for the desktop app
+          make-bundle.py   — apollo-patches.zip, for the desktop app
 ```
 
 Both front-ends let you search the ~2240 patches in

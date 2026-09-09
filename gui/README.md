@@ -87,7 +87,7 @@ cmake --build build
 [apollo-patches](https://github.com/bucanero/apollo-patches) by game name or
 title ID and loads the one you pick — the same flow as the web front-end, but
 offline. CI builds the database into `apollo-patches.zip` and ships it in the
-artifact (`tools/make-bundle.sh`).
+artifact (`tools/make-bundle.py`).
 
 Where it looks, in order: `$APOLLO_PATCHES_ZIP`, next to the executable,
 `../Resources/` (so a macOS `.app` is self-contained), then the working
