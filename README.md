@@ -39,7 +39,11 @@ next to this repository:
 ```bash
 git clone https://github.com/bucanero/apollo-lib
 git clone https://github.com/bucanero/apollo-patcher
+git clone https://github.com/bucanero/apollo-patches   # web build only
 ```
+
+The web front-end additionally embeds the patch database's `python/` helper
+modules; the desktop GUI does not need that clone.
 
 Both build systems look for it in two places: `./apollo-lib` inside this repo
 first (which is what CI produces, and where a submodule would sit), then

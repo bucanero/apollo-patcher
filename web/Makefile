@@ -24,6 +24,18 @@ APOLLO_LIB ?= $(patsubst %/include/apollo.h,%,$(firstword \
 			  $(wildcard ../apollo-lib/include/apollo.h ../../apollo-lib/include/apollo.h) \
 			  ../../apollo-lib/include/apollo.h))
 
+# Python helper modules that Python patches `import` (rijndael, umsgpack, and
+# the per-game ones). They live in the patch database, not in the library, and
+# version together with the patches that import them:
+#
+#   https://github.com/bucanero/apollo-patches  ->  python/
+#
+# Found in-tree first, then as a sibling clone, matching APOLLO_LIB above.
+# Override with PYTHON_MODULES=/path/to/python.
+PYTHON_MODULES ?= $(firstword \
+			  $(wildcard ../apollo-patches/python ../../apollo-patches/python) \
+			  ../../apollo-patches/python)
+
 LIBAPOLLO   = $(APOLLO_LIB)/build-wasm/libapollo.a
 LIBMBED     = $(APOLLO_LIB)/mbedtls-2.16.12/build-wasm/library/libmbedcrypto.a
 
@@ -51,22 +63,31 @@ CFLAGS      = -O3 -Wall \
 #   the browser/node bootstrap paths are dead weight.
 # -sINVOKE_RUN=0: there is no main(); we only call exported functions.
 # --embed-file: Python codes `import` helper modules from sys.path. With no host
-#   callback libapollo looks in "python" relative to the FS root, so the
-#   library's tools/python lands at /python. Embedded rather than preloaded to
+#   callback libapollo looks in "python" relative to the FS root, so the patch
+#   repository's python/ lands at /python. Embedded rather than preloaded to
 #   keep dist/ a fixed set of files (no .data sidecar to fetch).
 LDFLAGS     = -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=worker \
 			  -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4MB -sINVOKE_RUN=0 \
 			  -sEXPORTED_RUNTIME_METHODS='["FS","UTF8ToString","stringToNewUTF8","HEAPU8"]' \
 			  -sEXPORTED_FUNCTIONS='["_malloc","_free","_apw_version","_apw_open","_apw_close","_apw_codes_json","_apw_code_text","_apw_set_option","_apw_apply","_apw_reset_vars"]' \
-			  --embed-file $(APOLLO_LIB)/tools/python@/python
+			  --embed-file $(PYTHON_MODULES)@/python
 
 .PHONY: all serve clean
 
 all: $(MODULE) static
 
-$(MODULE): $(SRCS) $(LIBAPOLLO) $(LIBMBED) Makefile | $(DIST)
+$(MODULE): $(SRCS) $(LIBAPOLLO) $(LIBMBED) $(PYTHON_MODULES) Makefile | $(DIST)
 	$(CC) $(CFLAGS) $(SRCS) $(LIBAPOLLO) $(LIBMBED) $(LDFLAGS) -o $@
 	@echo "built $@"
+
+# Named as a prerequisite above, so a missing checkout stops here with this
+# message instead of failing deep inside emcc's file_packager.
+$(PYTHON_MODULES):
+	@echo "missing $@ — the Python helper modules Python patches import."
+	@echo "clone the patch database next to this repo:"
+	@echo "    git clone https://github.com/bucanero/apollo-patches"
+	@echo "or pass PYTHON_MODULES=/path/to/python"
+	@exit 2
 
 $(LIBAPOLLO) $(LIBMBED):
 	@echo "missing $@"

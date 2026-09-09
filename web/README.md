@@ -21,7 +21,9 @@ dist/               build output — exactly what gets published
 ## Building
 
 Requires the [Emscripten SDK](https://emscripten.org/docs/getting_started/) on
-`PATH` and a wasm build of libapollo in the apollo-lib checkout:
+`PATH`, a clone of [apollo-patches](https://github.com/bucanero/apollo-patches)
+(its `python/` directory gets embedded — see below), and a wasm build of
+libapollo in the apollo-lib checkout:
 
 ```bash
 cd ../../apollo-lib             # or ../apollo-lib for an in-tree checkout
@@ -32,8 +34,9 @@ make          # -> dist/
 make serve    # build, then serve dist/ on http://localhost:8000
 ```
 
-The checkout is found the same way `CMakeLists.txt` finds it — in-tree first,
-then a sibling clone. Override with `make APOLLO_LIB=/path/to/apollo-lib`.
+Both checkouts are found the same way `CMakeLists.txt` finds apollo-lib —
+in-tree first, then a sibling clone. Override with
+`make APOLLO_LIB=/path/to/apollo-lib PYTHON_MODULES=/path/to/python`.
 
 ## How it fits together
 
@@ -54,9 +57,12 @@ previous runs.
 
 - **`-sSTACK_SIZE=4MB`** — Emscripten's 64KB default is *below* MicroPython's
   own 40KB stack limit, so Python codes fail immediately without it.
-- **`--embed-file tools/python@/python`** — Python codes `import` helper modules
-  from `sys.path`. With no host callback the engine looks in `python` relative
-  to the filesystem root, so the library's `tools/python` is embedded there.
+- **`--embed-file <patches>/python@/python`** — Python codes `import` helper
+  modules (`rijndael`, `umsgpack`, and per-game ones). With no host callback the
+  engine looks in `python` relative to the filesystem root, so the patch
+  database's `python/` is embedded there. Those modules live in
+  [apollo-patches](https://github.com/bucanero/apollo-patches), not in the
+  library, because they version together with the patches that import them.
 - **Interactive `{TAG}` options** start unset (the engine loads them as `-1`,
   meaning "not chosen"), so `Apply` stays blocked until every option group on a
   ticked code has a value — the same rule the desktop GUI enforces. Defaulting
