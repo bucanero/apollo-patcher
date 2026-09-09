@@ -1,0 +1,75 @@
+name: Deploy web front-end
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer push supersedes an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  # The apollo-lib ref to build against. The web front-end needs that repo's
+  # WebAssembly support (Makefile.wasm and the __wasm__ branch in
+  # include/mpconfigport.h), which lives on its `wasm` branch until it merges.
+  # Set this back to `main` once it does.
+  APOLLO_LIB_REF: wasm
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout apollo-lib
+        uses: actions/checkout@v4
+        with:
+          repository: bucanero/apollo-lib
+          ref: ${{ env.APOLLO_LIB_REF }}
+          path: apollo-lib
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: emsdk-cache
+
+      - name: Fetch mbedTLS sources
+        working-directory: apollo-lib
+        run: |
+          curl -sL https://src.fedoraproject.org/repo/pkgs/mbedtls/mbedtls-2.16.12.tar.gz/sha512/8d96d8cd906cc0999134320e4e1f550631426d166eab5da6e65469ee7286093810fcc6ac4bd5500ee55972d159f8bef7f9e53245f7f0eec72f72c35265b4313b/mbedtls-2.16.12.tar.gz | tar xz -C ./
+
+      # The library ships its own wasm build (Makefile.wasm), so the site links
+      # the same archive the library's CI gates with its test suite.
+      - name: Build libapollo for wasm
+        working-directory: apollo-lib
+        run: |
+          make -f Makefile.wasm mbedtls
+          make -f Makefile.wasm
+
+      - name: Build the site
+        working-directory: web
+        run: make APOLLO_LIB=../apollo-lib
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

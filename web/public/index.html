@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apollo Patcher</title>
+<meta name="description" content="Apply Apollo save patches in your browser. Files never leave your device.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>&#127918;</text></svg>">
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>Apollo Patcher</h1>
+  <p class="tagline">
+    Applies Apollo save patches to your save files. Everything runs in this tab —
+    <strong>nothing is uploaded</strong>.
+  </p>
+</header>
+
+<main>
+  <section class="pickers">
+    <div class="drop" id="drop-patch" tabindex="0" role="button" aria-label="Choose a patch file">
+      <span class="drop-kicker">Patch file</span>
+      <span class="drop-main" id="patch-name">Drop a <code>.savepatch</code> here</span>
+      <span class="drop-hint">or click to browse</span>
+      <input type="file" id="file-patch" accept=".savepatch,text/plain" hidden>
+    </div>
+
+    <div class="drop" id="drop-save" tabindex="0" role="button" aria-label="Choose a save data file">
+      <span class="drop-kicker">Save data</span>
+      <span class="drop-main" id="save-name">Drop your decrypted save here</span>
+      <span class="drop-hint">or click to browse</span>
+      <input type="file" id="file-save" hidden>
+    </div>
+  </section>
+
+  <section id="workspace" hidden>
+    <div class="gamebar">
+      <h2 id="game-name"></h2>
+      <span class="count" id="code-count"></span>
+    </div>
+
+    <div class="toolbar">
+      <input type="search" id="filter" placeholder="Filter codes…" aria-label="Filter codes">
+      <button type="button" id="select-default" class="ghost">Reset selection</button>
+      <button type="button" id="select-none" class="ghost">Clear</button>
+      <label class="endian" title="PS3 saves store data big-endian">
+        <input type="checkbox" id="big-endian"> Big-endian data
+      </label>
+      <button type="button" id="apply" class="primary" disabled>Apply</button>
+    </div>
+
+    <p class="warn" id="needs-options" hidden></p>
+
+    <ol id="codes" class="codes"></ol>
+  </section>
+
+  <section id="result" hidden>
+    <div class="result-inner">
+      <div>
+        <strong id="result-title"></strong>
+        <p id="result-detail"></p>
+      </div>
+      <button type="button" id="download" class="primary">Download patched save</button>
+    </div>
+  </section>
+
+  <details id="log-panel">
+    <summary>Engine log <span class="count" id="log-count"></span></summary>
+    <pre id="log" aria-live="polite"></pre>
+  </details>
+
+  <section id="intro">
+    <h3>What this is</h3>
+    <p>
+      A browser front-end for the
+      <a href="https://github.com/bucanero/apollo-lib">Apollo save-patch engine</a> —
+      the same C library the console apps and the desktop GUI use, compiled to
+      WebAssembly. It reads a <code>.savepatch</code> file, shows you the codes
+      it contains, and applies the ones you pick to your save data.
+    </p>
+    <h3>What you need</h3>
+    <p>
+      A <strong>decrypted</strong> save file. This tool patches save data; it
+      cannot decrypt or re-sign console saves — use the Apollo app on the
+      console itself for that. Patch files for most games live in the
+      <a href="https://github.com/bucanero/apollo-patches">apollo-patches</a>
+      repository.
+    </p>
+    <h3>Privacy</h3>
+    <p>
+      Your files are read locally and patched in memory inside this page. There
+      is no server, no upload and no telemetry.
+    </p>
+  </section>
+</main>
+
+<dialog id="code-dialog">
+  <header>
+    <strong id="dialog-title"></strong>
+    <button type="button" id="dialog-close" aria-label="Close">&times;</button>
+  </header>
+  <pre id="dialog-body"></pre>
+</dialog>
+
+<footer>
+  <span id="version"></span>
+  <a href="https://github.com/bucanero/apollo-patcher">Source</a>
+</footer>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

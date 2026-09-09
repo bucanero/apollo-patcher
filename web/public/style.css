@@ -1,0 +1,354 @@
+/* Apollo Patcher — web front-end styles. Light and dark, no dependencies. */
+
+:root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --panel-2: #f0f2f5;
+    --ink: #16191d;
+    --ink-dim: #5b636e;
+    --line: #dce0e6;
+    --accent: #2f6fdd;
+    --accent-ink: #ffffff;
+    --good: #1c7c4a;
+    --bad: #b3261e;
+    --radius: 10px;
+    color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #14171b;
+        --panel: #1c2027;
+        --panel-2: #23282f;
+        --ink: #e8eaed;
+        --ink-dim: #9aa3ae;
+        --line: #313841;
+        --accent: #6098f0;
+        --accent-ink: #10131a;
+        --good: #58c98b;
+        --bad: #f2837c;
+        color-scheme: dark;
+    }
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+main { max-width: 900px; margin: 0 auto; padding: 0 20px 64px; }
+
+/* --- header ------------------------------------------------------------- */
+
+.topbar {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 36px 20px 24px;
+}
+
+.topbar h1 { margin: 0; font-size: 26px; letter-spacing: -0.02em; }
+
+.tagline { margin: 6px 0 0; color: var(--ink-dim); max-width: 60ch; }
+
+/* --- file pickers ------------------------------------------------------- */
+
+.pickers {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+}
+
+@media (max-width: 640px) {
+    .pickers { grid-template-columns: 1fr; }
+}
+
+.drop {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 20px;
+    background: var(--panel);
+    border: 1.5px dashed var(--line);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: border-color .12s, background .12s;
+}
+
+.drop:hover, .drop:focus-visible { border-color: var(--accent); outline: none; }
+.drop.over { border-color: var(--accent); background: var(--panel-2); }
+.drop.filled { border-style: solid; }
+
+.drop-kicker {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--ink-dim);
+}
+
+.drop-main { font-weight: 550; word-break: break-all; }
+.drop-hint { font-size: 13px; color: var(--ink-dim); }
+
+/* --- game bar + toolbar -------------------------------------------------- */
+
+.gamebar {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin: 30px 0 12px;
+}
+
+.gamebar h2 { margin: 0; font-size: 19px; }
+
+.count { color: var(--ink-dim); font-size: 13px; font-weight: 400; }
+
+.toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    padding-bottom: 12px;
+}
+
+.toolbar input[type=search] {
+    flex: 1 1 180px;
+    min-width: 0;
+    padding: 7px 10px;
+    background: var(--panel);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    font: inherit;
+}
+
+.endian {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--ink-dim);
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+button {
+    font: inherit;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    padding: 7px 13px;
+    cursor: pointer;
+    background: var(--panel);
+    color: var(--ink);
+}
+
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+
+button.primary {
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-color: transparent;
+    font-weight: 550;
+}
+
+button.ghost { background: transparent; color: var(--ink-dim); }
+button.small { padding: 3px 8px; font-size: 12px; }
+
+/* --- code list ---------------------------------------------------------- */
+
+.codes {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.code { border-top: 1px solid var(--line); }
+.code:first-child { border-top: none; }
+
+.code-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 12px;
+}
+
+.code.child .code-row { padding-left: 34px; }
+.code.group { background: var(--panel-2); }
+.code.group .code-name { font-weight: 600; }
+.code.disabled .code-name { color: var(--ink-dim); text-decoration: line-through; }
+
+.code-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+.spacer { width: 13px; }
+
+.badge {
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 20px;
+    background: var(--panel-2);
+    color: var(--ink-dim);
+    border: 1px solid var(--line);
+    white-space: nowrap;
+}
+
+.code.group .badge { background: var(--panel); }
+
+.marker {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 50%;
+    background: var(--panel-2);
+    color: var(--ink-dim);
+    border: 1px solid var(--line);
+}
+
+.option {
+    padding: 0 12px 9px 34px;
+    font-size: 13px;
+    color: var(--ink-dim);
+}
+
+.option label { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.option select {
+    padding: 4px 8px;
+    background: var(--panel);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font: inherit;
+    max-width: 100%;
+}
+
+/* --- result ------------------------------------------------------------- */
+
+#result { margin-top: 16px; }
+
+.result-inner {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    padding: 14px 16px;
+    background: var(--panel);
+    border: 1px solid var(--good);
+    border-radius: var(--radius);
+}
+
+#result.bad .result-inner { border-color: var(--bad); }
+#result-title { color: var(--good); }
+#result.bad #result-title { color: var(--bad); }
+#result-detail { margin: 3px 0 0; color: var(--ink-dim); font-size: 13px; }
+
+/* --- log ---------------------------------------------------------------- */
+
+#log-panel {
+    margin-top: 20px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+#log-panel summary {
+    padding: 10px 14px;
+    cursor: pointer;
+    font-size: 14px;
+    user-select: none;
+}
+
+#log {
+    margin: 0;
+    padding: 12px 14px;
+    max-height: 320px;
+    overflow: auto;
+    background: var(--panel-2);
+    border-top: 1px solid var(--line);
+    font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* --- intro / footer ----------------------------------------------------- */
+
+#intro { margin-top: 34px; color: var(--ink-dim); }
+#intro h3 { margin: 22px 0 4px; font-size: 14px; color: var(--ink); }
+#intro p { margin: 0; max-width: 66ch; }
+
+a { color: var(--accent); }
+
+footer {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px;
+    display: flex;
+    gap: 14px;
+    justify-content: space-between;
+    color: var(--ink-dim);
+    font-size: 13px;
+    border-top: 1px solid var(--line);
+}
+
+/* --- dialog ------------------------------------------------------------- */
+
+#code-dialog {
+    width: min(760px, 92vw);
+    padding: 0;
+    background: var(--panel);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+}
+
+#code-dialog::backdrop { background: rgb(0 0 0 / .5); }
+
+#code-dialog header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+}
+
+#dialog-close {
+    border: none;
+    background: transparent;
+    font-size: 20px;
+    line-height: 1;
+    color: var(--ink-dim);
+    padding: 0 4px;
+}
+
+#dialog-body {
+    margin: 0;
+    padding: 14px;
+    max-height: 64vh;
+    overflow: auto;
+    font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+}
+
+/* An option group on a ticked code that still has no value chosen. Apply stays
+   blocked until every one of these is answered (see app.js). */
+.option select.unfilled {
+    border-color: var(--bad);
+    color: var(--bad);
+}
+
+.warn {
+    margin: 0 0 12px;
+    color: var(--bad);
+    font-size: 13px;
+}

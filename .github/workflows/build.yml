@@ -1,0 +1,150 @@
+name: Build desktop GUI
+
+on:
+  push:
+  pull_request:
+  repository_dispatch:
+    types: [run_build]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # The engine lives in apollo-lib; this repo only holds the front-ends.
+    # Checked out as a sibling directory, which is what CMakeLists.txt expects
+    # by default (APOLLO_ROOT).
+    - name: Checkout apollo-lib
+      uses: actions/checkout@v4
+      with:
+        repository: bucanero/apollo-lib
+        path: apollo-lib
+
+    - name: Install Ubuntu requirements
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        echo "Linux requirements"
+        sudo apt-get update
+        # zlib + GUI build deps: GLFW needs X11/GL headers. File dialogs use
+        # portable-file-dialogs (zenity at runtime — not a build dependency).
+        sudo apt-get -y install zlib1g-dev libgl1-mesa-dev xorg-dev
+
+    - name: Install macOS requirements
+      if: matrix.os == 'macos-latest'
+      run: |
+        echo "macOS requirements"
+        # GLFW uses Cocoa; file dialogs use osascript. Both ship with the OS. Nothing to install.
+
+    - name: Install mbedTLS
+      working-directory: apollo-lib
+      run: |
+        curl -fsSL https://src.fedoraproject.org/repo/pkgs/mbedtls/mbedtls-2.16.12.tar.gz/sha512/8d96d8cd906cc0999134320e4e1f550631426d166eab5da6e65469ee7286093810fcc6ac4bd5500ee55972d159f8bef7f9e53245f7f0eec72f72c35265b4313b/mbedtls-2.16.12.tar.gz | tar xvz -C ./
+        cd mbedtls-2.16.12
+        mkdir build
+        # macOS needs Universal2 mbedTLS archives and a macOS 11.0 floor; Linux
+        # keeps the existing native CMake configuration.
+        if [ "${{ matrix.os }}" = "macos-latest" ]; then
+          cmake -S . -B build \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$(xcrun --find clang)" \
+            -DCMAKE_OSX_SYSROOT="$(xcrun --sdk macosx --show-sdk-path)" \
+            -DCMAKE_OSX_ARCHITECTURES='x86_64;arm64' \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DUSE_STATIC_MBEDTLS_LIBRARY=ON \
+            -DUSE_SHARED_MBEDTLS_LIBRARY=OFF \
+            -DENABLE_PROGRAMS=OFF \
+            -DENABLE_TESTING=OFF
+        else
+          cmake -S . -B build -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        fi
+        cmake --build build --target mbedcrypto --parallel
+
+    - name: Build Apollo Patcher GUI
+      run: |
+        # Keep the CMake configuration aligned with Universal2 mbedTLS and the
+        # same macOS 11.0 deployment baseline.
+        if [ "${{ matrix.os }}" = "macos-latest" ]; then
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$(xcrun --find clang)" \
+            -DCMAKE_CXX_COMPILER="$(xcrun --find clang++)" \
+            -DCMAKE_OSX_SYSROOT="$(xcrun --sdk macosx --show-sdk-path)" \
+            -DCMAKE_OSX_ARCHITECTURES='x86_64;arm64' \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+        else
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        fi
+        cmake --build build -j
+        # Normalise the output path across OSes for the upload step.
+        mkdir -p dist
+        if [ "${{ matrix.os }}" = "macos-latest" ]; then
+          cp -R build/gui/apollo_patcher_gui.app dist/
+        else
+          cp build/gui/apollo_patcher_gui dist/
+        fi
+
+    # Sanity-check the facade against the engine on every build: it lists the
+    # codes of a real patch file exactly like the library's own CLI does.
+    - name: Run headless facade test
+      run: ./build/apollo_ctrl_test apollo-lib/tests/fixtures/BLUS30490.savepatch | head -5
+
+    # CMakeLists.txt does not set a deployment target. Use macOS 11.0, the first
+    # Apple Silicon release, as one baseline for both slices. Fail before upload
+    # if a shipped executable or link input loses a CPU slice, or if a
+    # distributable executable raises that baseline.
+    - name: Verify macOS Universal2 and deployment targets
+      if: matrix.os == 'macos-latest'
+      run: |
+        chmod 755 dist/apollo_patcher_gui.app/Contents/MacOS/apollo_patcher_gui
+
+        verify_universal() {
+          local file="$1"
+          test -f "$file"
+          lipo "$file" -verify_arch x86_64 arm64
+          lipo "$file" -info
+        }
+
+        assert_minos_11() {
+          local file="$1"
+          local arch
+          for arch in x86_64 arm64; do
+            # Modern and legacy Mach-O load commands use different fields for
+            # the minimum macOS version.
+            if ! otool -arch "$arch" -l "$file" | awk '
+              $1 == "cmd" && $2 == "LC_BUILD_VERSION" { build=1; legacy=0; next }
+              $1 == "cmd" && $2 == "LC_VERSION_MIN_MACOSX" { legacy=1; build=0; next }
+              $1 == "Load" && $2 == "command" { build=0; legacy=0 }
+              build && $1 == "minos" && $2 == "11.0" { found=1 }
+              legacy && $1 == "version" && $2 == "11.0" { found=1 }
+              END { exit(found ? 0 : 1) }
+            '; then
+              echo "${file} ${arch} does not declare macOS minimum 11.0"
+              otool -arch "$arch" -l "$file"
+              exit 1
+            fi
+          done
+        }
+
+        # Keep this inventory in sync when macOS artifacts or link inputs change.
+        # New shipped executables also need an assert_minos_11 check below.
+        verify_universal apollo-lib/mbedtls-2.16.12/build/library/libmbedcrypto.a
+        verify_universal dist/apollo_patcher_gui.app/Contents/MacOS/apollo_patcher_gui
+        verify_universal build/libapollo_engine.a
+        verify_universal build/gui/libimgui.a
+        verify_universal build/_deps/glfw-build/src/libglfw3.a
+        assert_minos_11 dist/apollo_patcher_gui.app/Contents/MacOS/apollo_patcher_gui
+
+    - name: Get short SHA
+      run: echo "sha_name=$(echo ${GITHUB_SHA} | cut -c1-8)" >> $GITHUB_ENV
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: apollo-gui-${{ env.sha_name }}-${{matrix.os}}
+        path: dist
+        if-no-files-found: error
