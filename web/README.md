@@ -11,7 +11,7 @@ Published to GitHub Pages from `main` (see `.github/workflows/pages.yml`).
 
 ```
 src/apollo_wasm.c    Emscripten binding over core/apollo_ctrl.[ch]
-tools/build-index.py generates the browsable patch index at build time
+../tools/            build-index.py generates the browsable patch index
 public/index.html    the page
 public/app.js        UI: state + DOM, no framework
 public/worker.js     owns the wasm module, runs every engine call
@@ -79,7 +79,7 @@ title ID and fetch the one they pick.
 
 The split between build time and run time is deliberate:
 
-- **The index is built in.** `tools/build-index.py` reads the second line of
+- **The index is built in.** `../tools/build-index.py` reads the second line of
   every patch file (where the game name lives) and writes `dist/patches.json` —
   2240 rows, 24KB gzipped, fetched the first time the dialog opens. Reading
   2200 files is trivial here and impossible from a browser, and the GitHub API
@@ -93,6 +93,9 @@ The split between build time and run time is deliberate:
 The consequence to keep in mind: a patch added upstream is not listed until this
 site is rebuilt. A listed patch that has since been renamed 404s, which the
 dialog reports while pointing at the drop zone as the fallback.
+
+The same script builds the desktop app's index (as TSV, inside
+`apollo-patches.zip`), so the parsing quirks below are handled once for both.
 
 Two details in `build-index.py` that came from the real data: 245 patch files
 are Windows-1252 rather than UTF-8 (game names with ™ / ®), so a strict decode

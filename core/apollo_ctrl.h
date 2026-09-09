@@ -79,6 +79,17 @@ const char  *apctl_opt_value_name(const apctl_code_t *c, int group, int idx);
 int          apctl_opt_get_selected(const apctl_code_t *c, int group);
 void         apctl_opt_set_selected(apctl_code_t *c, int group, int idx);
 
+/* ---- Host data path ---- */
+/* Directory libapollo resolves host paths against, WITH a trailing separator:
+ * it builds the MicroPython import path as this + "python". Without it, the
+ * engine looks for "python" relative to the process's working directory, so a
+ * Python code that imports a helper module only works when the app happens to
+ * be launched from the right place.
+ *
+ * Pass NULL or "" to restore that default. */
+void        apctl_set_data_path(const char *dir);
+const char *apctl_get_data_path(void);
+
 /* ---- Data endianness ---- */
 /* Select the byte order the engine uses for save DATA (the CLI's -b/-l flags).
  * Non-zero selects big-endian (PS3/PPU saves), zero returns to the host's

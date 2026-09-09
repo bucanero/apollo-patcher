@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Build the patch-database index the web front-end browses.
+Build the patch-database index that both front-ends browse.
 
 The database (bucanero/apollo-patches) is ~2200 .savepatch files whose game
-name lives on the second line. Reading 2200 files is fine at build time and
-impossible from a browser, so the index is generated here and shipped in dist/;
-the page then fetches individual patches from a CDN on demand.
+name lives on the second line. Reading them all is fine at build time and
+unreasonable at run time, so the index is generated here.
 
-    build-index.py <apollo-patches-dir> <output.json>
+    build-index.py <apollo-patches-dir> <output> [--format json|tsv]
 
-Output is a compact, deterministically ordered document:
+    json  for the web front-end, fetched by the page (default):
+          {"generated": "...", "source": "...", "counts": {"PS3": 1799, ...},
+           "patches": [["PS3", "BLUS30490", "3D Dot Game Heroes"], ...]}
+          Rows are arrays rather than objects purely for size — it saves ~40%
+          on a file every visitor who opens the browser downloads.
 
-    {"generated": "...", "source": "...", "counts": {"PS3": 1799, ...},
-     "patches": [["PS3", "BLUS30490", "3D Dot Game Heroes"], ...]}
-
-Rows are arrays rather than objects purely for size: it saves ~40% on a file
-every visitor who opens the browser downloads.
+    tsv   for the desktop GUI, stored inside apollo-patches.zip as index.tsv:
+          platform<TAB>title_id<TAB>name, one per line, after a "#" header.
+          A line-oriented format so the GUI needs no JSON parser.
 """
 import json
 import os
@@ -62,11 +63,41 @@ def read_game_name(path):
     return name or None
 
 
-def main(argv):
-    if len(argv) != 3:
-        sys.exit(f"usage: {os.path.basename(argv[0])} <apollo-patches-dir> <output.json>")
+def write_json(fh, doc):
+    json.dump(doc, fh, ensure_ascii=False, separators=(",", ":"))
+    fh.write("\n")
 
-    root, out_path = argv[1], argv[2]
+
+def write_tsv(fh, doc):
+    fh.write(f"# apollo-patches index\t{doc['generated']}\t{len(doc['patches'])}\n")
+    for platform, title_id, name in doc["patches"]:
+        # Tabs and newlines would break the format; neither occurs in the real
+        # data, but a patch author could introduce one.
+        clean = name.replace("\t", " ").replace("\r", "").replace("\n", " ")
+        fh.write(f"{platform}\t{title_id}\t{clean}\n")
+
+
+FORMATS = {"json": write_json, "tsv": write_tsv}
+
+
+def main(argv):
+    args = [a for a in argv[1:] if not a.startswith("--")]
+    flags = [a for a in argv[1:] if a.startswith("--")]
+
+    fmt = "json"
+    for flag in flags:
+        if flag.startswith("--format="):
+            fmt = flag.split("=", 1)[1]
+        else:
+            sys.exit(f"unknown option: {flag}")
+    if fmt not in FORMATS:
+        sys.exit(f"unknown format: {fmt} (want one of {', '.join(FORMATS)})")
+
+    if len(args) != 2:
+        sys.exit(f"usage: {os.path.basename(argv[0])} "
+                 f"<apollo-patches-dir> <output> [--format=json|tsv]")
+
+    root, out_path = args
     if not os.path.isdir(root):
         sys.exit(f"not a directory: {root}")
 
@@ -106,8 +137,7 @@ def main(argv):
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(doc, fh, ensure_ascii=False, separators=(",", ":"))
-        fh.write("\n")
+        FORMATS[fmt](fh, doc)
 
     total = sum(counts.values())
     detail = " ".join(f"{k}:{v}" for k, v in counts.items())

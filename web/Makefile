@@ -91,8 +91,8 @@ $(MODULE): $(SRCS) $(LIBAPOLLO) $(LIBMBED) $(PYTHON_MODULES) Makefile | $(DIST)
 
 # The browsable index of the database. Reading ~2200 files is trivial here and
 # impossible from a browser, so the page fetches this instead of crawling.
-$(INDEX): tools/build-index.py $(PYTHON_MODULES) | $(DIST)
-	@python3 tools/build-index.py $(APOLLO_PATCHES) $@
+$(INDEX): ../tools/build-index.py $(PYTHON_MODULES) | $(DIST)
+	@python3 ../tools/build-index.py $(APOLLO_PATCHES) $@
 
 # Named as a prerequisite above, so a missing checkout stops here with this
 # message instead of failing deep inside emcc's file_packager.

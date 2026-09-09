@@ -26,6 +26,14 @@ jobs:
         repository: bucanero/apollo-lib
         path: apollo-lib
 
+    # The patch database the GUI browses. Bundled into the artifact rather than
+    # fetched at run time, so the desktop app works offline.
+    - name: Checkout apollo-patches
+      uses: actions/checkout@v4
+      with:
+        repository: bucanero/apollo-patches
+        path: apollo-patches
+
     - name: Install Ubuntu requirements
       if: matrix.os == 'ubuntu-latest'
       run: |
@@ -89,10 +97,21 @@ jobs:
           cp build/gui/apollo_patcher_gui dist/
         fi
 
+    - name: Bundle the patch database
+      run: |
+        ./tools/make-bundle.sh apollo-patches dist/apollo-patches.zip
+        # macOS: also inside the .app, so a dragged-out bundle is self-contained.
+        if [ "${{ matrix.os }}" = "macos-latest" ]; then
+          cp dist/apollo-patches.zip dist/apollo_patcher_gui.app/Contents/Resources/
+        fi
+
     # Sanity-check the facade against the engine on every build: it lists the
-    # codes of a real patch file exactly like the library's own CLI does.
+    # codes of a real patch file exactly like the library's own CLI does, and
+    # reads a patch back out of the bundle it just built.
     - name: Run headless facade test
-      run: ./build/apollo_ctrl_test apollo-lib/tests/fixtures/BLUS30490.savepatch | head -5
+      run: |
+        ./build/apollo_ctrl_test apollo-lib/tests/fixtures/BLUS30490.savepatch | head -5
+        APOLLO_PATCHES_ZIP=dist/apollo-patches.zip ./build/apollo_ctrl_test --db BLUS30279
 
     # CMakeLists.txt does not set a deployment target. Use macOS 11.0, the first
     # Apple Silicon release, as one baseline for both slices. Fail before upload

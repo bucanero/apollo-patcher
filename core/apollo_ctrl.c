@@ -85,6 +85,47 @@ void apctl_log_flush(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Host callback
+ *
+ * libapollo asks the host for a few values through this; the only one that
+ * matters to a desktop front-end is the data path, which is where Python codes
+ * import their helper modules from. Everything else mirrors what libapollo's
+ * own dummy callback returns, so behaviour is unchanged when no path is set.
+ * ------------------------------------------------------------------------- */
+static char g_data_path[1024] = "";
+
+void apctl_set_data_path(const char *dir)
+{
+    if (dir && *dir)
+        snprintf(g_data_path, sizeof(g_data_path), "%s", dir);
+    else
+        g_data_path[0] = '\0';
+}
+
+const char *apctl_get_data_path(void) { return g_data_path; }
+
+static void *apctl_host_cb(int info, uint32_t *size)
+{
+    switch (info) {
+    case APOLLO_HOST_TEMP_PATH:
+    case APOLLO_HOST_DATA_PATH:
+        if (size) *size = (uint32_t)strlen(g_data_path);
+        return g_data_path;
+
+    case APOLLO_HOST_USERNAME:
+    case APOLLO_HOST_SYS_NAME:
+    case APOLLO_HOST_LAN_ADDR:
+    case APOLLO_HOST_WLAN_ADDR:
+    case APOLLO_HOST_ACCOUNT_ID:
+        if (size) *size = 6;
+        return (void *)"APOLLO";
+    }
+
+    if (size) *size = 1;
+    return (void *)"";
+}
+
+/* ---------------------------------------------------------------------------
  * Session
  * ------------------------------------------------------------------------- */
 struct apctl_session {
@@ -247,7 +288,12 @@ int apctl_apply(apctl_session_t *s, apctl_code_t *c, const char *target_file)
     /* apollo_free_var_list() resets the engine to the host's byte order, and it
      * can run between codes, so re-assert the mode on every apply. */
     apollo_set_endianness(g_big_endian ? APOLLO_DATA_MODE_BIG : APOLLO_DATA_MODE_DEFAULT);
-    int ok = apollo_apply_code(target, c->raw, NULL) ? 1 : 0;
+
+    /* Only take over the host callback once a data path is set, so an
+     * embedder that never calls apctl_set_data_path() keeps libapollo's own
+     * defaults exactly. */
+    int ok = apollo_apply_code(target, c->raw,
+                               g_data_path[0] ? apctl_host_cb : NULL) ? 1 : 0;
 
     /* A Python script's final print() need not end in a newline; emit whatever
      * is still buffered so the caller sees the code's complete output. */
