@@ -483,3 +483,76 @@ footer {
     color: var(--ink-dim);
     font-size: 12px;
 }
+
+/* --- vendored hex editor (hexedit.js) ------------------------------------
+   It ships a self-contained dark stylesheet, injected into <head> at runtime —
+   after this file, so these overrides carry a `.hx-bg` prefix to win on
+   specificity rather than forking the vendored CSS. Mapping its palette onto
+   our tokens is what makes it follow light/dark with the rest of the page. */
+
+.hx-bg .hx-modal {
+    background: var(--panel);
+    border-color: var(--line);
+    color: var(--ink);
+}
+
+.hx-bg .hx-head,
+.hx-bg .hx-foot { border-color: var(--line); }
+
+.hx-bg .hx-head .hx-sub,
+.hx-bg .hx-off,
+.hx-bg .hx-bar .hx-lbl,
+.hx-bg .hx-note { color: var(--ink-dim); }
+
+.hx-bg .hx-badge {
+    background: var(--panel-2);
+    border-color: var(--line);
+    color: var(--ink-dim);
+}
+
+/* "unsaved edits" — the one place a warning colour is the point */
+.hx-bg .hx-badge.hx-dirtybadge {
+    background: transparent;
+    border-color: var(--bad);
+    color: var(--bad);
+}
+
+.hx-bg .hx-view,
+.hx-bg .hx-goto {
+    background: var(--panel-2);
+    border-color: var(--line);
+    color: var(--ink);
+}
+
+.hx-bg .hx-ascii,
+.hx-bg .hx-a { color: var(--ink-dim); }
+
+.hx-bg .hx-b:hover,
+.hx-bg .hx-a:hover { background: var(--line); }
+
+.hx-bg .hx-b.hx-d,
+.hx-bg .hx-a.hx-d { color: var(--bad); }
+
+.hx-bg .hx-cell {
+    background: var(--panel);
+    color: var(--ink);
+    border-color: var(--accent);
+}
+
+.hx-bg .hx-modal button {
+    background: var(--panel);
+    border-color: var(--line);
+    color: var(--ink);
+}
+
+.hx-bg .hx-modal button:hover { background: var(--panel-2); border-color: var(--accent); }
+
+.hx-bg .hx-modal button.hx-primary {
+    background: var(--accent);
+    border-color: transparent;
+    color: var(--accent-ink);
+}
+
+.hx-bg .hx-modal button.hx-primary:hover { background: var(--accent); }
+
+.result-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

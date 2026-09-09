@@ -126,6 +126,49 @@ static void *apctl_host_cb(int info, uint32_t *size)
 }
 
 /* ---------------------------------------------------------------------------
+ * Platform guess (see apctl_title_is_big_endian)
+ *
+ * The PS3 title-ID prefixes, taken from the platform directories of
+ * bucanero/apollo-patches. No prefix there is shared with PS2, PS4, PSP or PS
+ * Vita, so a four-letter match is unambiguous. PSP's NPJH/NPUH are close to
+ * PS3's NPJA/NPJB/NPJD/NPUA/NPUB, which is why the whole four letters matter.
+ * ------------------------------------------------------------------------- */
+static const char *const PS3_PREFIXES[] = {
+    "BCAS", "BCES", "BCJS", "BCUS", "BLAS", "BLES", "BLET", "BLJM", "BLJS",
+    "BLKS", "BLUS", "CPCS", "GUST", "MRTC", "NPEA", "NPEB", "NPEJ", "NPEL",
+    "NPHB", "NPJA", "NPJB", "NPJD", "NPUA", "NPUB",
+};
+
+static int is_upper(char c) { return c >= 'A' && c <= 'Z'; }
+static int is_digit(char c) { return c >= '0' && c <= '9'; }
+
+int apctl_title_is_big_endian(const char *text)
+{
+    if (!text) return 0;
+
+    /* Walk every position and test for a CCCCNNNNN token. Cheap, and it does
+     * not care whether the caller passed a bare ID, a file name or a line of
+     * patch text. */
+    for (const char *p = text; *p; p++) {
+        int shaped = 1;
+        for (int i = 0; i < 4 && shaped; i++)
+            if (!is_upper(p[i])) shaped = 0;
+        for (int i = 4; i < 9 && shaped; i++)
+            if (!is_digit(p[i])) shaped = 0;
+        if (!shaped) continue;
+
+        for (size_t i = 0; i < sizeof(PS3_PREFIXES) / sizeof(*PS3_PREFIXES); i++)
+            if (memcmp(p, PS3_PREFIXES[i], 4) == 0)
+                return 1;
+
+        /* A recognisable ID that is not PS3: little-endian, and no point
+         * scanning on. */
+        return 0;
+    }
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
  * Session
  * ------------------------------------------------------------------------- */
 struct apctl_session {

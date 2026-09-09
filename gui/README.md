@@ -11,6 +11,7 @@ engine and drives the same functions the CLI does
 
 ```
   src/main.cpp                     Dear ImGui UI (file pickers, code list, option combos, log)
+  src/imgui_memory_editor.h        hex editor, vendored from ocornut/imgui_club (MIT)
   ../core/apollo_ctrl.[ch]         stdio-free facade over libapollo — shared with the web front-end
   ../core/patchdb.[ch]             reads apollo-patches.zip (the bundled database)
   ../../apollo-lib/source/*.c      libapollo engine (unchanged)
@@ -108,6 +109,26 @@ worked if the app happened to be launched from a directory containing
 including the Windows-1252 fallback that 245 of the patch files need. Without it
 the app would have to inflate 2240 entries at startup just to read their second
 line.
+
+## Viewing and editing data
+
+- **View / edit data** (next to the target picker) opens the save file in a hex
+  editor — `src/imgui_memory_editor.h`, vendored from
+  [imgui_club](https://github.com/ocornut/imgui_club). It works on a copy held
+  in memory and writes back only when asked, so a mistyped byte costs nothing
+  until committed; a `.bak` is kept first, like the patch path does. The buffer
+  is re-read every time the window is opened, because applying codes rewrites
+  the file underneath it.
+- **View patch file** shows the `.savepatch` as text. Worth having: parsing
+  keeps only the codes, so author comments, credits, `[INFO:]` notes and the
+  target-file lines are invisible otherwise. Carriage returns are stripped for
+  display — most patches are CRLF and ImGui has no glyph for CR.
+- **Big-endian mode** is now set from the patch's title ID on load. PS3 is the
+  only big-endian platform Apollo covers, and although the engine accepts a
+  per-code `[BE:...]` header, no patch in the database uses one — so every PS3
+  patch relied on the user knowing to tick the box. The rule lives in
+  `apctl_title_is_big_endian()` so both front-ends share it. It is still a
+  checkbox, so it can be overridden.
 
 ## Features
 

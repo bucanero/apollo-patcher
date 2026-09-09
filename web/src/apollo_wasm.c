@@ -130,6 +130,14 @@ const char *apw_version(void)
     return APOLLO_LIB_VERSION;
 }
 
+/* Whether this patch's save data is big-endian, guessed from a title ID (see
+ * apctl_title_is_big_endian). Accepts a file name, a bare ID or patch text. */
+EMSCRIPTEN_KEEPALIVE
+int apw_title_is_be(const char *text)
+{
+    return apctl_title_is_big_endian(text);
+}
+
 /* Parse a .savepatch from memory. Returns 1 on success, 0 on failure. */
 EMSCRIPTEN_KEEPALIVE
 int apw_open(const char *buf, int len, const char *name)

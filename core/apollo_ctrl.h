@@ -90,6 +90,22 @@ void         apctl_opt_set_selected(apctl_code_t *c, int group, int idx);
 void        apctl_set_data_path(const char *dir);
 const char *apctl_get_data_path(void);
 
+/* ---- Platform guess ---- */
+/* Whether a patch's save data is big-endian, guessed from a title ID.
+ *
+ * PS3 is the only big-endian platform Apollo covers. The engine does accept a
+ * per-code [BE:...] / [LE:...] header (see loader.c), but no patch in the
+ * database uses one, so EVERY PS3 patch depends on the caller selecting the
+ * mode. A front-end that loads a PS3 patch should therefore turn it on rather
+ * than let someone silently patch a save with the wrong byte order.
+ *
+ * `text` may be a bare title ID, a file name ("BLUS30279.savepatch") or a
+ * patch's first line ("; BLUS30279"); the first CCCCNNNNN-shaped token in it
+ * decides. Returns 0 when nothing recognisable is found, so an unknown patch
+ * keeps the little-endian default.
+ */
+int apctl_title_is_big_endian(const char *text);
+
 /* ---- Data endianness ---- */
 /* Select the byte order the engine uses for save DATA (the CLI's -b/-l flags).
  * Non-zero selects big-endian (PS3/PPU saves), zero returns to the host's

@@ -20,6 +20,7 @@
 #include "imgui_internal.h"   // PushItemFlag + ImGuiItemFlags_MixedValue (tri-state)
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl2.h"
+#include "imgui_memory_editor.h"   // vendored from ocornut/imgui_club (MIT)
 #include <GLFW/glfw3.h>
 
 // Renderer: Dear ImGui's fixed-function OpenGL2 backend on a legacy (non-core)
@@ -54,6 +55,13 @@ struct AppState {
     std::string         patch_path;
     std::string         target_path;
     std::string         game_name;
+    std::string         patch_raw;        // the .savepatch as text (CR stripped)
+    bool                show_patch_raw = false;
+
+    std::vector<unsigned char> hex_data;   // the target file, for the hex editor
+    std::string         hex_path;          // which file hex_data came from
+    bool                show_hex = false;
+    bool                hex_dirty = false; // edits not yet written to disk
     std::vector<char>   selected;         // per-row checkbox
     std::vector<char>   viewer_open;      // per-row raw-code window open flag
     std::string         log;
@@ -77,6 +85,8 @@ struct AppState {
         viewer_open.clear();
         game_name.clear();
         patch_path.clear();
+        patch_raw.clear();
+        show_patch_raw = false;
     }
 };
 static AppState g_app;
@@ -174,6 +184,16 @@ static bool backup_file(const std::string& src) {
     return true;
 }
 
+// Most patch files use CRLF. ImGui has no glyph for a carriage return, so it
+// would draw a box per line in the raw viewer.
+static std::string strip_cr(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in)
+        if (c != '\r') out += c;
+    return out;
+}
+
 // Shared tail of both load paths (file and database): a session exists, so set
 // up the per-row UI state around it.
 static void adopt_session(apctl_session_t* session,
@@ -192,12 +212,81 @@ static void adopt_session(apctl_session_t* session,
     char buf[512];
     snprintf(buf, sizeof buf, "Loaded %d codes from %s", n, label.c_str());
     g_app.append_log(buf);
+
+    // PS3 save data is big-endian, and no patch in the database declares the
+    // order per code (the engine's [BE:...] header exists but goes unused), so
+    // pick the mode up from the title ID rather than leave the user to notice.
+    // Still a checkbox they can override afterwards.
+    if (apctl_title_is_big_endian(label.c_str())) {
+        if (!g_app.big_endian) {
+            g_app.big_endian = true;
+            g_app.append_log("PS3 title detected - big-endian data mode enabled");
+        }
+    } else if (g_app.big_endian) {
+        g_app.big_endian = false;
+        g_app.append_log("Non-PS3 title - big-endian data mode disabled");
+    }
+    apctl_set_big_endian(g_app.big_endian ? 1 : 0);
+}
+
+// Window titles get the file name; the full path goes in the body, where it
+// can wrap and be read.
+static const char* base_name(const std::string& path) {
+    size_t slash = path.find_last_of("/\\");
+    return path.c_str() + (slash == std::string::npos ? 0 : slash + 1);
+}
+
+// The hex editor works on a copy of the target file held in memory, written
+// back only when asked — so a mistyped byte costs nothing until you commit it.
+static bool hex_load(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) { g_app.append_log("[!] Could not read the target file"); return false; }
+    g_app.hex_data.assign(std::istreambuf_iterator<char>(in),
+                          std::istreambuf_iterator<char>());
+    g_app.hex_path = path;
+    g_app.hex_dirty = false;
+    char buf[512];
+    snprintf(buf, sizeof buf, "Loaded %zu bytes of %s for editing",
+             g_app.hex_data.size(), path.c_str());
+    g_app.append_log(buf);
+    return true;
+}
+
+static bool hex_write_back() {
+    if (g_app.hex_path.empty()) return false;
+
+    // Same courtesy the patch path gives: keep a .bak before overwriting.
+    if (g_app.backup && !backup_file(g_app.hex_path))
+        g_app.append_log("[!] Backup failed - writing anyway");
+
+    std::ofstream out(g_app.hex_path, std::ios::binary | std::ios::trunc);
+    if (!out) { g_app.append_log("[!] Could not write the target file"); return false; }
+    out.write(reinterpret_cast<const char*>(g_app.hex_data.data()),
+              (std::streamsize)g_app.hex_data.size());
+    if (!out) { g_app.append_log("[!] Write failed"); return false; }
+
+    g_app.hex_dirty = false;
+    char buf[512];
+    snprintf(buf, sizeof buf, "Wrote %zu bytes to %s",
+             g_app.hex_data.size(), g_app.hex_path.c_str());
+    g_app.append_log(buf);
+    return true;
 }
 
 static void load_patch(const std::string& path) {
     g_app.close();
     apctl_session_t* s = apctl_open_file(path.c_str());
     if (!s) { g_app.append_log("[!] Could not open patch file"); return; }
+
+    // Kept as text so it can be read: parsing keeps only the codes, dropping
+    // the author's comments, target-file lines and anything else the format
+    // allows.
+    std::ifstream in(path, std::ios::binary);
+    if (in) {
+        std::string raw((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+        g_app.patch_raw = strip_cr(raw);
+    }
     adopt_session(s, path, nullptr);
 }
 
@@ -287,6 +376,7 @@ static void load_patch_from_db(int index) {
     g_app.close();
     std::string label = std::string(e->platform) + "/" + e->title_id + ".savepatch";
     apctl_session_t* s = apctl_open_buffer(data, len, label.c_str());
+    g_app.patch_raw = strip_cr(std::string(data, len));
     free(data);
 
     if (!s) { g_app.append_log("[!] Could not parse that patch"); return; }
@@ -503,6 +593,77 @@ static void draw_code_list() {
 }
 
 // Modeless raw-code windows (one per code whose View button was clicked).
+// The .savepatch as text. Worth having: the parser keeps only the codes, so
+// author comments, credits and the target-file lines are invisible otherwise.
+static void draw_patch_raw() {
+    if (!g_app.show_patch_raw) return;
+
+    char title[256];
+    snprintf(title, sizeof title, "Patch file: %s##rawpatch",
+             g_app.patch_path.empty() ? "(none)" : base_name(g_app.patch_path));
+
+    bool open = true;
+    ImGui::SetNextWindowSize(ImVec2(640, 520), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin(title, &open)) {
+        ImGui::Text("%zu bytes", g_app.patch_raw.size());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Copy")) ImGui::SetClipboardText(g_app.patch_raw.c_str());
+        ImGui::Separator();
+        ImGui::BeginChild("raw", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
+        // TextUnformatted skips lines outside the clip rect, so even the
+        // largest patches in the database (~430KB) stay cheap to draw.
+        ImGui::TextUnformatted(g_app.patch_raw.c_str());
+        ImGui::EndChild();
+    }
+    ImGui::End();
+    if (!open) g_app.show_patch_raw = false;
+}
+
+// Hex view/edit of the target save file.
+static void draw_hex_editor() {
+    if (!g_app.show_hex) return;
+
+    static MemoryEditor ed;
+    static bool wired = false;
+    if (!wired) {
+        // Route writes through us so an edit marks the buffer dirty; the
+        // editor otherwise pokes the bytes silently.
+        ed.WriteFn = [](ImU8* mem, size_t off, ImU8 d, void*) {
+            mem[off] = d;
+            g_app.hex_dirty = true;
+        };
+        wired = true;
+    }
+
+    char title[512];
+    snprintf(title, sizeof title, "Save data: %s%s##hexedit",
+             base_name(g_app.hex_path), g_app.hex_dirty ? " *" : "");
+
+    bool open = true;
+    ImGui::SetNextWindowSize(ImVec2(700, 520), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin(title, &open)) {
+        ImGui::TextWrapped("%s", g_app.hex_path.c_str());
+        ImGui::Text("%zu bytes", g_app.hex_data.size());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reload from disk")) hex_load(g_app.hex_path);
+        ImGui::SameLine();
+        if (g_app.hex_dirty) {
+            if (ImGui::SmallButton("Write changes")) hex_write_back();
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "unsaved edits");
+        } else {
+            ImGui::TextDisabled("no unsaved edits");
+        }
+        ImGui::Separator();
+        if (!g_app.hex_data.empty())
+            ed.DrawContents(g_app.hex_data.data(), g_app.hex_data.size());
+        else
+            ImGui::TextDisabled("(empty file)");
+    }
+    ImGui::End();
+    if (!open) g_app.show_hex = false;
+}
+
 static void draw_code_viewers() {
     if (!g_app.session) return;
     for (int i = 0; i < apctl_code_count(g_app.session); ++i) {
@@ -662,10 +823,30 @@ static void draw_main_window(bool* want_quit) {
     ImGui::SameLine();
     ImGui::TextUnformatted(g_app.patch_path.empty() ? "(no patch loaded)" : g_app.patch_path.c_str());
 
+    if (!g_app.patch_raw.empty()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("View patch file")) g_app.show_patch_raw = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Show the .savepatch as text, including comments\n"
+                              "and target lines that parsing leaves out.");
+    }
+
     if (ImGui::Button("Choose target...")) do_choose_target();
     ImGui::SameLine();
     ImGui::TextUnformatted(g_app.target_path.empty() ? "(script uses patch's own target)"
                                                      : g_app.target_path.c_str());
+    if (!g_app.target_path.empty()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("View / edit data")) {
+            // Read fresh every time: applying codes rewrites the file, so a
+            // buffer from before would be stale.
+            if (hex_load(g_app.target_path)) g_app.show_hex = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Open the target file in a hex editor.\n"
+                              "Edits are written only when you ask.");
+    }
+
     ImGui::Checkbox("Back up target (.bak) before patching", &g_app.backup);
 
     // Data byte order — equivalent of the CLI's -b/--big-endian flag. Applied
@@ -728,6 +909,9 @@ static void draw_main_window(bool* want_quit) {
     render_db_browser();
 
     ImGui::End();
+
+    draw_patch_raw();
+    draw_hex_editor();
 }
 
 static void apply_style() {

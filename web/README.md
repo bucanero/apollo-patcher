@@ -16,6 +16,7 @@ public/index.html    the page
 public/app.js        UI: state + DOM, no framework
 public/worker.js     owns the wasm module, runs every engine call
 public/cdn.js        where the database is fetched from, shared by both
+public/hexedit.js    hex editor, vendored from bucanero/ps2vmc-tool
 public/style.css     light + dark
 dist/                build output — exactly what gets published
 ```
@@ -135,6 +136,23 @@ How it works now:
 
 The desktop GUI deliberately does the opposite and bundles everything offline —
 it is a download you keep, not one you make every visit.
+
+## Hex editor
+
+`public/hexedit.js` is vendored **unmodified** from
+[ps2vmc-tool](https://github.com/bucanero/ps2vmc-tool) (`web-ps2/hexedit.js`),
+so it can be refreshed from there. It ships its own dark stylesheet, injected
+into `<head>` at run time; rather than fork the file, `style.css` maps its
+palette onto this app's tokens with `.hx-bg`-prefixed rules — prefixed because
+the injected `<style>` lands after our stylesheet and would otherwise win.
+
+Loaded as a classic `<script>` (it is UMD, not an ES module) so it registers
+`window.HexEdit` before the deferred module runs.
+
+The loaded save is editable: committing edits replaces the bytes in memory and
+retracts any previous result, since that output was produced from the bytes as
+they were. The patched result is offered read-only — editing it would produce a
+file no patch chain accounts for, and it is one Download away.
 
 ## Scope
 

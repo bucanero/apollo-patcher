@@ -34,8 +34,15 @@
       <input type="file" id="file-save" hidden>
     </div>
 
+    <div class="find" id="save-tools" hidden>
+      <button type="button" id="view-save" class="ghost">View / edit save data&hellip;</button>
+      <span class="find-hint">Inspect the bytes, or edit them before applying codes.</span>
+    </div>
+
     <div class="find">
       <button type="button" id="open-db" class="primary">Find a game&hellip;</button>
+      <button type="button" id="view-patch" class="ghost" hidden
+              title="Show the .savepatch as text, including comments and target lines that parsing leaves out">View patch file</button>
       <span class="find-hint">
         Search the patch database by game or title ID — no download needed.
       </span>
@@ -69,7 +76,10 @@
         <strong id="result-title"></strong>
         <p id="result-detail"></p>
       </div>
-      <button type="button" id="download" class="primary">Download patched save</button>
+      <div class="result-actions">
+        <button type="button" id="view-result" class="ghost">View hex</button>
+        <button type="button" id="download" class="primary">Download patched save</button>
+      </div>
     </div>
   </section>
 
@@ -139,6 +149,7 @@
   <a href="https://github.com/bucanero/apollo-patcher">Source</a>
 </footer>
 
+<script src="./hexedit.js"></script>
 <script type="module" src="./app.js"></script>
 </body>
 </html>

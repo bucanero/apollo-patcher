@@ -22,6 +22,7 @@ const state = {
     save: null,          // ArrayBuffer of the original, unpatched save
     saveName: null,
     codes: [],
+    patchText: null,     // the .savepatch verbatim, for the raw viewer
     checked: new Set(),  // indices
     options: {},         // index -> [selected value per group]
     patched: null,       // Uint8Array of the last successful run
@@ -118,6 +119,12 @@ async function loadPatch(file, displayName) {
     $('patch-name').textContent = displayName || file.name;
     $('drop-patch').classList.add('filled');
 
+    /* Decode before the buffer is handed to the worker — posting it transfers
+     * ownership, so it is unreadable here afterwards. Parsing keeps only the
+     * codes, and the comments and target lines are often the only
+     * documentation a patch has, so keep the text for the raw viewer. */
+    state.patchText = decodePatch(buffer);
+
     clearLog();
     const res = await call('open', { buffer, name: file.name }, [buffer]);
     if (!res.ok) {
@@ -126,6 +133,8 @@ async function loadPatch(file, displayName) {
         $('workspace').hidden = true;
         state.codes = [];
         state.checked.clear();
+        state.patchText = null;
+        $('view-patch').hidden = true;
         clearResult();
         return;
     }
@@ -139,8 +148,19 @@ async function loadPatch(file, displayName) {
     /* Prefer the index's name when the patch came from the database: the
      * engine hands back raw bytes, and 245 patches are Windows-1252, so their
      * ™/® characters arrive mojibaked through UTF8ToString. */
+    /* Byte order follows the patch, not the previous one: a PS3 patch turns
+     * big-endian on, anything else turns it back off. Still a checkbox, so it
+     * can be overridden afterwards. */
+    const be = !!res.bigEndian;
+    if ($('big-endian').checked !== be) {
+        $('big-endian').checked = be;
+        appendLog([be ? 'PS3 title detected — big-endian data mode enabled'
+                      : 'Non-PS3 title — big-endian data mode disabled']);
+    }
+
     $('game-name').textContent = displayName || res.game.trim() || file.name;
     $('code-count').textContent = `${res.codes.length} codes`;
+    $('view-patch').hidden = false;
     $('workspace').hidden = false;
     $('intro').hidden = true;
     clearResult();
@@ -150,10 +170,70 @@ async function loadPatch(file, displayName) {
 async function loadSave(file) {
     state.save = await file.arrayBuffer();
     state.saveName = file.name;
-    $('save-name').textContent = `${file.name} · ${formatSize(state.save.byteLength)}`;
-    $('drop-save').classList.add('filled');
+    showSaveLoaded();
     clearResult();
     refreshApplyButton();
+}
+
+function showSaveLoaded() {
+    $('save-name').textContent =
+        `${state.saveName} · ${formatSize(state.save.byteLength)}`;
+    $('drop-save').classList.add('filled');
+    $('save-tools').hidden = false;
+}
+
+/* ---------------------------------------------------------------------------
+ * Hex editor
+ *
+ * HexEdit is vendored from bucanero/ps2vmc-tool (see hexedit.js) and loaded as
+ * a classic script, so it is a global rather than an import.
+ * ------------------------------------------------------------------------- */
+
+function editSaveData() {
+    if (!state.save) return;
+
+    HexEdit.open({
+        title: state.saveName,
+        subtitle: `loaded save · ${formatSize(state.save.byteLength)}`,
+        data: new Uint8Array(state.save),
+        onSave: (edited) => {
+            /* slice() so the ArrayBuffer is exactly the file, whatever view
+             * the editor hands back. */
+            state.save = edited.slice().buffer;
+            showSaveLoaded();
+            /* Any previous run patched the bytes as they were, so retract it
+             * rather than leave a download that no longer matches. */
+            clearResult();
+            appendLog([`Save data edited by hand — ${formatSize(state.save.byteLength)}`]);
+            refreshApplyButton();
+        },
+    });
+}
+
+/* The patched result, read-only: editing it would produce a file no patch
+ * chain accounts for, and it is one Download away anyway. */
+function viewResultData() {
+    if (!state.patched) return;
+    HexEdit.open({
+        title: state.saveName,
+        subtitle: `patched result · ${formatSize(state.patched.length)}`,
+        data: state.patched,
+        readOnly: true,
+    });
+}
+
+/*
+ * Patch files are mostly UTF-8, but 245 of the ~2240 in the database are
+ * Windows-1252 (game names with ™ / ®). Decoding those as UTF-8 would replace
+ * the bytes with U+FFFD, so try strict UTF-8 first and fall back — the same
+ * rule tools/build-index.py applies.
+ */
+function decodePatch(buffer) {
+    try {
+        return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+    } catch (e) {
+        return new TextDecoder('windows-1252').decode(buffer);
+    }
 }
 
 function formatSize(n) {
@@ -376,6 +456,13 @@ function refreshApplyButton() {
     else $('apply').title = '';
 }
 
+function showPatchText() {
+    if (!state.patchText) return;
+    $('dialog-title').textContent = state.patchName || 'Patch file';
+    $('dialog-body').textContent = state.patchText;
+    $('code-dialog').showModal();
+}
+
 async function showCode(index, name) {
     const { text } = await call('codeText', { index });
     $('dialog-title').textContent = name;
@@ -442,6 +529,7 @@ function showResult(good, title, detail) {
     $('result-title').textContent = title;
     $('result-detail').textContent = detail;
     $('download').hidden = !state.patched;
+    $('view-result').hidden = !state.patched;
 }
 
 function download() {
@@ -616,6 +704,9 @@ $('download').addEventListener('click', download);
 $('dialog-close').addEventListener('click', () => $('code-dialog').close());
 
 $('open-db').addEventListener('click', openDb);
+$('view-patch').addEventListener('click', showPatchText);
+$('view-save').addEventListener('click', editSaveData);
+$('view-result').addEventListener('click', viewResultData);
 $('db-close').addEventListener('click', () => $('db-dialog').close());
 $('db-search').addEventListener('input', dbRender);
 $('db-search').addEventListener('keydown', (e) => {

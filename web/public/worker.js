@@ -141,13 +141,24 @@ const handlers = {
         const doc = JSON.parse(M.UTF8ToString(M._apw_codes_json()));
         codeTypes = doc.codes.map((c) => c.type);
 
+        /* PS3 save data is big-endian, and no patch in the database declares
+         * the order per code, so the mode is guessed from the title ID (shared
+         * with the desktop GUI — see apctl_title_is_big_endian). The name usually
+         * carries it; a patch's own first lines are the fallback for a file
+         * that has been renamed. latin1 because a title ID is ASCII and the
+         * header may hold stray high bytes ('latin1' is the valid label;
+         * 'latin-1' throws). */
+        const head = new TextDecoder('latin1').decode(bytes.subarray(0, 128));
+        const bigEndian = !!(withCString(name || '', (p) => M._apw_title_is_be(p)) ||
+                             withCString(head, (p) => M._apw_title_is_be(p)));
+
         /* Start pulling the helper modules now, while the user reads the code
          * list, so Apply rarely has to wait. Failures are reported then, not
          * here — the patch may not need them at all. */
         if (codeTypes.some((t) => t === TYPE_PYTHON))
             ensureModules().catch(() => {});
 
-        return { ok: true, ...doc };
+        return { ok: true, bigEndian, ...doc };
     },
 
     async codeText({ index }) {
