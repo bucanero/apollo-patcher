@@ -1,4 +1,4 @@
-# Apollo Patcher GUI
+# Apollo Save Patcher — desktop app
 
 A cross-platform (Windows / macOS / Linux) graphical front-end for the Apollo
 save-patch engine, built on **Dear ImGui + GLFW/OpenGL3**.

@@ -1,4 +1,4 @@
-// Apollo Patcher GUI — Dear ImGui front-end over apollo_ctrl.
+// Apollo Save Patcher (desktop) — Dear ImGui front-end over apollo_ctrl.
 //
 // UI parity with the `patcher` CLI:
 //   - open a .savepatch  -> shows game name + code list (groups, flags)
@@ -36,7 +36,8 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
-#include <windows.h>   // MessageBox for visible startup errors (no console with -mwindows)
+#include <windows.h>    // MessageBox for visible startup errors (no console with -mwindows)
+#include <shellapi.h>   // ShellExecuteA for opening links; WIN32_LEAN_AND_MEAN excludes it
 #endif
 
 // Window icon (Windows/Linux only). Kept fully inside the guard so macOS pulls
@@ -227,6 +228,91 @@ static void adopt_session(apctl_session_t* session,
         g_app.append_log("Non-PS3 title - big-endian data mode disabled");
     }
     apctl_set_big_endian(g_app.big_endian ? 1 : 0);
+}
+
+// ---- about box -------------------------------------------------------------
+
+#define APP_NAME      "Apollo Save Patcher"
+#define URL_PATCHER   "https://github.com/bucanero/apollo-patcher"
+#define URL_LIB       "https://github.com/bucanero/apollo-lib"
+#define URL_PATCHES   "https://github.com/bucanero/apollo-patches"
+
+// Hand a URL to the desktop. Every caller passes a compile-time constant from
+// the list above, so there is nothing to quote-escape.
+static void open_url(const char* url) {
+#if defined(_WIN32)
+    ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
+#else
+    std::string cmd =
+#if defined(__APPLE__)
+        "open '";
+#else
+        "xdg-open '";
+#endif
+    cmd += url;
+    cmd += "' >/dev/null 2>&1 &";
+    if (system(cmd.c_str()) != 0)
+        g_app.append_log("[!] Could not open the browser - copy the link instead");
+#endif
+}
+
+// A clickable link: ImGui has no hyperlink widget, so this is a text-coloured
+// button plus a copy action, for when opening a browser is not possible (a
+// bare Linux session with no xdg-open, say).
+static void link_row(const char* label, const char* url) {
+    ImGui::Bullet();
+    ImGui::TextColored(ImVec4(0.45f, 0.65f, 1.00f, 1.0f), "%s", label);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        ImGui::SetTooltip("%s", url);
+    }
+    if (ImGui::IsItemClicked()) open_url(url);
+    ImGui::SameLine();
+    ImGui::PushID(url);
+    if (ImGui::SmallButton("copy")) ImGui::SetClipboardText(url);
+    ImGui::PopID();
+}
+
+static bool g_want_about = false;
+
+static void draw_about() {
+    if (g_want_about) { ImGui::OpenPopup("About"); g_want_about = false; }
+
+    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("About", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    ImGui::TextUnformatted(APP_NAME);
+    ImGui::TextDisabled("Apollo engine %s", APOLLO_LIB_VERSION);
+    ImGui::Spacing();
+
+    ImGui::TextWrapped("Applies Apollo save patches - Save Wizard codes, BSD "
+                       "scripts and Python scripts - to decrypted save data.");
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    ImGui::Text("Copyright (C) 2020-2026 Damian Parrino (Bucanero)");
+    ImGui::TextWrapped("Licensed under the GNU General Public License v3 or "
+                       "later. This program comes with no warranty, to the "
+                       "extent permitted by law.");
+    ImGui::Spacing();
+
+    ImGui::TextDisabled("Project");
+    link_row("apollo-patcher (this app)", URL_PATCHER);
+    link_row("apollo-lib (the engine)", URL_LIB);
+    link_row("apollo-patches (the patch database)", URL_PATCHES);
+    ImGui::Spacing();
+
+    ImGui::TextDisabled("Third-party components");
+    ImGui::BulletText("Dear ImGui and GLFW - user interface");
+    ImGui::BulletText("imgui_club memory editor - the hex view (MIT)");
+    ImGui::BulletText("portable-file-dialogs - native file pickers (WTFPL)");
+    ImGui::BulletText("mbedTLS and zlib - crypto and compression");
+    ImGui::BulletText("MicroPython - runs the Python patch scripts");
+    ImGui::Spacing();
+
+    if (ImGui::Button("Close", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
 }
 
 // Window titles get the file name; the full path goes in the body, where it
@@ -795,8 +881,10 @@ static void draw_menu_bar(bool* want_quit) {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Help")) {
-            ImGui::MenuItem("Apollo Patcher GUI", nullptr, false, false);
             ImGui::MenuItem("Legend: SW=Save Wizard  BSD  PY=Python", nullptr, false, false);
+            ImGui::Separator();
+            if (ImGui::MenuItem("Project on GitHub")) open_url(URL_PATCHER);
+            if (ImGui::MenuItem("About " APP_NAME "...")) g_want_about = true;
             ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
@@ -807,7 +895,7 @@ static void draw_main_window(bool* want_quit) {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
-    ImGui::Begin("Apollo Patcher", nullptr,
+    ImGui::Begin("Apollo Save Patcher", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_MenuBar);
 
@@ -907,6 +995,7 @@ static void draw_main_window(bool* want_quit) {
     }
 
     render_db_browser();
+    draw_about();
 
     ImGui::End();
 
@@ -954,7 +1043,7 @@ static void glfw_error_cb(int code, const char* desc) {
 }
 static void fatal(const std::string& msg) {
 #ifdef _WIN32
-    MessageBoxA(nullptr, msg.c_str(), "Apollo Patcher — startup error", MB_ICONERROR | MB_OK);
+    MessageBoxA(nullptr, msg.c_str(), "Apollo Save Patcher — startup error", MB_ICONERROR | MB_OK);
 #else
     fprintf(stderr, "%s\n", msg.c_str());
 #endif
@@ -976,7 +1065,7 @@ int main(int, char**) {
     if (!glfwInit()) { fatal("Failed to initialize GLFW.\n\n" + g_glfw_error); return 1; }
     // No context hints: GLFW's default legacy/compatibility context is what the
     // fixed-function opengl2 backend needs, on every platform.
-    GLFWwindow* window = glfwCreateWindow(860, 820, "Apollo Patcher", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(860, 820, "Apollo Save Patcher", nullptr, nullptr);
     if (!window) {
         fatal("Could not create an OpenGL context.\n\n"
               "This machine's graphics driver may not support OpenGL — this is "

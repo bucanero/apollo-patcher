@@ -1,4 +1,4 @@
-# Apollo Patcher — web front-end
+# Apollo Save Patcher — web front-end
 
 The Apollo engine compiled to WebAssembly, with a small static site around it.
 Everything runs in the browser tab: the page reads your files locally, patches

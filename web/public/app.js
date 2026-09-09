@@ -1,5 +1,5 @@
 /*
- * UI for the Apollo Patcher web front-end.
+ * UI for the Apollo Save Patcher web front-end.
  *
  * No framework and no build step: the page is served exactly as it sits in
  * dist/. All engine work happens in worker.js; this file is only state + DOM.

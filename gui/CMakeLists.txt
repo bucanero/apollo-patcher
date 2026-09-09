@@ -67,6 +67,6 @@ if(APPLE)
         MACOSX_PACKAGE_LOCATION Resources)
     set_target_properties(apollo_patcher_gui PROPERTIES
         MACOSX_BUNDLE TRUE
-        MACOSX_BUNDLE_BUNDLE_NAME "Apollo Patcher"
+        MACOSX_BUNDLE_BUNDLE_NAME "Apollo Save Patcher"
         MACOSX_BUNDLE_ICON_FILE icon.icns)
 endif()

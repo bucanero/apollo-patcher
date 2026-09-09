@@ -1,4 +1,4 @@
-# Apollo Patcher
+# Apollo Save Patcher
 
 Desktop and web front-ends for the [Apollo save-patch engine](https://github.com/bucanero/apollo-lib).
 
