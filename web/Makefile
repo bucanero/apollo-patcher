@@ -28,9 +28,12 @@ APOLLO_LIB ?= $(patsubst %/include/apollo.h,%,$(firstword \
 # come from it:
 #
 #   python/       helper modules Python patches `import` (rijndael, umsgpack,
-#                 and per-game ones) — embedded into the wasm module. They live
-#                 here rather than in the library because they version together
-#                 with the patches that import them.
+#                 and per-game ones). Only their NAMES are built in
+#                 (dist/python-modules.json); the modules themselves are
+#                 fetched from a CDN the first time a patch needs one. They
+#                 used to be embedded, which cost every visitor 133KB gzipped
+#                 for something 1.6% of patches use, and froze them at build
+#                 time while the patches importing them were fetched live.
 #   PS3/ PS4/ ... the ~2200 .savepatch files themselves, which the page lets
 #                 users browse. Only an INDEX is built in (dist/patches.json);
 #                 the patches are fetched from a CDN at runtime, so a patch fix
@@ -50,6 +53,7 @@ LIBMBED     = $(APOLLO_LIB)/mbedtls-2.16.12/build-wasm/library/libmbedcrypto.a
 DIST        = dist
 MODULE      = $(DIST)/apollo.mjs
 INDEX       = $(DIST)/patches.json
+MODLIST     = $(DIST)/python-modules.json
 
 SRCS        = src/apollo_wasm.c ../core/apollo_ctrl.c
 STATIC      = $(wildcard public/*)
@@ -71,21 +75,21 @@ CFLAGS      = -O3 -Wall \
 # -sENVIRONMENT=worker: this module only ever runs inside the Web Worker, so
 #   the browser/node bootstrap paths are dead weight.
 # -sINVOKE_RUN=0: there is no main(); we only call exported functions.
-# --embed-file: Python codes `import` helper modules from sys.path. With no host
-#   callback libapollo looks in "python" relative to the FS root, so the patch
-#   repository's python/ lands at /python. Embedded rather than preloaded to
-#   keep dist/ a fixed set of files (no .data sidecar to fetch).
+#
+# Note there is no --embed-file: the worker writes the Python helper modules
+# into /python at run time (see public/worker.js). libapollo resolves imports
+# against "python" relative to the FS root when no host callback is set, and
+# MicroPython's import stat()s real paths, so files written after startup work.
 LDFLAGS     = -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=worker \
 			  -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4MB -sINVOKE_RUN=0 \
 			  -sEXPORTED_RUNTIME_METHODS='["FS","UTF8ToString","stringToNewUTF8","HEAPU8"]' \
-			  -sEXPORTED_FUNCTIONS='["_malloc","_free","_apw_version","_apw_open","_apw_close","_apw_codes_json","_apw_code_text","_apw_set_option","_apw_apply","_apw_reset_vars"]' \
-			  --embed-file $(PYTHON_MODULES)@/python
+			  -sEXPORTED_FUNCTIONS='["_malloc","_free","_apw_version","_apw_open","_apw_close","_apw_codes_json","_apw_code_text","_apw_set_option","_apw_apply","_apw_reset_vars"]'
 
 .PHONY: all serve clean
 
-all: $(MODULE) $(INDEX) static
+all: $(MODULE) $(INDEX) $(MODLIST) static
 
-$(MODULE): $(SRCS) $(LIBAPOLLO) $(LIBMBED) $(PYTHON_MODULES) Makefile | $(DIST)
+$(MODULE): $(SRCS) $(LIBAPOLLO) $(LIBMBED) Makefile | $(DIST)
 	$(CC) $(CFLAGS) $(SRCS) $(LIBAPOLLO) $(LIBMBED) $(LDFLAGS) -o $@
 	@echo "built $@"
 
@@ -93,6 +97,11 @@ $(MODULE): $(SRCS) $(LIBAPOLLO) $(LIBMBED) $(PYTHON_MODULES) Makefile | $(DIST)
 # impossible from a browser, so the page fetches this instead of crawling.
 $(INDEX): ../tools/build-index.py $(PYTHON_MODULES) | $(DIST)
 	@python3 ../tools/build-index.py $(APOLLO_PATCHES) $@
+
+# Just the helper-module names, so the worker knows what to fetch without
+# crawling a directory listing. 300 bytes.
+$(MODLIST): ../tools/build-index.py $(PYTHON_MODULES) | $(DIST)
+	@python3 ../tools/build-index.py $(APOLLO_PATCHES) $@ --format=modules
 
 # Named as a prerequisite above, so a missing checkout stops here with this
 # message instead of failing deep inside emcc's file_packager.

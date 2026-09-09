@@ -17,6 +17,13 @@ unreasonable at run time, so the index is generated here.
     tsv   for the desktop GUI, stored inside apollo-patches.zip as index.tsv:
           platform<TAB>title_id<TAB>name, one per line, after a "#" header.
           A line-oriented format so the GUI needs no JSON parser.
+
+    modules  the names of the Python helper modules, for the web front-end:
+          {"generated": "...", "modules": ["berseria.py", ...]}
+          The page fetches these from a CDN on demand rather than carrying
+          them in the wasm module, so it needs to know what to ask for. Tiny
+          and separate from the patch index, which is 100x bigger and only
+          loaded when someone opens the browser.
 """
 import json
 import os
@@ -68,6 +75,12 @@ def write_json(fh, doc):
     fh.write("\n")
 
 
+def write_modules(fh, doc):
+    json.dump({"generated": doc["generated"], "modules": doc["modules"]},
+              fh, ensure_ascii=False, separators=(",", ":"))
+    fh.write("\n")
+
+
 def write_tsv(fh, doc):
     fh.write(f"# apollo-patches index\t{doc['generated']}\t{len(doc['patches'])}\n")
     for platform, title_id, name in doc["patches"]:
@@ -77,7 +90,7 @@ def write_tsv(fh, doc):
         fh.write(f"{platform}\t{title_id}\t{clean}\n")
 
 
-FORMATS = {"json": write_json, "tsv": write_tsv}
+FORMATS = {"json": write_json, "tsv": write_tsv, "modules": write_modules}
 
 
 def main(argv):
@@ -128,21 +141,29 @@ def main(argv):
     # artifact is byte-reproducible from the same checkout.
     rows.sort(key=lambda r: (PLATFORMS.index(r[0]), r[2].lower(), r[1]))
 
+    py_dir = os.path.join(root, "python")
+    modules = sorted(e for e in os.listdir(py_dir) if e.endswith(".py")) \
+        if os.path.isdir(py_dir) else []
+
     doc = {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "source": "bucanero/apollo-patches",
         "counts": counts,
         "patches": rows,
+        "modules": modules,
     }
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as fh:
         FORMATS[fmt](fh, doc)
 
-    total = sum(counts.values())
-    detail = " ".join(f"{k}:{v}" for k, v in counts.items())
-    note = f", {skipped} without a game name" if skipped else ""
-    print(f"{out_path}: {total} patches ({detail}){note}")
+    if fmt == "modules":
+        print(f"{out_path}: {len(modules)} python modules")
+    else:
+        total = sum(counts.values())
+        detail = " ".join(f"{k}:{v}" for k, v in counts.items())
+        note = f", {skipped} without a game name" if skipped else ""
+        print(f"{out_path}: {total} patches ({detail}){note}")
 
 
 if __name__ == "__main__":

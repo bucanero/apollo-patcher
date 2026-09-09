@@ -5,6 +5,8 @@
  * dist/. All engine work happens in worker.js; this file is only state + DOM.
  */
 
+import { CDN } from './cdn.js';
+
 const TYPE = { 1: 'Save Wizard', 2: 'BSD', 3: 'Python' };
 
 /* APOLLO_CODE_FLAG_* from apollo.h — the same markers the CLI prints. */
@@ -384,7 +386,10 @@ async function apply() {
     refreshApplyButton();
 
     if (!res.ok) {
-        showResult(false, res.error || 'Apply failed', '');
+        /* Keep the headline short and put the explanation underneath, the same
+         * shape as the success case — some of these messages are a sentence or
+         * two long. */
+        showResult(false, 'Apply failed', res.error || '');
         return;
     }
 
@@ -431,7 +436,6 @@ function download() {
  * redeploy here.
  * ------------------------------------------------------------------------- */
 
-const CDN = 'https://cdn.jsdelivr.net/gh/bucanero/apollo-patches@main';
 const MAX_ROWS = 200;   /* rendering all 2200 is pointless; refine instead */
 
 const db = { rows: null, loading: null, platform: null, generated: null };

@@ -28,8 +28,10 @@ tools/    build-index.py   — patch index, for both front-ends
 Both front-ends let you search the ~2240 patches in
 [apollo-patches](https://github.com/bucanero/apollo-patches) by game name or
 title ID, so nobody has to go hunting for a `.savepatch` first. They get there
-differently: the web page fetches from a CDN, while the desktop app carries the
-whole database in a 2.8MB zip built by CI, and works offline.
+differently, on purpose: the web page fetches patches and Python helper modules
+from a CDN as it needs them, while the desktop app carries the whole database in
+a 2.8MB zip built by CI and works offline. A page is a download you make every
+visit; an app is one you keep.
 
 `core/apollo_ctrl.c` is the only code that adapts libapollo's data model for a
 UI. It replaces the CLI's three interactive pieces with callbacks and data:
