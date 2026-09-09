@@ -18,8 +18,8 @@ jobs:
     - uses: actions/checkout@v4
 
     # The engine lives in apollo-lib; this repo only holds the front-ends.
-    # Checked out as a sibling directory, which is what CMakeLists.txt expects
-    # by default (APOLLO_ROOT).
+    # `path:` is relative to $GITHUB_WORKSPACE, so this lands at ./apollo-lib
+    # inside the checkout — one of the two layouts CMakeLists.txt looks in.
     - name: Checkout apollo-lib
       uses: actions/checkout@v4
       with:
