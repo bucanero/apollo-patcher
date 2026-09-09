@@ -59,6 +59,10 @@ set(MBEDTLS_DIR "${APOLLO_ROOT}/mbedtls-2.16.12")
 # core/apollo_ctrl.c is the stdio-free controller shared by every front-end in
 # this repo (the desktop GUI and the web build). It is the only place that
 # adapts libapollo's data model for a UI; the engine sources stay untouched.
+#
+# core/patchdb.c reads the bundled patch database (apollo-patches.zip). The web
+# build does not use it — the page fetches patches over the network instead —
+# but it costs nothing to carry in the shared library.
 # ---------------------------------------------------------------------------
 set(ENGINE_SRCS
     ${APOLLO_ROOT}/source/crc_util.c
@@ -71,7 +75,7 @@ set(ENGINE_SRCS
     ${APOLLO_ROOT}/source/wildcard.c
     ${APOLLO_ROOT}/source/upy.c)
 
-add_library(apollo_engine STATIC ${ENGINE_SRCS} core/apollo_ctrl.c)
+add_library(apollo_engine STATIC ${ENGINE_SRCS} core/apollo_ctrl.c core/patchdb.c)
 target_include_directories(apollo_engine PUBLIC
     ${APOLLO_ROOT}/include
     ${APOLLO_ROOT}/tools          # provides dbglogger.h prototype

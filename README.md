@@ -8,8 +8,8 @@ drive the same `libapollo` engine the console apps use.
 
 | Front-end | What it is |
 |-----------|------------|
-| [`gui/`](gui/README.md) | Native desktop app (Dear ImGui + GLFW) for Windows, macOS and Linux |
-| [`web/`](web/README.md) | The engine compiled to WebAssembly, running in a browser tab |
+| [`gui/`](gui/README.md) | Native desktop app (Dear ImGui + GLFW) for Windows, macOS and Linux — with the patch database bundled offline |
+| [`web/`](web/README.md) | The engine compiled to WebAssembly, running in a browser tab — with the patch database searchable in-page |
 
 The command-line tools (`patcher`, `dumper`) and the engine itself live in
 [apollo-lib](https://github.com/bucanero/apollo-lib).
@@ -18,9 +18,20 @@ The command-line tools (`patcher`, `dumper`) and the engine itself live in
 
 ```
 core/     apollo_ctrl.[ch] — stdio-free engine facade, shared by both front-ends
+          patchdb.[ch]     — reads the bundled patch database (apollo-patches.zip)
 gui/      Dear ImGui desktop app
 web/      WebAssembly build + static site
+tools/    build-index.py   — patch index, for both front-ends
+          make-bundle.py   — apollo-patches.zip, for the desktop app
 ```
+
+Both front-ends let you search the ~2240 patches in
+[apollo-patches](https://github.com/bucanero/apollo-patches) by game name or
+title ID, so nobody has to go hunting for a `.savepatch` first. They get there
+differently, on purpose: the web page fetches patches and Python helper modules
+from a CDN as it needs them, while the desktop app carries the whole database in
+a 2.8MB zip built by CI and works offline. A page is a download you make every
+visit; an app is one you keep.
 
 `core/apollo_ctrl.c` is the only code that adapts libapollo's data model for a
 UI. It replaces the CLI's three interactive pieces with callbacks and data:
@@ -42,8 +53,10 @@ git clone https://github.com/bucanero/apollo-patcher
 git clone https://github.com/bucanero/apollo-patches   # web build only
 ```
 
-The web front-end additionally embeds the patch database's `python/` helper
-modules; the desktop GUI does not need that clone.
+Both front-ends need that third clone: the web build embeds the patch
+database's `python/` helper modules, and the desktop build bundles the whole
+database. Neither is required to *compile* — only to produce a release with a
+searchable database.
 
 Both build systems look for it in two places: `./apollo-lib` inside this repo
 first (which is what CI produces, and where a submodule would sit), then

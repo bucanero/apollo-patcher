@@ -10,8 +10,10 @@
  * reply carries `log`, the engine output produced during that call.
  */
 import createApollo from './apollo.mjs';
+import { CDN } from './cdn.js';
 
 const WORKDIR = '/work';
+const PYDIR   = '/python';
 let M = null;
 
 async function ready() {
@@ -32,6 +34,61 @@ function drainLog() {
     const lines = globalThis.apolloLog || [];
     globalThis.apolloLog = [];
     return lines;
+}
+
+/*
+ * Python helper modules.
+ *
+ * Python patches `import` these (rijndael, umsgpack, per-game decrypters).
+ * They used to be baked into the wasm module with --embed-file, which cost
+ * every visitor 133KB gzipped — 31% of the download — for something 35 of 2240
+ * patches use, and froze them at build time while the patches that import them
+ * are fetched live. Now they are fetched too, and written into the in-memory
+ * filesystem; MicroPython's import does stat()/open() and does not care that
+ * the files arrived after startup.
+ *
+ * Fetched as a set rather than per import, because the modules import each
+ * other (umsgpack pulls in datetime) — resolving that from the outside would
+ * break the first time someone adds an import upstream. The cost of that
+ * simplification is small: 51 patches contain Python at all, and only 16 of
+ * those import nothing but built-ins, so the set is rarely fetched in vain.
+ */
+let modulesReady = null;
+
+async function fetchModules() {
+    /* The list is generated at build time, so nothing has to crawl a
+     * directory listing. 300 bytes, and only ever requested when a patch
+     * actually contains Python. */
+    const listed = await fetch('./python-modules.json');
+    if (!listed.ok) throw new Error(`module list unavailable (${listed.status})`);
+    const { modules } = await listed.json();
+
+    /* Fetch everything before writing anything: a partial set on disk would
+     * surface as a bare ImportError from inside a patch, which looks like a
+     * broken patch rather than a failed download. */
+    const fetched = await Promise.all(modules.map(async (name) => {
+        const res = await fetch(`${CDN}/python/${name}`);
+        if (!res.ok) throw new Error(`${name} (${res.status})`);
+        return [name, new Uint8Array(await res.arrayBuffer())];
+    }));
+
+    try {
+        M.FS.mkdir(PYDIR);
+    } catch (e) {
+        /* already there */
+    }
+    for (const [name, bytes] of fetched) M.FS.writeFile(`${PYDIR}/${name}`, bytes);
+    return fetched.length;
+}
+
+function ensureModules() {
+    if (!modulesReady) {
+        modulesReady = fetchModules().catch((err) => {
+            modulesReady = null;      /* let the next attempt retry */
+            throw err;
+        });
+    }
+    return modulesReady;
 }
 
 function withCString(str, fn) {
@@ -60,6 +117,9 @@ function workPath(name) {
     return `${WORKDIR}/${safe}`;
 }
 
+const TYPE_PYTHON = 3;    /* APOLLO_CODE_PYTHON */
+let codeTypes = [];       /* per-row type from the last open() */
+
 const handlers = {
     async version() {
         await ready();
@@ -73,9 +133,21 @@ const handlers = {
         const ok = withBytes(bytes, (ptr, len) =>
             withCString(name || 'patch.savepatch', (np) => M._apw_open(ptr, len, np)),
         );
-        if (!ok) return { ok: false, error: 'Could not parse this patch file.' };
+        if (!ok) {
+            codeTypes = [];
+            return { ok: false, error: 'Could not parse this patch file.' };
+        }
 
-        return { ok: true, ...JSON.parse(M.UTF8ToString(M._apw_codes_json())) };
+        const doc = JSON.parse(M.UTF8ToString(M._apw_codes_json()));
+        codeTypes = doc.codes.map((c) => c.type);
+
+        /* Start pulling the helper modules now, while the user reads the code
+         * list, so Apply rarely has to wait. Failures are reported then, not
+         * here — the patch may not need them at all. */
+        if (codeTypes.some((t) => t === TYPE_PYTHON))
+            ensureModules().catch(() => {});
+
+        return { ok: true, ...doc };
     },
 
     async codeText({ index }) {
@@ -93,6 +165,23 @@ const handlers = {
      */
     async apply({ indices, options, save, saveName, bigEndian }) {
         await ready();
+
+        /* Only the codes actually being applied matter: a patch can hold a
+         * Python code the user did not tick. */
+        if (indices.some((i) => codeTypes[i] === TYPE_PYTHON)) {
+            globalThis.apolloLog ||= [];
+            globalThis.apolloLog.push('Loading Python helper modules...');
+            try {
+                await ensureModules();
+            } catch (err) {
+                return {
+                    ok: false,
+                    error: `Could not load the Python helper modules (${err.message}). ` +
+                           'These codes need them; check your connection and try again.',
+                };
+            }
+        }
+
         const path = workPath(saveName);
         M.FS.writeFile(path, new Uint8Array(save));
 

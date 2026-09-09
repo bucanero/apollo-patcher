@@ -34,6 +34,13 @@ jobs:
           repository: bucanero/apollo-lib
           path: apollo-lib
 
+      # The patch database the GUI browses, bundled into the artifact.
+      - name: Checkout apollo-patches
+        uses: actions/checkout@v4
+        with:
+          repository: bucanero/apollo-patches
+          path: apollo-patches
+
       - name: Set up shell
         run: echo "C:\msys64\usr\bin\" >> $GITHUB_PATH
         shell: pwsh
@@ -59,6 +66,8 @@ jobs:
           cmake --build build
           mkdir -p dist
           cp build/gui/apollo_patcher_gui.exe dist/
+          py=$(command -v python3 || command -v python)
+          "$py" tools/make-bundle.py apollo-patches dist/apollo-patches.zip
 
       # Ship a self-contained Mesa software opengl32.dll in a softgl/ subfolder of
       # the GUI artifact. It's NOT loaded by default (subfolder), so the app uses
@@ -99,6 +108,13 @@ jobs:
           repository: bucanero/apollo-lib
           path: apollo-lib
 
+      # The patch database the GUI browses, bundled into the artifact.
+      - name: Checkout apollo-patches
+        uses: actions/checkout@v4
+        with:
+          repository: bucanero/apollo-patches
+          path: apollo-patches
+
       - name: Install i686 mingw cross toolchain
         run: |
           sudo apt-get update
@@ -128,6 +144,8 @@ jobs:
           mkdir -p dist
           cp build/gui/apollo_patcher_gui.exe dist/
           file dist/apollo_patcher_gui.exe
+          py=$(command -v python3 || command -v python)
+          "$py" tools/make-bundle.py apollo-patches dist/apollo-patches.zip
 
       # Same self-contained Mesa 17.2.6 software opengl32.dll, x86, under softgl/.
       - name: Bundle software OpenGL fallback (Mesa 17.2.6, x86) under softgl/

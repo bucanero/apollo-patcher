@@ -30,6 +30,7 @@
 // backend and one code path serve all platforms.
 #include "portable-file-dialogs.h"   // header-only native dialogs (osascript/zenity/Win32)
 #include "apollo_ctrl.h"   // manages its own C linkage (and apollo.h is C++-safe)
+#include "patchdb.h"       // bundled apollo-patches.zip (browsable database)
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -79,6 +80,22 @@ struct AppState {
     }
 };
 static AppState g_app;
+
+// ---- bundled patch database ------------------------------------------------
+// Read straight out of apollo-patches.zip shipped next to the app (or inside
+// the .app bundle). Mirrors what the web front-end offers, minus the network.
+struct PatchDb {
+    patchdb_t*               db = nullptr;
+    std::string              error;            // why it is unavailable, if so
+    std::vector<std::string> platforms;        // "All", then those present
+    std::vector<std::string> haystack;         // lowercased "name titleid"
+    std::vector<int>         hits;             // indices into the database
+    char                     search[128] = "";
+    int                      platform = 0;     // index into platforms
+    bool                     refilter = true;
+    bool                     want_open = false;    // raise the modal next frame
+};
+static PatchDb g_db;
 
 static void log_sink(void* ud, const char* line) {
     static_cast<AppState*>(ud)->append_log(line);
@@ -157,20 +174,126 @@ static bool backup_file(const std::string& src) {
     return true;
 }
 
+// Shared tail of both load paths (file and database): a session exists, so set
+// up the per-row UI state around it.
+static void adopt_session(apctl_session_t* session,
+                          const std::string& label,
+                          const char* display_name) {
+    g_app.session = session;
+    g_app.patch_path = label;
+    g_app.game_name = display_name && *display_name ? display_name
+                                                    : apctl_game_name(session);
+    const int n = apctl_code_count(session);
+    g_app.selected.assign(n, 0);
+    g_app.viewer_open.assign(n, 0);
+    for (int i = 0; i < n; ++i)      // pre-check [DEFAULT:] codes
+        g_app.selected[i] = apctl_code_at(session, i)->activated ? 1 : 0;
+
+    char buf[512];
+    snprintf(buf, sizeof buf, "Loaded %d codes from %s", n, label.c_str());
+    g_app.append_log(buf);
+}
+
 static void load_patch(const std::string& path) {
     g_app.close();
-    g_app.session = apctl_open_file(path.c_str());
-    if (!g_app.session) { g_app.append_log("[!] Could not open patch file"); return; }
-    g_app.patch_path = path;
-    g_app.game_name = apctl_game_name(g_app.session);
-    g_app.selected.assign(apctl_code_count(g_app.session), 0);
-    g_app.viewer_open.assign(apctl_code_count(g_app.session), 0);
-    for (int i = 0; i < apctl_code_count(g_app.session); ++i)  // pre-check [DEFAULT:] codes
-        g_app.selected[i] = apctl_code_at(g_app.session, i)->activated ? 1 : 0;
+    apctl_session_t* s = apctl_open_file(path.c_str());
+    if (!s) { g_app.append_log("[!] Could not open patch file"); return; }
+    adopt_session(s, path, nullptr);
+}
+
+// ---- patch database --------------------------------------------------------
+
+static std::string lowered(const std::string& in) {
+    std::string out = in;
+    for (char& c : out)
+        if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+    return out;
+}
+
+// Opened once at startup. Also extracts the archive's Python modules to a cache
+// directory and points the engine at it: MicroPython imports go through
+// stat()/open() on real paths, so without this a Python code that imports a
+// helper module only works when the app is launched from the right directory.
+static void init_patchdb() {
+    g_db.db = patchdb_open(nullptr);
+    if (!g_db.db) {
+        g_db.error = patchdb_last_error();
+        g_app.append_log(("Patch database unavailable: " + g_db.error).c_str());
+        return;
+    }
+
+    const int n = patchdb_count(g_db.db);
+    g_db.platforms.push_back("All");
+    g_db.haystack.reserve(size_t(n));
+    for (int i = 0; i < n; ++i) {
+        const patchdb_entry_t* e = patchdb_at(g_db.db, i);
+        g_db.haystack.push_back(lowered(std::string(e->name) + " " + e->title_id));
+        // Platforms in database order, deduplicated — no fixed list to keep in
+        // sync when the database gains one.
+        bool seen = false;
+        for (size_t p = 1; p < g_db.platforms.size(); ++p)
+            if (g_db.platforms[p] == e->platform) { seen = true; break; }
+        if (!seen) g_db.platforms.push_back(e->platform);
+    }
+
     char buf[512];
-    snprintf(buf, sizeof buf, "Loaded %d codes from %s",
-             apctl_code_count(g_app.session), path.c_str());
+    snprintf(buf, sizeof buf, "Patch database: %d patches from %s",
+             n, patchdb_path(g_db.db));
     g_app.append_log(buf);
+
+    if (const char* cache = patchdb_cache_dir()) {
+        int written = patchdb_extract_python(g_db.db, cache);
+        if (written > 0) {
+            apctl_set_data_path(cache);
+            snprintf(buf, sizeof buf, "Python modules ready (%d) in %spython",
+                     written, cache);
+            g_app.append_log(buf);
+        } else {
+            g_app.append_log("[!] Could not unpack the Python modules; Python "
+                             "codes that import one will fail.");
+        }
+    }
+}
+
+static void refilter_db() {
+    g_db.hits.clear();
+    if (!g_db.db) return;
+
+    const std::string needle = lowered(g_db.search);
+    const char* platform = g_db.platform > 0 ? g_db.platforms[size_t(g_db.platform)].c_str()
+                                             : nullptr;
+
+    for (int i = 0; i < patchdb_count(g_db.db); ++i) {
+        const patchdb_entry_t* e = patchdb_at(g_db.db, i);
+        if (platform && strcmp(e->platform, platform) != 0) continue;
+        if (!needle.empty() && g_db.haystack[size_t(i)].find(needle) == std::string::npos)
+            continue;
+        g_db.hits.push_back(i);
+    }
+    g_db.refilter = false;
+}
+
+static void load_patch_from_db(int index) {
+    const patchdb_entry_t* e = patchdb_at(g_db.db, index);
+    if (!e) return;
+
+    char*  data = nullptr;
+    size_t len  = 0;
+    if (!patchdb_read(g_db.db, index, &data, &len)) {
+        g_app.append_log("[!] Could not read that patch out of the database");
+        return;
+    }
+
+    g_app.close();
+    std::string label = std::string(e->platform) + "/" + e->title_id + ".savepatch";
+    apctl_session_t* s = apctl_open_buffer(data, len, label.c_str());
+    free(data);
+
+    if (!s) { g_app.append_log("[!] Could not parse that patch"); return; }
+
+    // The index's name is preferred: it was decoded at build time, where the
+    // 245 Windows-1252 patch files (game names with (TM)/(R)) are handled.
+    adopt_session(s, label, e->name);
 }
 
 static void apply_selected() {
@@ -402,9 +525,108 @@ static void draw_code_viewers() {
     }
 }
 
+// The database browser. 2200+ rows, so the list is clipped rather than emitted
+// in full every frame.
+static void render_db_browser() {
+    if (g_db.want_open) {
+        g_db.want_open = false;
+        g_db.refilter = true;
+        ImGui::OpenPopup("Patch database");
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(620, 520), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Patch database", nullptr,
+                                ImGuiWindowFlags_NoSavedSettings))
+        return;
+
+    if (!g_db.db) {
+        ImGui::TextWrapped("No patch database found: %s", g_db.error.c_str());
+        ImGui::Spacing();
+        ImGui::TextWrapped("Put apollo-patches.zip next to the application, or set "
+                           "APOLLO_PATCHES_ZIP to its path, then restart. Opening a "
+                           ".savepatch file by hand still works without it.");
+        ImGui::Spacing();
+        if (ImGui::Button("Close", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+    if (ImGui::InputTextWithHint("##dbsearch", "Game name or title ID...",
+                                 g_db.search, sizeof(g_db.search)))
+        g_db.refilter = true;
+
+    for (size_t p = 0; p < g_db.platforms.size(); ++p) {
+        if (p) ImGui::SameLine();
+        if (ImGui::RadioButton(g_db.platforms[p].c_str(), g_db.platform == int(p))) {
+            g_db.platform = int(p);
+            g_db.refilter = true;
+        }
+    }
+
+    if (g_db.refilter) refilter_db();
+
+    ImGui::Separator();
+
+    int chosen = -1;
+    const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetTextLineHeightWithSpacing();
+
+    // A table, not hand-placed columns: game names run to 60+ characters, and
+    // manual right-alignment made the longest ones collide with the title ID.
+    // Columns clip instead, and the same clipper keeps 2200 rows cheap.
+    const ImGuiTableFlags flags = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg;
+    if (ImGui::BeginTable("##dbrows", 3, flags, ImVec2(0, -footer))) {
+        ImGui::TableSetupColumn("Game", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("##plat", ImGuiTableColumnFlags_WidthFixed,
+                                ImGui::CalcTextSize("PSV ").x);
+        ImGui::TableSetupColumn("##id", ImGuiTableColumnFlags_WidthFixed,
+                                ImGui::CalcTextSize("NPUB31842 ").x);
+
+        ImGuiListClipper clipper;
+        clipper.Begin(int(g_db.hits.size()));
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                const int index = g_db.hits[size_t(row)];
+                const patchdb_entry_t* e = patchdb_at(g_db.db, index);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::PushID(index);
+                if (ImGui::Selectable(e->name, false, ImGuiSelectableFlags_SpanAllColumns))
+                    chosen = index;
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextDisabled("%s", e->platform);
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextDisabled("%s", e->title_id);
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::Text("%d match%s", int(g_db.hits.size()), g_db.hits.size() == 1 ? "" : "es");
+    ImGui::SameLine();
+    ImGui::TextDisabled("of %d", patchdb_count(g_db.db));
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - 110.0f);
+    if (ImGui::Button("Close", ImVec2(110, 0))) ImGui::CloseCurrentPopup();
+
+    // Enter takes the top hit, matching the web front-end.
+    if (chosen < 0 && !g_db.hits.empty() && ImGui::IsKeyPressed(ImGuiKey_Enter, false))
+        chosen = g_db.hits.front();
+
+    if (chosen >= 0) {
+        load_patch_from_db(chosen);
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+}
+
 static void draw_menu_bar(bool* want_quit) {
     if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("Find a game...", "Ctrl+F")) g_db.want_open = true;
             if (ImGui::MenuItem("Open .savepatch...", "Ctrl+O")) do_open_patch();
             if (ImGui::MenuItem("Choose target file...")) do_choose_target();
             ImGui::Separator();
@@ -431,6 +653,11 @@ static void draw_main_window(bool* want_quit) {
     draw_menu_bar(want_quit);
 
     // --- file rows ---
+    if (ImGui::Button("Find a game...")) g_db.want_open = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Search the bundled patch database (%d patches).",
+                          patchdb_count(g_db.db));
+    ImGui::SameLine();
     if (ImGui::Button("Open .savepatch...")) do_open_patch();
     ImGui::SameLine();
     ImGui::TextUnformatted(g_app.patch_path.empty() ? "(no patch loaded)" : g_app.patch_path.c_str());
@@ -498,6 +725,8 @@ static void draw_main_window(bool* want_quit) {
         ImGui::EndPopup();
     }
 
+    render_db_browser();
+
     ImGui::End();
 }
 
@@ -549,6 +778,7 @@ static void fatal(const std::string& msg) {
 
 int main(int, char**) {
     apctl_set_log_sink(log_sink, &g_app);
+    init_patchdb();
 
 #ifdef _WIN32
     // The app ships a Mesa software opengl32.dll in a "softgl" subfolder. If the
@@ -599,6 +829,7 @@ int main(int, char**) {
 
         // keyboard shortcuts
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_O, false)) do_open_patch();
+        if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_F, false)) g_db.want_open = true;
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_Q, false)) want_quit = true;
 
         draw_main_window(&want_quit);
