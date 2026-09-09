@@ -35,6 +35,14 @@ jobs:
           ref: ${{ env.APOLLO_LIB_REF }}
           path: apollo-lib
 
+      # The Python helper modules that Python patches import live in the patch
+      # database, not in the library, and get embedded into the wasm module.
+      - name: Checkout apollo-patches
+        uses: actions/checkout@v4
+        with:
+          repository: bucanero/apollo-patches
+          path: apollo-patches
+
       - name: Set up Emscripten
         uses: mymindstorm/setup-emsdk@v14
         with:
@@ -54,7 +62,8 @@ jobs:
           make -f Makefile.wasm mbedtls
           make -f Makefile.wasm
 
-      # web/Makefile finds the in-tree apollo-lib checkout on its own.
+      # web/Makefile finds the in-tree apollo-lib and apollo-patches checkouts
+      # on its own.
       - name: Build the site
         working-directory: web
         run: make

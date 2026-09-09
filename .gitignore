@@ -58,5 +58,6 @@ dkms.conf
 build/
 dist/
 
-# apollo-lib is a separate repository; CI checks it out here
+# separate repositories; CI checks them out here
 /apollo-lib/
+/apollo-patches/
