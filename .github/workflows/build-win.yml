@@ -60,7 +60,7 @@ jobs:
           CC=gcc make static
           cp libmbedcrypto.a ../build/library
 
-      - name: Build Apollo Save Patcher (desktop)
+      - name: Build Apollo Save Patcher (Desktop)
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build

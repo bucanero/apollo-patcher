@@ -74,7 +74,7 @@ jobs:
         fi
         cmake --build build --target mbedcrypto --parallel
 
-    - name: Build Apollo Save Patcher (desktop)
+    - name: Build Apollo Save Patcher (Desktop)
       run: |
         # Keep the CMake configuration aligned with Universal2 mbedTLS and the
         # same macOS 11.0 deployment baseline.
