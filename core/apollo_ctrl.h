@@ -100,13 +100,14 @@ int apctl_set_code_text(apctl_code_t *c, const char *text);
  * or _PYTHON. Returns 1 on success, 0 for an unknown type.
  *
  * The type is what apollo_apply_code() switches on, so this decides which
- * interpreter runs the body. The loader guesses it from the `[...]` header and
- * the shape of the body -- Save Wizard only when EVERY line is exactly
- * "XXXXXXXX YYYYYYYY", otherwise BSD -- so a patch with one mistyped line, or
- * a Python script whose author forgot the [PYTHON:] header, arrives as the
- * wrong kind and cannot work until this is corrected. It is also the other
- * half of editing a body: rewriting Save Wizard lines as BSD commands only
- * means something if the type follows.
+ * interpreter runs the body. The loader takes it from the `[...]` header when
+ * one of "[SW:", "[BSD:" or "[PYTHON:" states it, and otherwise from the shape
+ * of the body -- Save Wizard only when EVERY line is exactly
+ * "XXXXXXXX YYYYYYYY" -- so a patch with one mistyped line, or a Python script
+ * whose author forgot the header, arrives as the wrong kind and cannot work
+ * until this is corrected. It is also the other half of editing a body:
+ * rewriting Save Wizard lines as BSD commands only means something if the type
+ * follows. apctl_export_patch() can write the choice back out.
  *
  * Options and {TAG} substitution work the same way in all three, so switching
  * type does not disturb them.
@@ -119,6 +120,44 @@ int apctl_code_is_edited(const apctl_code_t *c);
 
 /* Put the patch file's own body AND type back. No-op on an unedited code. */
 void apctl_revert_code(apctl_code_t *c);
+
+/* ---- Saving an edited patch ---- */
+/*
+ * Rebuild the .savepatch text with this session's edits spliced in. `original`
+ * / `original_len` are the file's bytes exactly as they were loaded -- the
+ * caller has to keep them, since the engine's parse both mutates and discards
+ * its input, and they are NOT assumed to be NUL-terminated: a patch read off
+ * disk or out of the zip is not. Returns a malloc'd,
+ * NUL-terminated buffer the caller frees, with `*out_len` set to its length
+ * (which is the length to write: the text may hold high bytes, 245 of the
+ * database's files being Windows-1252, and must not be re-encoded).
+ *
+ * The original is copied through verbatim and only edited codes are rewritten,
+ * because the parse is lossy by design: it keeps codes and drops comments,
+ * credits, `:file` lines and {TAG} option blocks. Regenerating a file from the
+ * parsed model would hand the user back less than they opened.
+ *
+ * Line endings follow the file's own convention. Comments inside an edited
+ * code survive; the lines the code was made of are what gets replaced.
+ */
+char *apctl_export_patch(apctl_session_t *s, const char *original, size_t original_len,
+                         size_t *out_len);
+
+/*
+ * How many codes would read back differently if `exported` were loaded again,
+ * writing up to `max` of their row indices into `rows`. Returns -1 if the text
+ * could not be parsed at all.
+ *
+ * This is not paranoia: the format cannot express every state the editor
+ * allows. Each of the three types has a title prefix ("[SW:...]", "[BSD:...]",
+ * "[PYTHON:...]"), but only ONE prefix is read per title -- so a code already
+ * marked "[DEFAULT:...]" or "[INFO:...]" has no room left to state a type, and
+ * neither has a group header. Rather than guess which cases those are, this
+ * re-parses the exported text and compares, so a front-end can name exactly
+ * which edits its file will not carry.
+ */
+int apctl_export_mismatches(apctl_session_t *s, const char *exported, size_t len,
+                            int *rows, int max);
 
 /* ---- Interactive options (dropdowns) ---- */
 int          apctl_opt_group_count(const apctl_code_t *c);

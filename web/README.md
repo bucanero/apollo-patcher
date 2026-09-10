@@ -170,9 +170,9 @@ unedited patch.
 **Runs as** picks the interpreter (Save Wizard / BSD / Python) and applies at
 once rather than waiting for *Save changes*: the type and the text are separate
 things, and a wrongly-typed code often has nothing to type. It matters more
-than it sounds — the loader infers the type from the `[...]` header and the
-shape of the body, so a single mistyped line makes a Save Wizard code parse as
-BSD and fail, with no way to correct it from here until now.
+than it sounds — without a `[SW:…]` / `[BSD:…]` / `[PYTHON:…]` prefix the type
+comes from the shape of the body, so a single mistyped line makes a Save Wizard
+code parse as BSD and fail, with no way to correct it from here until now.
 
 Switching a code *to* Python has to tell the worker, because the Python helper
 modules are fetched on demand and that decision is made from the parsed types
@@ -189,6 +189,26 @@ The one trap worth the extra code: an option's value is written OVER its
 `{TAG}`, in place and at the tag's own length (`apply_tag_opts`), so a tag that
 has been retyped or deleted stops resolving and its dropdown quietly does
 nothing. The dialog watches for that while you type.
+
+## Saving the patch
+
+**Save patch file** downloads the `.savepatch` with the session's edits in it.
+The engine rebuilds it from the original bytes, splicing in only the edited
+codes, so everything the parse drops — comments, credits, `:file` lines, option
+blocks — survives. The bytes never become a JS string on the way out: 245 of
+the database's patches are Windows-1252, and decoding plus re-encoding would
+corrupt the ™/® in their names, so the worker copies the range straight out of
+the wasm heap into the Blob.
+
+A forced type is written into the title as `[SW:…]`, `[BSD:…]` or
+`[PYTHON:…]`, but only when the body alone would be read as something else —
+stating what the body already implies would add noise, and would display wrong
+on console engines older than those prefixes.
+
+Then it re-parses what it built and reports the codes that would read back
+differently, which the page passes on in the log. One case remains: a title
+carries a single marker, so a code already flagged `[DEFAULT:...]` or
+`[INFO:...]` has no room to state a type.
 
 ## Byte order
 

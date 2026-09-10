@@ -378,6 +378,375 @@ void apctl_revert_code(apctl_code_t *c)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * Exporting an edited patch
+ *
+ * The engine's parse is lossy on purpose -- it keeps codes and drops comments,
+ * credits, `:file` lines and the {TAG} option blocks -- so writing a patch
+ * from the parsed model would hand the user back a poorer file than they
+ * opened. Instead the ORIGINAL text is copied through verbatim and only the
+ * edited codes' bodies are spliced in.
+ *
+ * Line roles come from the loader itself (loader.c), using the same
+ * wildcard_match() calls, so what counts as a header or as the end of a body
+ * cannot drift from what the parser does:
+ *
+ *   header:      "[*]"  |  "; --- * ---"  |  "GROUP:*"
+ *   ends a body: any header, plus a ":file" line, a "PATH:" line, or an
+ *                option block (see ends_body() for the patterns themselves)
+ *
+ * A body is therefore the run of lines between a header and the first of
+ * those; comment lines inside it are not part of the code, which is why they
+ * survive a splice.
+ * ------------------------------------------------------------------------- */
+
+typedef struct {
+    char  *p;
+    size_t len, cap;
+} ebuf_t;
+
+static int eb_room(ebuf_t *b, size_t need)
+{
+    if (b->len + need + 1 <= b->cap) return 1;
+
+    size_t cap = b->cap ? b->cap : 8192;
+    while (cap < b->len + need + 1) cap *= 2;
+
+    char *np = realloc(b->p, cap);
+    if (!np) return 0;
+    b->p = np;
+    b->cap = cap;
+    return 1;
+}
+
+static int eb_add(ebuf_t *b, const char *s, size_t n)
+{
+    if (!eb_room(b, n)) return 0;
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = '\0';
+    return 1;
+}
+
+static int eb_str(ebuf_t *b, const char *s) { return eb_add(b, s, strlen(s)); }
+
+/*
+ * A line as the parser sees it: trailing blanks and the CR of a CRLF removed.
+ *
+ * Matching str_rtrim() exactly is what keeps the splice aligned with the
+ * parse, so this function follows it rather than doing its own idea of
+ * trimming: spaces and tabs, plus the CR that clean_eol() rewrites as a space
+ * on a CRLF file. The NULs str_rtrim leaves are turned back into newlines
+ * before the bodies are read (loader.c: remove_char), so both of the loader's
+ * passes see lines trimmed this way -- and a difference of one character here
+ * means counting codes the parser does not have.
+ */
+static char *line_copy(const char *start, size_t n)
+{
+    char *s = malloc(n + 1);
+    if (!s) return NULL;
+
+    memcpy(s, start, n);
+    s[n] = '\0';
+    while (n && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r')) s[--n] = '\0';
+    return s;
+}
+
+static int is_code_header(const char *line)
+{
+    return wildcard_match(line, "[*]") ||
+           wildcard_match(line, "; --- * ---") ||
+           wildcard_match_icase(line, "GROUP:*");
+}
+
+static int ends_body(const char *line)
+{
+    return is_code_header(line) ||
+           wildcard_match(line, ":*") ||
+           wildcard_match(line, "{*}*{/*}") ||
+           wildcard_match_icase(line, "PATH:*");
+}
+
+/* The prefixes the loader accepts inside a "[...]" header, in ITS order. Only
+ * the first one is consumed, so "[DEFAULT:PYTHON:x]" is a DEFAULT code named
+ * "PYTHON:x" -- which is why a type still cannot always be written down. */
+/* Arrays, not pointers: their addresses are compile-time constants, so the
+ * table below can be initialised with them and identity comparisons on the
+ * returned prefix are meaningful. */
+static const char P_DEFAULT[] = "DEFAULT:";
+static const char P_INFO[]    = "INFO:";
+static const char P_PYTHON[]  = "PYTHON:";
+static const char P_SW[]      = "SW:";
+static const char P_BSD[]     = "BSD:";
+static const char P_LE[]      = "LE:";
+static const char P_BE[]      = "BE:";
+static const char P_GROUP[]   = "GROUP:";
+
+static const char *const HEADER_PREFIXES[] = {
+    P_DEFAULT, P_INFO, P_PYTHON, P_SW, P_BSD, P_LE, P_BE, P_GROUP
+};
+
+static const char *header_prefix(const char *line)
+{
+    if (line[0] != '[') return NULL;
+
+    for (size_t i = 0; i < sizeof(HEADER_PREFIXES) / sizeof(*HEADER_PREFIXES); i++) {
+        size_t n = strlen(HEADER_PREFIXES[i]);
+        if (strncasecmp(line + 1, HEADER_PREFIXES[i], n) == 0)
+            return HEADER_PREFIXES[i];
+    }
+    return NULL;
+}
+
+/* The three prefixes that state a type, as opposed to marking a code default,
+ * informational, grouped or byte-ordered. */
+static const char *type_prefix(int type)
+{
+    switch (type) {
+        case APOLLO_CODE_PYTHON:     return P_PYTHON;
+        case APOLLO_CODE_SAVEWIZARD: return P_SW;
+        case APOLLO_CODE_BSD:        return P_BSD;
+        default:                     return NULL;
+    }
+}
+
+static int is_type_prefix(const char *prefix)
+{
+    return prefix == P_PYTHON || prefix == P_SW || prefix == P_BSD;
+}
+
+/*
+ * What the loader would make of this body on its own (loader.c,
+ * get_patch_code): Save Wizard while every code line is exactly
+ * "XXXXXXXX YYYYYYYY", BSD from the first line that is not, and Save Wizard
+ * for a body with no code lines at all.
+ *
+ * Comment lines and blank lines are not code lines -- the parser skips the
+ * former and strtok() never yields the latter -- so an edited body's own
+ * comments do not decide its type.
+ */
+static int inferred_type(const char *body)
+{
+    for (const char *p = body ? body : ""; *p; ) {
+        size_t n = strcspn(p, "\n");
+        char  *line = line_copy(p, n);
+        int    decides = 0;
+
+        if (!line) return APOLLO_CODE_SAVEWIZARD;
+        if (line[0] && line[0] != ';')
+            decides = !wildcard_match(line, "\?\?\?\?\?\?\?\? \?\?\?\?\?\?\?\?");
+
+        free(line);
+        if (decides) return APOLLO_CODE_BSD;
+        p += n + (p[n] == '\n' ? 1 : 0);
+    }
+    return APOLLO_CODE_SAVEWIZARD;
+}
+
+/*
+ * Write the header for a code whose type was changed.
+ *
+ * All three types are declarable ("[SW:...]", "[BSD:...]", "[PYTHON:...]"),
+ * but the prefix is only written when it is actually needed -- when the body
+ * alone would be read as something else. Stating a type that the body already
+ * implies would add noise to the file and, worse, make it display wrong on
+ * console builds whose engine predates these two prefixes: they would keep the
+ * code but call it "SW:Max Money".
+ *
+ * A title whose single prefix slot is already spent on something else
+ * ("[DEFAULT:...]") still cannot say a type; apctl_export_mismatches() is what
+ * reports those.
+ */
+static int emit_header(ebuf_t *b, const char *line, int type, const char *body)
+{
+    const char *had  = header_prefix(line);
+    const char *want = (type == inferred_type(body)) ? NULL : type_prefix(type);
+
+    if (line[0] != '[' || (had && !is_type_prefix(had)))
+        return eb_str(b, line);
+
+    /* Skip whatever type prefix is there now; `want` replaces it, or nothing
+     * does when the body speaks for itself. */
+    const char *rest = line + 1 + (is_type_prefix(had) ? strlen(had) : 0);
+
+    return eb_str(b, "[") && (want ? eb_str(b, want) : 1) && eb_str(b, rest);
+}
+
+/* Does the file use CRLF? Length-bounded: patch bytes come straight off disk
+ * or out of the zip, with no terminator to stop a strstr(). */
+static int uses_crlf(const char *p, size_t len)
+{
+    for (size_t i = 0; i + 1 < len; i++)
+        if (p[i] == '\r' && p[i + 1] == '\n') return 1;
+
+    return 0;
+}
+
+char *apctl_export_patch(apctl_session_t *s, const char *original, size_t original_len,
+                         size_t *out_len)
+{
+    if (out_len) *out_len = 0;
+    if (!s || !original) return NULL;
+
+    /* Emitted lines follow the file's own convention rather than the host's. */
+    const char *eol = uses_crlf(original, original_len) ? "\r\n" : "\n";
+
+    ebuf_t b = {0};
+    int    row = -1;        /* header occurrence == apctl row index */
+    int    in_edit = 0;     /* inside an edited code's body region  */
+    int    placed = 0;      /* its replacement body already written  */
+    int    ok = 1;
+
+    const char *end = original + original_len;
+
+    for (const char *p = original; p < end && ok; ) {
+        const char *nl  = memchr(p, '\n', (size_t)(end - p));
+        size_t      raw = nl ? (size_t)(nl - p) + 1 : (size_t)(end - p);
+        size_t      txt = nl ? (size_t)(nl - p) : raw;
+
+        char *line = line_copy(p, txt);
+        if (!line) { ok = 0; break; }
+
+        if (is_code_header(line)) {
+            /* An edited body with nothing to anchor to (the code was empty, or
+             * held only comments) still has to be written before we leave. */
+            if (in_edit && !placed) {
+                apctl_code_t *prev = apctl_code_at(s, row);
+                ok = eb_str(&b, apctl_code_text(prev)) && eb_str(&b, eol);
+            }
+
+            row++;
+            apctl_code_t *c = apctl_code_at(s, row);
+            in_edit = (c && apctl_code_is_edited(c));
+            placed  = 0;
+
+            if (ok) ok = in_edit
+                       ? (emit_header(&b, line, c->type, apctl_code_text(c)) && eb_str(&b, eol))
+                       : eb_add(&b, p, raw);
+        }
+        else if (in_edit && ends_body(line)) {
+            if (!placed) {
+                apctl_code_t *c = apctl_code_at(s, row);
+                ok = eb_str(&b, apctl_code_text(c)) && eb_str(&b, eol);
+            }
+            in_edit = 0;
+            placed  = 0;
+            if (ok) ok = eb_add(&b, p, raw);
+        }
+        else if (in_edit && !wildcard_match(line, ";*")) {
+            /* One of the lines being replaced. The body goes in where the
+             * first of them was, so it keeps its place among the comments. */
+            if (!placed) {
+                apctl_code_t *c = apctl_code_at(s, row);
+                const char   *body = apctl_code_text(c);
+                size_t        n = strlen(body);
+
+                ok = eb_str(&b, body);
+                if (ok && (n == 0 || body[n - 1] != '\n')) ok = eb_str(&b, eol);
+                placed = 1;
+            }
+        }
+        else {
+            ok = eb_add(&b, p, raw);
+        }
+
+        free(line);
+        p += raw;
+    }
+
+    /* A file that ends inside an edited code. */
+    if (ok && in_edit && !placed) {
+        apctl_code_t *c = apctl_code_at(s, row);
+        ok = eb_str(&b, apctl_code_text(c));
+    }
+
+    if (!ok) {
+        free(b.p);
+        return NULL;
+    }
+    if (out_len) *out_len = b.len;
+    return b.p ? b.p : calloc(1, 1);
+}
+
+/*
+ * Do these two bodies run the same way?
+ *
+ * Not a memcmp, for two reasons that are both the parser's doing rather than
+ * the exporter's:
+ *
+ *   - it terminates every line it keeps with a newline, so a body typed
+ *     without a final one comes back with it;
+ *   - it drops ';' comment lines. Someone who types a comment into a code
+ *     gets it written to the file (the splice is verbatim) but not back into
+ *     the body, and that is the right outcome -- a comment is not code -- so
+ *     it must not be reported as an edit the file failed to carry.
+ */
+static const char *next_code_line(const char *p, size_t *len)
+{
+    while (*p) {
+        size_t n = strcspn(p, "\n");
+
+        if (p[0] != ';') { *len = n; return p; }
+        p += n + (p[n] == '\n' ? 1 : 0);
+    }
+    return NULL;
+}
+
+static int same_body(const char *a, const char *b)
+{
+    if (!a) a = "";
+    if (!b) b = "";
+
+    for (;;) {
+        size_t la = 0, lb = 0;
+        const char *ra = next_code_line(a, &la);
+        const char *rb = next_code_line(b, &lb);
+
+        if (!ra || !rb) return ra == rb;
+        if (la != lb || memcmp(ra, rb, la) != 0) return 0;
+
+        a = ra + la + (ra[la] == '\n' ? 1 : 0);
+        b = rb + lb + (rb[lb] == '\n' ? 1 : 0);
+    }
+}
+
+int apctl_export_mismatches(apctl_session_t *s, const char *exported, size_t len,
+                            int *rows, int max)
+{
+    if (!s || !exported || !len) return 0;
+
+    /* Re-parsing is loud (every option, every code) and this is a background
+     * check, so mute the sink for the duration. */
+    apctl_log_fn  fn = g_log_fn;
+    void         *ud = g_log_ud;
+    g_log_fn = NULL;
+
+    apctl_session_t *check = apctl_open_buffer(exported, len, "export-check");
+
+    g_log_fn = fn;
+    g_log_ud = ud;
+
+    if (!check) return -1;
+
+    int found = 0;
+    int n = apctl_code_count(s);
+
+    for (int i = 0; i < n; i++) {
+        apctl_code_t *mine  = apctl_code_at(s, i);
+        apctl_code_t *round = apctl_code_at(check, i);
+
+        if (round && mine->type == round->type &&
+            same_body(apctl_code_text(mine), apctl_code_text(round)))
+            continue;
+
+        if (rows && found < max) rows[found] = i;
+        found++;
+    }
+
+    apctl_close(check);
+    return found;
+}
+
 /* ---- options ---- */
 int apctl_opt_group_count(const apctl_code_t *c)
 {

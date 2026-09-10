@@ -5,6 +5,8 @@
  *   test_ctrl --db [query]       open the bundled database, report what it
  *                                holds, and read one patch back out of it
  *   test_ctrl --edit <file>      exercise the session-only code editor
+ *   test_ctrl --export <file>    edit a code, write the patch back out, and
+ *                                reload it to prove the round trip
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -241,10 +243,224 @@ static int run_edit(const char *path)
     return fails ? 1 : 0;
 }
 
+/*
+ * Saving an edited patch. Two separate questions:
+ *
+ *   1. does the file the user gets back carry the edit AND everything the
+ *      parser throws away? (checked against the real file passed in)
+ *   2. what happens when the edit cannot be written down at all? (checked
+ *      against a synthetic patch, so the headers are known exactly)
+ */
+static int g_fails;
+
+#define CHECK(what, cond) do { \
+        int ok_ = (cond) ? 1 : 0; \
+        printf("  %-42s %s\n", what, ok_ ? "ok" : "FAILED"); \
+        g_fails += !ok_; \
+    } while (0)
+
+/* How many codes would come back different. `text` receives the exported
+ * patch when the caller wants to look at what was written. */
+static int export_misses(apctl_session_t *s, const char *original, size_t len,
+                         char **text)
+{
+    size_t out_len = 0;
+    char  *out = apctl_export_patch(s, original, len, &out_len);
+    int    rows[8];
+    int    n = out ? apctl_export_mismatches(s, out, out_len, rows, 8) : -1;
+
+    if (text) *text = out;
+    else      free(out);
+    return n;
+}
+
+/*
+ * What a .savepatch can and cannot state about a type, on a patch whose
+ * headers are known exactly.
+ *
+ * All three types have a title prefix now ([SW:], [BSD:], [PYTHON:]), so a
+ * forced type survives a save -- except on a title whose single prefix slot is
+ * already spent, which is the one case the caller still has to be told about.
+ */
+static void check_format_limits(void)
+{
+    static const char PATCH[] =
+        ";TEST00001\n"
+        ";Synthetic patch\n"
+        ":SAVE.DAT\n"
+        "[Plain code]\n"
+        "20000004 12345678\n"
+        "\n"
+        "[DEFAULT:Preselected]\n"
+        "20000008 00000001\n"
+        "\n"
+        "[PYTHON:A script]\n"
+        "print('hi')\n";
+    const size_t LEN = sizeof PATCH - 1;
+
+    apctl_session_t *s = apctl_open_buffer(PATCH, LEN, "synthetic");
+    if (!s) { printf("  synthetic patch did not parse -- FAILED\n"); g_fails++; return; }
+
+    apctl_code_t *plain  = apctl_code_at(s, 0);
+    apctl_code_t *preset = apctl_code_at(s, 1);
+    apctl_code_t *script = apctl_code_at(s, 2);
+    char *out = NULL;
+
+    /* A type the body already implies needs no prefix: writing one would be
+     * noise, and would display wrong on engines older than [SW:]/[BSD:]. */
+    apctl_set_code_text(plain, "20000004 0000FFFF\n");
+    CHECK("body-implied type survives", export_misses(s, PATCH, LEN, &out) == 0);
+    CHECK("...without stating it", out && strstr(out, "[SW:") == NULL);
+    free(out); out = NULL;
+    apctl_revert_code(plain);
+
+    /* Forced against the body's shape, both directions. */
+    apctl_set_code_type(plain, APOLLO_CODE_BSD);
+    CHECK("forced BSD on a SW body survives", export_misses(s, PATCH, LEN, &out) == 0);
+    CHECK("...as [BSD:Plain code]", out && strstr(out, "[BSD:Plain code]") != NULL);
+    free(out); out = NULL;
+    apctl_revert_code(plain);
+
+    apctl_set_code_text(plain, "set [x]:0\n");
+    apctl_set_code_type(plain, APOLLO_CODE_SAVEWIZARD);
+    CHECK("forced Save Wizard on a BSD body survives",
+          export_misses(s, PATCH, LEN, &out) == 0);
+    CHECK("...as [SW:Plain code]", out && strstr(out, "[SW:Plain code]") != NULL);
+    free(out); out = NULL;
+    apctl_revert_code(plain);
+
+    /* Python is stated the same way, and dropping it again removes it. */
+    apctl_set_code_text(plain, "print('hi')\n");
+    apctl_set_code_type(plain, APOLLO_CODE_PYTHON);
+    CHECK("[Plain] -> Python survives", export_misses(s, PATCH, LEN, &out) == 0);
+    CHECK("...as [PYTHON:Plain code]", out && strstr(out, "[PYTHON:Plain code]") != NULL);
+    free(out); out = NULL;
+    apctl_revert_code(plain);
+
+    apctl_set_code_text(script, "20000004 12345678\n");
+    apctl_set_code_type(script, APOLLO_CODE_SAVEWIZARD);
+    CHECK("[PYTHON:] -> Save Wizard survives", export_misses(s, PATCH, LEN, &out) == 0);
+    CHECK("...by dropping the prefix", out && strstr(out, "[A script]") != NULL);
+    free(out); out = NULL;
+    apctl_revert_code(script);
+
+    /* The one case left: [DEFAULT:...] has spent its prefix slot. */
+    apctl_set_code_text(preset, "print('hi')\n");
+    apctl_set_code_type(preset, APOLLO_CODE_PYTHON);
+    CHECK("[DEFAULT:] -> Python still reported unwritable",
+          export_misses(s, PATCH, LEN, NULL) == 1);
+    apctl_revert_code(preset);
+
+    CHECK("reverted session exports clean", export_misses(s, PATCH, LEN, NULL) == 0);
+    apctl_close(s);
+}
+
+static int run_export(const char *path, const char *save_to)
+{
+    uint8_t *raw = NULL;
+    size_t   raw_len = 0;
+    if (read_buffer(path, &raw, &raw_len) != 0) {
+        fprintf(stderr, "Could not read %s\n", path);
+        return 1;
+    }
+
+    apctl_session_t *s = apctl_open_buffer((char *)raw, raw_len, path);
+    if (!s) { fprintf(stderr, "Could not parse %s\n", path); free(raw); return 1; }
+
+    /* Edit the first code that has a body. The replacement keeps the shape
+     * the loader reads its type from, so this measures the exporter rather
+     * than the format limit checked separately above. */
+    apctl_code_t *c = NULL;
+    for (int i = 0; i < apctl_code_count(s) && !c; i++)
+        if (apctl_code_text(apctl_code_at(s, i))[0]) c = apctl_code_at(s, i);
+
+    if (!c) { fprintf(stderr, "no code with a body\n"); apctl_close(s); free(raw); return 1; }
+
+    const char *body = (c->type == APOLLO_CODE_SAVEWIZARD) ? "80001000 0000FFFF\n"
+                                                           : "set [edited]:0\n";
+    char edit[128];
+    snprintf(edit, sizeof edit, "%s; a comment the user typed\n", body);
+
+    const int n = apctl_code_count(s);
+    char **before = calloc(n, sizeof(char *));
+    for (int i = 0; i < n; i++) before[i] = strdup(apctl_code_text(apctl_code_at(s, i)));
+
+    apctl_set_code_text(c, edit);
+
+    size_t len = 0;
+    char  *out = apctl_export_patch(s, (const char *)raw, raw_len, &len);
+
+    printf("exporting %s\n  %zu bytes in, %zu out, edited code %d (%s)\n",
+           path, raw_len, len, c->id, type_name(c->type));
+
+    CHECK("export produced text", out && len);
+    if (!out) { apctl_close(s); free(raw); return 1; }
+
+    /* What the parser drops has to survive. The first line is the title ID
+     * comment every patch in the database starts with. */
+    size_t k = strcspn((const char *)raw, "\r\n");
+    CHECK("first line preserved", len > k && memcmp(out, raw, k) == 0);
+    CHECK("typed comment kept in the file", strstr(out, "a comment the user typed") != NULL);
+
+    apctl_session_t *back = apctl_open_buffer(out, len, "exported");
+    CHECK("exported text parses", back != NULL);
+
+    if (back) {
+        CHECK("same number of codes", apctl_code_count(back) == n);
+
+        int diffs = 0, names = 0;
+        for (int i = 0; i < n && i < apctl_code_count(back); i++) {
+            apctl_code_t *r = apctl_code_at(back, i);
+            const char *want = (apctl_code_at(s, i) == c) ? body : before[i];
+            const char *got  = apctl_code_text(r);
+            size_t a = strlen(want), bl = strlen(got);
+
+            if (strcmp(apctl_code_at(s, i)->name, r->name) != 0) names++;
+            while (a && want[a - 1] == '\n') a--;
+            while (bl && got[bl - 1] == '\n') bl--;
+            if (a != bl || memcmp(want, got, a) != 0) diffs++;
+        }
+        CHECK("every code name unchanged", names == 0);
+        CHECK("every body round-trips (edit included)", diffs == 0);
+        apctl_close(back);
+    }
+
+    int rows[8];
+    int miss = apctl_export_mismatches(s, out, len, rows, 8);
+    CHECK("nothing reported as lost", miss == 0);
+    for (int i = 0; i < miss && i < 8; i++) {
+        apctl_code_t *m = apctl_code_at(s, rows[i]);
+        printf("    row %d \"%s\" (%s) reads back differently\n",
+               rows[i], m->name, type_name(m->type));
+    }
+
+    /* Somewhere to look when a patch does not round-trip. */
+    if (save_to) {
+        if (write_buffer(save_to, (const uint8_t *)out, len) == 0)
+            printf("  wrote the exported patch to %s\n", save_to);
+        else
+            printf("  could not write %s\n", save_to);
+    }
+
+    check_format_limits();
+
+    for (int i = 0; i < n; i++) free(before[i]);
+    free(before);
+    free(out);
+    apctl_close(s);
+    free(raw);
+
+    printf("\nexport checks: %s\n", g_fails ? "FAILED" : "all passed");
+    return g_fails ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--db") == 0)
         return run_db(argc >= 3 ? argv[2] : NULL);
+
+    if (argc >= 3 && strcmp(argv[1], "--export") == 0)
+        return run_export(argv[2], argc >= 4 ? argv[3] : NULL);
 
     if (argc >= 3 && strcmp(argv[1], "--edit") == 0)
         return run_edit(argv[2]);
@@ -253,6 +469,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: %s file.savepatch\n", argv[0]);
         fprintf(stderr, "       %s --db [query]\n", argv[0]);
         fprintf(stderr, "       %s --edit file.savepatch\n", argv[0]);
+        fprintf(stderr, "       %s --export file.savepatch\n", argv[0]);
         return 2;
     }
 

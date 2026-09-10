@@ -128,17 +128,28 @@ line.
 
   **Runs as** in the same window picks the interpreter — Save Wizard, BSD or
   Python — and takes effect immediately, since a wrongly-typed code is often
-  the whole problem and has nothing to type. The loader guesses the type from
-  the `[...]` header and the shape of the body (Save Wizard only when *every*
-  line is exactly `XXXXXXXX YYYYYYYY`), so one mistyped line, or a script
-  whose author forgot `[PYTHON:]`, used to be unfixable here. It counts as an
-  edit, and *Revert to file* puts the declared type back with the body.
+  the whole problem and has nothing to type. The loader takes the type from a
+  `[SW:…]` / `[BSD:…]` / `[PYTHON:…]` title prefix when there is one, and
+  otherwise from the shape of the body (Save Wizard only when *every* line is
+  exactly `XXXXXXXX YYYYYYYY`), so one mistyped line used to be unfixable here.
+  It counts as an edit, *Revert to file* puts the declared type back with the
+  body, and saving the patch writes the choice into the title.
 
   What an edit cannot do is rename a **`{TAG}`** — the engine writes an
   option's value over the tag in place, at the tag's own length, so a tag that
   has been retyped or deleted stops resolving. The window says so when a
   placeholder goes missing, since nothing else would until the patch
   misbehaved.
+- **Save patch file…** (also File ▸ Save .savepatch as…, Ctrl+S) writes the
+  patch back out with your edits in it, so a hand-modified code can be kept or
+  shared. The engine splices the edits into the *original* bytes instead of
+  regenerating the file from its parse, so comments, credits, `:file` lines and
+  option blocks come through untouched — the parse keeps codes and drops all of
+  that. It then re-reads the file it just built and logs any code that would
+  come back different. A forced type is written as a title prefix (`[SW:…]`,
+  `[BSD:…]`, `[PYTHON:…]`) and does survive — but a title carries only one
+  marker, so a code already flagged `[DEFAULT:…]` or `[INFO:…]` has no room to
+  state one, and that is what gets reported.
 - **View patch file** shows the `.savepatch` as text. Worth having: parsing
   keeps only the codes, so author comments, credits, `[INFO:]` notes and the
   target-file lines are invisible otherwise. Carriage returns are stripped for

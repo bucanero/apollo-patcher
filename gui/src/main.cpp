@@ -59,6 +59,7 @@ struct AppState {
     std::string         target_path;
     std::string         game_name;
     std::string         patch_raw;        // the .savepatch as text (CR stripped)
+    std::string         patch_bytes;      // ...and verbatim, for saving it back
     bool                show_patch_raw = false;
 
     std::vector<unsigned char> hex_data;   // the target file, for the hex editor
@@ -99,6 +100,7 @@ struct AppState {
         game_name.clear();
         patch_path.clear();
         patch_raw.clear();
+        patch_bytes.clear();
         show_patch_raw = false;
     }
 };
@@ -396,7 +398,8 @@ static void load_patch(const std::string& path) {
     if (in) {
         std::string raw((std::istreambuf_iterator<char>(in)),
                         std::istreambuf_iterator<char>());
-        g_app.patch_raw = strip_cr(raw);
+        g_app.patch_bytes = raw;              // verbatim: what a save writes back
+        g_app.patch_raw = strip_cr(raw);      // CR-stripped: what ImGui draws
     }
     adopt_session(s, path, nullptr, nullptr);   // loose file: no platform tag
 }
@@ -487,7 +490,8 @@ static void load_patch_from_db(int index) {
     g_app.close();
     std::string label = std::string(e->platform) + "/" + e->title_id + ".savepatch";
     apctl_session_t* s = apctl_open_buffer(data, len, label.c_str());
-    g_app.patch_raw = strip_cr(std::string(data, len));
+    g_app.patch_bytes.assign(data, len);
+    g_app.patch_raw = strip_cr(g_app.patch_bytes);
     free(data);
 
     if (!s) { g_app.append_log("[!] Could not parse that patch"); return; }
@@ -569,13 +573,73 @@ static std::string pick_file(const char* filter_ext) {
     return sel.empty() ? std::string() : sel[0];
 }
 
+static std::string pick_save_path(const std::string& suggested) {
+    auto p = pfd::save_file("Save patch file", suggested,
+                            { "Apollo patch (*.savepatch)", "*.savepatch",
+                              "All files", "*" }).result();
+    return p;
+}
+
 // Native modals are opened AFTER the ImGui frame is rendered (see the main
 // loop), not from inside a widget callback — opening a modal mid-frame is the
 // second macOS pitfall. Widgets just raise these intents.
 static bool g_pending_open   = false;
 static bool g_pending_target = false;
+static bool g_pending_save_patch = false;
 static void do_open_patch()    { g_pending_open = true; }
 static void do_choose_target() { g_pending_target = true; }
+static void do_save_patch()    { g_pending_save_patch = true; }
+
+//
+// Write the .savepatch back out, with any code edits in it.
+//
+// The engine splices the edits into the ORIGINAL bytes rather than
+// regenerating the file from its parse, so comments, credits, target-file
+// lines and option blocks all survive (see apctl_export_patch). It then
+// re-reads what it built and reports codes that would come back different.
+// A forced type is written as a title prefix ([SW:...], [BSD:...],
+// [PYTHON:...]) and survives, but only one prefix fits per title, so a code
+// already marked [DEFAULT:...] or [INFO:...] has no room to state one.
+//
+static void save_patch_file(const std::string& path) {
+    size_t len = 0;
+    char*  text = apctl_export_patch(g_app.session, g_app.patch_bytes.data(),
+                                     g_app.patch_bytes.size(), &len);
+    if (!text) { g_app.append_log("[!] Could not rebuild the patch file"); return; }
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        g_app.append_log("[!] Could not write that file");
+        free(text);
+        return;
+    }
+    out.write(text, (std::streamsize)len);
+    out.close();
+
+    char msg[512];
+    snprintf(msg, sizeof msg, "Saved %s (%zu bytes)", base_name(path), len);
+    g_app.append_log(msg);
+
+    int rows[32];
+    int miss = apctl_export_mismatches(g_app.session, text, len, rows, 32);
+    free(text);
+
+    if (miss > 0) {
+        snprintf(msg, sizeof msg,
+                 "[!] %d code(s) will read back differently from that file - a "
+                 "title can carry only one marker, so a code that is already "
+                 "[DEFAULT:...] or [INFO:...] cannot also state its type:", miss);
+        g_app.append_log(msg);
+
+        for (int i = 0; i < miss && i < 32; i++) {
+            apctl_code_t* c = apctl_code_at(g_app.session, rows[i]);
+            snprintf(msg, sizeof msg, "      #%d %s", c ? c->id : rows[i],
+                     (c && c->name) ? c->name : "");
+            g_app.append_log(msg);
+        }
+        g_app.show_log = true;
+    }
+}
 
 static void process_pending_dialogs() {
     if (g_pending_open) {
@@ -587,6 +651,25 @@ static void process_pending_dialogs() {
         g_pending_target = false;
         std::string p = pick_file(nullptr);
         if (!p.empty()) g_app.target_path = p;
+    }
+    if (g_pending_save_patch) {
+        g_pending_save_patch = false;
+        if (g_app.session && !g_app.patch_bytes.empty()) {
+            // Suggest a new name: overwriting the file they opened (or a
+            // database patch's own name) is rarely what an edit wants. Only
+            // once, though, or a file saved from here twice ends up
+            // "-edited-edited".
+            std::string base = base_name(g_app.patch_path);
+            size_t dot = base.rfind(".savepatch");
+            if (dot != std::string::npos) base.erase(dot);
+
+            const std::string tag = "-edited";
+            bool tagged = base.size() >= tag.size() &&
+                          base.compare(base.size() - tag.size(), tag.size(), tag) == 0;
+
+            std::string p = pick_save_path(base + (tagged ? "" : tag) + ".savepatch");
+            if (!p.empty()) save_patch_file(p);
+        }
     }
 }
 
@@ -1012,6 +1095,8 @@ static void draw_menu_bar(bool* want_quit) {
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("Find a game...", "Ctrl+F")) g_db.want_open = true;
             if (ImGui::MenuItem("Open .savepatch...", "Ctrl+O")) do_open_patch();
+            if (ImGui::MenuItem("Save .savepatch as...", "Ctrl+S",
+                                false, g_app.session != nullptr)) do_save_patch();
             if (ImGui::MenuItem("Choose target file...")) do_choose_target();
             ImGui::Separator();
             if (ImGui::MenuItem("Quit", "Ctrl+Q")) *want_quit = true;
@@ -1054,6 +1139,13 @@ static void draw_main_window(bool* want_quit) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Show the .savepatch as text, including comments\n"
                               "and target lines that parsing leaves out.");
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Save patch file...")) do_save_patch();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Write this .savepatch out, with your code edits in it,\n"
+                              "so they can be kept or shared. Everything the parser\n"
+                              "leaves out is carried over untouched.");
     }
 
     if (ImGui::Button("Choose target...")) do_choose_target();
@@ -1239,6 +1331,8 @@ int main(int, char**) {
 
         // keyboard shortcuts
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_O, false)) do_open_patch();
+        if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_S, false) &&
+            g_app.session) do_save_patch();
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_F, false)) g_db.want_open = true;
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_Q, false)) want_quit = true;
 

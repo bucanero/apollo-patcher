@@ -114,6 +114,7 @@ jobs:
         ./build/apollo_ctrl_test apollo-lib/tests/fixtures/BLUS30490.savepatch | head -5
         APOLLO_PATCHES_ZIP=dist/apollo-patches.zip ./build/apollo_ctrl_test --db BLUS30279
         ./build/apollo_ctrl_test --edit apollo-lib/tests/fixtures/BLUS30490.savepatch
+        ./build/apollo_ctrl_test --export apollo-lib/tests/fixtures/BLUS30490.savepatch
 
     # CMakeLists.txt does not set a deployment target. Use macOS 11.0, the first
     # Apple Silicon release, as one baseline for both slices. Fail before upload

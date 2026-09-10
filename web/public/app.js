@@ -137,6 +137,7 @@ async function loadPatch(file, displayName, platform) {
         state.edited.clear();
         state.patchText = null;
         $('view-patch').hidden = true;
+        $('save-patch').hidden = true;
         clearResult();
         return;
     }
@@ -164,6 +165,7 @@ async function loadPatch(file, displayName, platform) {
     $('game-name').textContent = displayName || res.game.trim() || file.name;
     $('code-count').textContent = `${res.codes.length} codes`;
     $('view-patch').hidden = false;
+    $('save-patch').hidden = false;
     $('workspace').hidden = false;
     $('intro').hidden = true;
     clearResult();
@@ -709,6 +711,61 @@ function download() {
     URL.revokeObjectURL(url);
 }
 
+/*
+ * Save the .savepatch, edits included.
+ *
+ * The engine rebuilds it from the original file rather than from its own
+ * parse, so comments, credits, target-file lines and option blocks all
+ * survive; only edited codes are rewritten. Bytes go straight from the worker
+ * into the download, because patch files are not all UTF-8.
+ *
+ * A forced type is written into the title ([SW:...], [BSD:...], [PYTHON:...])
+ * and survives a reload -- but a title carries only one marker, so a code
+ * already flagged [DEFAULT:...] or [INFO:...] has no room to state one. The
+ * engine re-parses what it just built and says which codes those are, and the
+ * page passes that on rather than letting the user find out later.
+ */
+async function savePatchFile() {
+    if (!state.patchName) return;
+
+    const res = await call('exportPatch');
+    if (!res.ok) {
+        appendLog([res.error || 'Could not rebuild the patch file.']);
+        return;
+    }
+
+    /* Suggest a new name rather than the one they opened -- but only once, or
+     * saving a file that came out of here again gives "-edited-edited". */
+    const base = state.patchName.replace(/\.savepatch$/i, '');
+    const name = (state.edited.size && !/-edited$/.test(base) ? `${base}-edited` : base) +
+                 '.savepatch';
+
+    const url = URL.createObjectURL(new Blob([res.patch], { type: 'application/octet-stream' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    appendLog([`Saved ${name} (${res.patch.length} bytes, ${state.edited.size} edited code${
+        state.edited.size === 1 ? '' : 's'})`]);
+
+    if (res.mismatches && res.mismatches.length) {
+        const names = res.mismatches
+            .slice(0, 3)
+            .map((i) => `“${state.codes[i] ? state.codes[i].name : i}”`)
+            .join(', ');
+        appendLog([
+            `Note: ${res.mismatches.length} code${res.mismatches.length === 1 ? '' : 's'} ` +
+            `will read back differently from that file (${names}${
+                res.mismatches.length > 3 ? ', …' : ''}). A code title carries only one ` +
+            'marker, so one that is already [DEFAULT:…] or [INFO:…] cannot also state its type.',
+        ]);
+        /* Say it where it will be seen: the log is collapsed by default. */
+        $('log-panel').open = true;
+    }
+}
+
 /* ---------------------------------------------------------------------------
  * Patch database browser
  *
@@ -881,6 +938,7 @@ $('code-dialog').addEventListener('close', () => { editing = null; });
 
 $('open-db').addEventListener('click', openDb);
 $('view-patch').addEventListener('click', showPatchText);
+$('save-patch').addEventListener('click', savePatchFile);
 $('view-save').addEventListener('click', editSaveData);
 $('view-result').addEventListener('click', viewResultData);
 $('db-close').addEventListener('click', () => $('db-dialog').close());

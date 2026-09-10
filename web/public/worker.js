@@ -227,6 +227,45 @@ const handlers = {
     },
 
     /*
+     * The patch file with this session's edits in it.
+     *
+     * Comes back as bytes, never as a string: 245 of the database's patches
+     * are Windows-1252, so decoding and re-encoding would corrupt the ™/®
+     * characters in their game names. The C side hands over a heap range and
+     * this copies it out.
+     *
+     * `mismatches` is the engine's own verdict on what the file cannot carry
+     * (a forced Save Wizard/BSD type, mostly) -- worth telling the user
+     * before they walk away with the file.
+     */
+    async exportPatch() {
+        await ready();
+
+        const ptr = M._apw_export_patch();
+        const len = M._apw_export_size();
+        if (!ptr || len <= 0) return { ok: false, error: 'Could not rebuild the patch file.' };
+
+        const bytes = new Uint8Array(M.HEAPU8.subarray(ptr, ptr + len));
+
+        /* Row indices, out of a scratch int32 block. 32 is plenty: the page
+         * only names the first few. Read through an Int32Array view of the
+         * heap, since HEAP32 itself is not among the exported runtime
+         * methods. */
+        const max = 32;
+        const rowsPtr = M._malloc(max * 4);
+        const rows = [];
+        try {
+            const n = M._apw_export_mismatches(rowsPtr, max);
+            const view = new Int32Array(M.HEAPU8.buffer, rowsPtr, max);
+            for (let i = 0; i < Math.min(n, max); i++) rows.push(view[i]);
+        } finally {
+            M._free(rowsPtr);
+        }
+
+        return { patch: bytes, mismatches: rows };
+    },
+
+    /*
      * Apply codes to a fresh copy of the save data.
      *
      * The engine patches a file in place, so a second run over an
@@ -282,8 +321,13 @@ self.onmessage = async (ev) => {
         const result = (await handlers[type](args)) || {};
         const reply = { id, ok: result.ok !== false, ...result, log: drainLog() };
 
-        /* Hand the patched bytes over instead of copying them. */
-        self.postMessage(reply, result.patched ? [result.patched.buffer] : []);
+        /* Hand any bytes over instead of copying them: the patched save, or
+         * the rebuilt patch file. Both are freshly allocated here. */
+        const owned = [result.patched, result.patch]
+            .filter(Boolean)
+            .map((b) => b.buffer);
+
+        self.postMessage(reply, owned);
     } catch (err) {
         self.postMessage({ id, ok: false, error: String(err && err.message || err), log: drainLog() });
     }
