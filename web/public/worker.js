@@ -120,16 +120,27 @@ function workPath(name) {
 const TYPE_PYTHON = 3;    /* APOLLO_CODE_PYTHON */
 let codeTypes = [];       /* per-row type from the last open() */
 
-/* What one code looks like now. `flags` comes back with it because emptying a
- * body (or filling an empty one) moves APOLLO_CODE_FLAG_EMPTY, and that is
- * what decides whether the page lets the row be ticked. The type never moves:
- * it was decided by the [...] header at parse time, so codeTypes stays valid
- * across an edit. */
+/* What one code looks like now: whatever the caller just did, this is the
+ * engine's own answer.
+ *
+ * `flags` comes back because emptying a body (or filling an empty one) moves
+ * APOLLO_CODE_FLAG_EMPTY, which decides whether the page lets the row be
+ * ticked. `type` comes back because the type selector moves it (and revert
+ * moves it back) — and codeTypes has to follow, since it is what decides
+ * whether the Python helper modules get fetched at all. */
 function codeState(index) {
+    const type = M._apw_code_type(index);
+    codeTypes[index] = type;
+
+    /* Switched to Python after load: start the modules now, the same way
+     * open() does for a patch that already contained one. Apply awaits it. */
+    if (type === TYPE_PYTHON) ensureModules().catch(() => {});
+
     return {
         text: M.UTF8ToString(M._apw_code_text(index)),
         edited: !!M._apw_code_is_edited(index),
         flags: M._apw_code_flags(index),
+        type,
     };
 }
 
@@ -196,6 +207,15 @@ const handlers = {
         await ready();
         const ok = withCString(text, (tp) => M._apw_set_code_text(index, tp));
         if (!ok) return { ok: false, error: 'Could not store the edited code.' };
+
+        return codeState(index);
+    },
+
+    /* `codeType` rather than `type`: the message envelope owns `type`. */
+    async setCodeType({ index, codeType }) {
+        await ready();
+        if (!M._apw_set_code_type(index, codeType))
+            return { ok: false, error: 'That is not a code type this engine runs.' };
 
         return codeState(index);
     },

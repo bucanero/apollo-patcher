@@ -133,6 +133,16 @@ static const char* type_tag(int t) {
         default:                     return "?";
     }
 }
+// Spelled out for the type selector in the code window; the table shows the
+// short tag above instead.
+static const char* type_name(int t) {
+    switch (t) {
+        case APOLLO_CODE_BSD:        return "BSD";
+        case APOLLO_CODE_PYTHON:     return "Python";
+        case APOLLO_CODE_SAVEWIZARD: return "Save Wizard";
+        default:                     return "Unknown";
+    }
+}
 static ImVec4 type_color(int t) {
     switch (t) {
         case APOLLO_CODE_BSD:        return ImVec4(0.45f, 0.80f, 0.55f, 1.0f); // green
@@ -815,6 +825,28 @@ static void draw_code_viewers() {
         if (buf.raise) { ImGui::SetNextWindowFocus(); buf.raise = false; }
         if (ImGui::Begin(title, &open)) {
             ImGui::Text("Target file: %s", (c->file && c->file[0]) ? c->file : "(none)");
+
+            // Which interpreter reads the body. The loader guesses it from the
+            // [...] header and the shape of the body -- Save Wizard only when
+            // every line is exactly "XXXXXXXX YYYYYYYY" -- so one mistyped
+            // line, or a missing [PYTHON:] header, lands a code on the wrong
+            // interpreter with no way to fix it. It is also the other half of
+            // editing: Save Wizard lines rewritten as BSD commands only mean
+            // something once the type follows.
+            static const int TYPES[] = { APOLLO_CODE_SAVEWIZARD, APOLLO_CODE_BSD,
+                                         APOLLO_CODE_PYTHON };
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+            if (ImGui::BeginCombo("Runs as", type_name(c->type))) {
+                for (int t : TYPES)
+                    if (ImGui::Selectable(type_name(t), c->type == t) && c->type != t) {
+                        apctl_set_code_type(c, t);
+                        char msg[256];
+                        snprintf(msg, sizeof msg, "Code #%d \"%s\" now runs as %s",
+                                 c->id, c->name ? c->name : "", type_name(t));
+                        g_app.append_log(msg);
+                    }
+                ImGui::EndCombo();
+            }
 
             if (!unsaved) ImGui::BeginDisabled();
             if (ImGui::SmallButton("Save changes")) {

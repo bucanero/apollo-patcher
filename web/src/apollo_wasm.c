@@ -252,6 +252,25 @@ int apw_set_code_text(int index, const char *text)
     return apctl_set_code_text(apctl_code_at(g_session, index), text ? text : "");
 }
 
+/* Reinterpret the body as another kind of code (APOLLO_CODE_* : 1 Save
+ * Wizard, 2 BSD, 3 Python). Returns 1 on success, 0 for a bad index or an
+ * unknown type. See apctl_set_code_type. */
+EMSCRIPTEN_KEEPALIVE
+int apw_set_code_type(int index, int type)
+{
+    if (!g_session || index < 0 || index >= apctl_code_count(g_session)) return 0;
+    return apctl_set_code_type(apctl_code_at(g_session, index), type);
+}
+
+/* The code's current type: it moves when the caller sets it, and back again on
+ * revert, so the page re-reads it rather than assuming. */
+EMSCRIPTEN_KEEPALIVE
+int apw_code_type(int index)
+{
+    if (!g_session || index < 0 || index >= apctl_code_count(g_session)) return 0;
+    return apctl_code_at(g_session, index)->type;
+}
+
 /* The code's current flag word. Worth re-reading after an edit: emptying a
  * body (or filling an empty one) moves APOLLO_CODE_FLAG_EMPTY, which is what
  * decides whether a row can be ticked at all. */

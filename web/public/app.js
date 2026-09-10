@@ -502,6 +502,7 @@ async function showCode(index, name) {
     $('dialog-body').hidden = true;
     $('dialog-edit').hidden = false;
     $('dialog-edit').value = text;
+    $('dialog-type').value = String(state.codes[index].type);
     $('dialog-actions').hidden = false;
     refreshCodeDialog();
     $('code-dialog').showModal();
@@ -513,6 +514,10 @@ function refreshCodeDialog() {
     const box = $('dialog-edit');
     const unsaved = box.value !== editing.saved;
     const edited = state.edited.has(editing.index);
+
+    /* The type can move under the dialog (revert puts it back), so read it
+     * from state rather than leaving whatever was picked. */
+    $('dialog-type').value = String(state.codes[editing.index].type);
 
     $('dialog-save').disabled = !unsaved;
     $('dialog-revert').disabled = !edited && !unsaved;
@@ -561,6 +566,7 @@ async function saveCode() {
     /* An emptied body is no longer tickable, and a filled-in one becomes so —
      * the engine moves APOLLO_CODE_FLAG_EMPTY, and the list reads it. */
     state.codes[index].flags = res.flags;
+    state.codes[index].type = res.type;
     if (!selectable(state.codes[index])) state.checked.delete(index);
 
     appendLog([res.edited
@@ -568,6 +574,45 @@ async function saveCode() {
         : `Code #${index + 1} back to the patch file's body`]);
 
     /* Any previous result came out of the old body. */
+    clearResult();
+    renderCodes();
+    refreshApplyButton();
+    refreshCodeDialog();
+}
+
+/*
+ * Reinterpret the body as another kind of code.
+ *
+ * Applies straight away rather than waiting for Save: the text box and the
+ * type are separate things, and a wrongly-typed code is often the whole
+ * problem, with nothing to type. Counts as an edit either way, so the row is
+ * marked and Revert brings the patch's own type back.
+ */
+async function changeCodeType() {
+    if (!editing) return;
+    const { index } = editing;
+    const type = Number($('dialog-type').value);
+    if (type === state.codes[index].type) return;
+
+    /* `codeType`, not `type`: the worker protocol spends that name on the
+     * message kind itself (see call()), so an arg called `type` would
+     * overwrite it and the message would arrive addressed to nothing. */
+    const res = await call('setCodeType', { index, codeType: type });
+    if (!res.ok) {
+        $('dialog-type').value = String(state.codes[index].type);
+        $('dialog-note').className = 'warn';
+        $('dialog-note').textContent = res.error || 'Could not change the type.';
+        return;
+    }
+
+    state.codes[index].type = res.type;
+    state.codes[index].flags = res.flags;
+    if (res.edited) state.edited.add(index);
+    else state.edited.delete(index);
+
+    appendLog([`Code #${index + 1} now runs as ${TYPE[res.type]}`]);
+
+    /* Any previous result came out of the other interpreter. */
     clearResult();
     renderCodes();
     refreshApplyButton();
@@ -583,6 +628,7 @@ async function revertCode() {
     $('dialog-edit').value = res.text;
     state.edited.delete(index);
     state.codes[index].flags = res.flags;
+    state.codes[index].type = res.type;
     if (!selectable(state.codes[index])) state.checked.delete(index);
 
     clearResult();
@@ -826,6 +872,7 @@ $('apply').addEventListener('click', apply);
 $('download').addEventListener('click', download);
 $('dialog-close').addEventListener('click', () => $('code-dialog').close());
 $('dialog-edit').addEventListener('input', refreshCodeDialog);
+$('dialog-type').addEventListener('change', changeCodeType);
 $('dialog-save').addEventListener('click', saveCode);
 $('dialog-revert').addEventListener('click', revertCode);
 /* Closing with unsaved text in the box discards it; the engine only ever holds

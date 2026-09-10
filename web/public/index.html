@@ -163,6 +163,17 @@
   <textarea id="dialog-edit" spellcheck="false" wrap="off" hidden
             aria-label="Code body"></textarea>
   <div id="dialog-actions" hidden>
+    <!-- Which interpreter reads the body. The loader guesses this from the
+         header and the shape of the body, and can guess wrong; it is also the
+         other half of editing (Save Wizard lines rewritten as BSD commands
+         only mean something if the type follows). -->
+    <label id="dialog-type-wrap">Runs as
+      <select id="dialog-type">
+        <option value="1">Save Wizard</option>
+        <option value="2">BSD</option>
+        <option value="3">Python</option>
+      </select>
+    </label>
     <button type="button" id="dialog-save">Save changes</button>
     <button type="button" id="dialog-revert" class="ghost">Revert to file</button>
     <span id="dialog-note"></span>

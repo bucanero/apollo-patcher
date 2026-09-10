@@ -58,6 +58,8 @@ typedef struct {
     int            edited;         /* body replaced via apctl_set_code_text() */
     char          *orig_text;      /* the patch file's body, kept for revert;
                                       owned by the session, NULL until edited */
+    int            type_edited;    /* type replaced via apctl_set_code_type() */
+    int            orig_type;      /* the type the patch declared, for revert */
 } apctl_code_t;
 
 typedef struct apctl_session apctl_session_t;
@@ -83,24 +85,39 @@ const char *apctl_code_text(const apctl_code_t *c);
  * edit is not consumed by applying it. Nothing is written back to the
  * .savepatch — apctl_close() is the end of an edit's life.
  *
- * Two things an edit cannot do, both because they were decided at parse time:
- *
- *   - change the code's TYPE. Editing a Save Wizard body into BSD commands
- *     leaves it a Save Wizard code, interpreted as such.
- *   - rename a {TAG}. The engine substitutes an option's value over the tag
- *     IN PLACE, at the tag's own length (see apply_tag_opts), so a tag that
- *     has been retyped or deleted stops resolving and the dropdown silently
- *     does nothing. Callers with option groups should say so.
+ * What an edit cannot do is rename a {TAG}: the engine substitutes an option's
+ * value over the tag IN PLACE, at the tag's own length (see apply_tag_opts),
+ * so a tag that has been retyped or deleted stops resolving and the dropdown
+ * silently does nothing. Callers with option groups should say so.
  *
  * Setting the body back to the original text clears the edited flag, so the
  * flag always means "differs from the patch file".
  */
 int apctl_set_code_text(apctl_code_t *c, const char *text);
 
-/* Non-zero while this code's body differs from the one the patch declared. */
+/*
+ * Reinterpret the body as another kind of code: APOLLO_CODE_SAVEWIZARD, _BSD
+ * or _PYTHON. Returns 1 on success, 0 for an unknown type.
+ *
+ * The type is what apollo_apply_code() switches on, so this decides which
+ * interpreter runs the body. The loader guesses it from the `[...]` header and
+ * the shape of the body -- Save Wizard only when EVERY line is exactly
+ * "XXXXXXXX YYYYYYYY", otherwise BSD -- so a patch with one mistyped line, or
+ * a Python script whose author forgot the [PYTHON:] header, arrives as the
+ * wrong kind and cannot work until this is corrected. It is also the other
+ * half of editing a body: rewriting Save Wizard lines as BSD commands only
+ * means something if the type follows.
+ *
+ * Options and {TAG} substitution work the same way in all three, so switching
+ * type does not disturb them.
+ */
+int apctl_set_code_type(apctl_code_t *c, int type);
+
+/* Non-zero while this code differs from the one the patch declared -- either
+ * its body or its type. */
 int apctl_code_is_edited(const apctl_code_t *c);
 
-/* Put the patch file's own body back. No-op on an unedited code. */
+/* Put the patch file's own body AND type back. No-op on an unedited code. */
 void apctl_revert_code(apctl_code_t *c);
 
 /* ---- Interactive options (dropdowns) ---- */

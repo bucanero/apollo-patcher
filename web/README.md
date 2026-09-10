@@ -167,6 +167,20 @@ different feature. Applying does not consume an edit either, because the engine
 copies the body before it runs, so Apply stays as repeatable as it is for an
 unedited patch.
 
+**Runs as** picks the interpreter (Save Wizard / BSD / Python) and applies at
+once rather than waiting for *Save changes*: the type and the text are separate
+things, and a wrongly-typed code often has nothing to type. It matters more
+than it sounds — the loader infers the type from the `[...]` header and the
+shape of the body, so a single mistyped line makes a Save Wizard code parse as
+BSD and fail, with no way to correct it from here until now.
+
+Switching a code *to* Python has to tell the worker, because the Python helper
+modules are fetched on demand and that decision is made from the parsed types
+at load time. `codeState()` refreshes `codeTypes` and starts the fetch, so a
+patch that contained no Python when it loaded still gets the modules. The wire
+argument is `codeType`, not `type`: the worker envelope already spends that
+name on the message kind.
+
 The engine, not the page, decides whether a code counts as edited — saving the
 patch file's own text back is not an edit — so `setCodeText` answers with what
 the engine holds afterwards and the marker follows that.

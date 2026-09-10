@@ -333,20 +333,49 @@ int apctl_set_code_text(apctl_code_t *c, const char *text)
     return 1;
 }
 
+int apctl_set_code_type(apctl_code_t *c, int type)
+{
+    if (!c || !c->raw) return 0;
+    if (type != APOLLO_CODE_SAVEWIZARD && type != APOLLO_CODE_BSD &&
+        type != APOLLO_CODE_PYTHON)
+        return 0;
+
+    if (!c->type_edited) {
+        c->orig_type   = c->raw->type;
+        c->type_edited = 1;
+    }
+
+    c->raw->type = (uint8_t)type;
+    c->type      = type;
+
+    /* Back to what the patch declared: stop calling it a change, so the
+     * edited flag keeps meaning "differs from the patch file". */
+    if (type == c->orig_type) c->type_edited = 0;
+    return 1;
+}
+
 int apctl_code_is_edited(const apctl_code_t *c)
 {
-    return (c && c->edited) ? 1 : 0;
+    return (c && (c->edited || c->type_edited)) ? 1 : 0;
 }
 
 void apctl_revert_code(apctl_code_t *c)
 {
-    if (!c || !c->edited) return;
+    if (!c) return;
 
-    free(c->raw->codes);
-    c->raw->codes = c->orig_text;
-    c->orig_text  = NULL;
-    c->edited     = 0;
-    refresh_empty_flag(c);
+    if (c->edited) {
+        free(c->raw->codes);
+        c->raw->codes = c->orig_text;
+        c->orig_text  = NULL;
+        c->edited     = 0;
+        refresh_empty_flag(c);
+    }
+
+    if (c->type_edited) {
+        c->raw->type   = (uint8_t)c->orig_type;
+        c->type        = c->orig_type;
+        c->type_edited = 0;
+    }
 }
 
 /* ---- options ---- */

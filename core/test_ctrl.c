@@ -157,6 +157,26 @@ static int run_edit(const char *path)
     CHECK("revert restores the file's body", strcmp(apctl_code_text(c), original) == 0);
     CHECK("revert clears the flag", !apctl_code_is_edited(c));
 
+    /* ---- type selector ---- */
+    const int declared = c->type;
+    const int other    = (declared == APOLLO_CODE_BSD) ? APOLLO_CODE_SAVEWIZARD
+                                                       : APOLLO_CODE_BSD;
+
+    CHECK("set_code_type accepted", apctl_set_code_type(c, other));
+    CHECK("row type followed", c->type == other);
+    CHECK("engine entry type followed", c->raw->type == other);
+    CHECK("a type change counts as edited", apctl_code_is_edited(c));
+
+    CHECK("unknown type refused", !apctl_set_code_type(c, 42));
+    CHECK("refusal changed nothing", c->type == other);
+
+    CHECK("back to the declared type", apctl_set_code_type(c, declared));
+    CHECK("declared type is not an edit", !apctl_code_is_edited(c));
+
+    apctl_set_code_type(c, other);
+    apctl_revert_code(c);
+    CHECK("revert restores the type", c->type == declared && c->raw->type == declared);
+
     /* Editing to the original text is not an edit. */
     CHECK("identical text is not an edit",
           apctl_set_code_text(c, original) && !apctl_code_is_edited(c));
@@ -185,15 +205,27 @@ static int run_edit(const char *path)
                  getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp",
                  (int)getpid());
 
-        uint8_t first[32], again[32], other[32];
+        uint8_t first[32], again[32], other2[32];
 
         CHECK("apply edit A", run_one(s, sw, path, "20000004 12345678", first, sizeof first));
         CHECK("apply edit A again", run_one(s, sw, path, "20000004 12345678", again, sizeof again));
         CHECK("same edit -> same bytes", memcmp(first, again, sizeof first) == 0);
         CHECK("edit A changed the file", memcmp(first, "\0\0\0\0\0\0\0\0", 8) != 0);
 
-        CHECK("apply edit B", run_one(s, sw, path, "20000004 000000FF", other, sizeof other));
-        CHECK("a different edit -> different bytes", memcmp(first, other, sizeof first) != 0);
+        CHECK("apply edit B", run_one(s, sw, path, "20000004 000000FF", other2, sizeof other2));
+        CHECK("a different edit -> different bytes", memcmp(first, other2, sizeof first) != 0);
+
+        /* The type decides which interpreter reads the body: the same Save
+         * Wizard line means nothing to the BSD parser, so the write goes away
+         * and comes back when the type does. */
+        uint8_t as_bsd[32], as_sw[32];
+        apctl_set_code_type(sw, APOLLO_CODE_BSD);
+        CHECK("apply as BSD", run_one(s, sw, path, "20000004 12345678", as_bsd, sizeof as_bsd));
+        CHECK("a SW line means nothing as BSD", memcmp(as_bsd, first, sizeof first) != 0);
+
+        apctl_set_code_type(sw, APOLLO_CODE_SAVEWIZARD);
+        CHECK("apply as Save Wizard again", run_one(s, sw, path, "20000004 12345678", as_sw, sizeof as_sw));
+        CHECK("type back -> the write is back", memcmp(as_sw, first, sizeof first) == 0);
 
         remove(path);
     } else {

@@ -374,6 +374,18 @@ footer {
     padding: 12px 14px;
 }
 
+/* Which interpreter reads the body. Sits first in the actions row, before the
+   buttons that act on the text. */
+#dialog-type-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--ink-dim);
+}
+
+#dialog-type { font-size: 13px; }
+
 /* The note sits after the buttons and carries the .warn colour when it has
    something to say; keep it from pushing them around. */
 #dialog-note {

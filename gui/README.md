@@ -126,12 +126,19 @@ line.
   the patch drops it. Applying works on a copy of the body, so an edit is not
   consumed by applying it and Apply stays repeatable.
 
-  Two things an edit cannot do, both settled at parse time: change the code's
-  **type** (an edited Save Wizard code is still read as Save Wizard), and
-  rename a **`{TAG}`** — the engine writes an option's value over the tag in
-  place, at the tag's own length, so a tag that has been retyped or deleted
-  stops resolving. The window says so when a placeholder goes missing, since
-  nothing else would until the patch misbehaved.
+  **Runs as** in the same window picks the interpreter — Save Wizard, BSD or
+  Python — and takes effect immediately, since a wrongly-typed code is often
+  the whole problem and has nothing to type. The loader guesses the type from
+  the `[...]` header and the shape of the body (Save Wizard only when *every*
+  line is exactly `XXXXXXXX YYYYYYYY`), so one mistyped line, or a script
+  whose author forgot `[PYTHON:]`, used to be unfixable here. It counts as an
+  edit, and *Revert to file* puts the declared type back with the body.
+
+  What an edit cannot do is rename a **`{TAG}`** — the engine writes an
+  option's value over the tag in place, at the tag's own length, so a tag that
+  has been retyped or deleted stops resolving. The window says so when a
+  placeholder goes missing, since nothing else would until the patch
+  misbehaved.
 - **View patch file** shows the `.savepatch` as text. Worth having: parsing
   keeps only the codes, so author comments, credits, `[INFO:]` notes and the
   target-file lines are invisible otherwise. Carriage returns are stripped for
