@@ -60,7 +60,7 @@ jobs:
           CC=gcc make static
           cp libmbedcrypto.a ../build/library
 
-      - name: Build Apollo Patcher GUI
+      - name: Build Apollo Save Patcher (Desktop)
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
@@ -136,7 +136,7 @@ jobs:
           cmake --build apollo-lib/mbedtls-2.16.12/build --target mbedcrypto -j
           ls -l apollo-lib/mbedtls-2.16.12/build/library/libmbedcrypto.a
 
-      - name: Cross-build Apollo Patcher GUI (i686)
+      - name: Cross-build Apollo Save Patcher (i686)
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/gui/cmake/mingw-i686.cmake"

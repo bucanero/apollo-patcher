@@ -1,4 +1,4 @@
-# Apollo Patcher — web front-end
+# Apollo Save Patcher — web front-end
 
 The Apollo engine compiled to WebAssembly, with a small static site around it.
 Everything runs in the browser tab: the page reads your files locally, patches
@@ -16,6 +16,7 @@ public/index.html    the page
 public/app.js        UI: state + DOM, no framework
 public/worker.js     owns the wasm module, runs every engine call
 public/cdn.js        where the database is fetched from, shared by both
+public/hexedit.js    hex editor, vendored from bucanero/ps2vmc-tool
 public/style.css     light + dark
 dist/                build output — exactly what gets published
 ```
@@ -135,6 +136,88 @@ How it works now:
 
 The desktop GUI deliberately does the opposite and bundles everything offline —
 it is a download you keep, not one you make every visit.
+
+## Hex editor
+
+`public/hexedit.js` is vendored **unmodified** from
+[ps2vmc-tool](https://github.com/bucanero/ps2vmc-tool) (`web-ps2/hexedit.js`),
+so it can be refreshed from there. It ships its own dark stylesheet, injected
+into `<head>` at run time; rather than fork the file, `style.css` maps its
+palette onto this app's tokens with `.hx-bg`-prefixed rules — prefixed because
+the injected `<style>` lands after our stylesheet and would otherwise win.
+
+Loaded as a classic `<script>` (it is UMD, not an ES module) so it registers
+`window.HexEdit` before the deferred module runs.
+
+The loaded save is editable: committing edits replaces the bytes in memory and
+retracts any previous result, since that output was produced from the bytes as
+they were. The patched result is offered read-only — editing it would produce a
+file no patch chain accounts for, and it is one Download away.
+
+## Editing a code
+
+The per-code **View** window is a text editor: *Save changes* replaces the body
+the engine runs, *Revert to file* restores the patch's own, and the row gets an
+`E` marker while the two differ. Saving also retracts any previous result — it
+came out of the old body.
+
+Session-only, deliberately. The `.savepatch` is never rewritten, and loading
+another patch drops every edit; exporting a modified patch file would be a
+different feature. Applying does not consume an edit either, because the engine
+copies the body before it runs, so Apply stays as repeatable as it is for an
+unedited patch.
+
+**Runs as** picks the interpreter (Save Wizard / BSD / Python) and applies at
+once rather than waiting for *Save changes*: the type and the text are separate
+things, and a wrongly-typed code often has nothing to type. It matters more
+than it sounds — without a `[SW:…]` / `[BSD:…]` / `[PYTHON:…]` prefix the type
+comes from the shape of the body, so a single mistyped line makes a Save Wizard
+code parse as BSD and fail, with no way to correct it from here until now.
+
+Switching a code *to* Python has to tell the worker, because the Python helper
+modules are fetched on demand and that decision is made from the parsed types
+at load time. `codeState()` refreshes `codeTypes` and starts the fetch, so a
+patch that contained no Python when it loaded still gets the modules. The wire
+argument is `codeType`, not `type`: the worker envelope already spends that
+name on the message kind.
+
+The engine, not the page, decides whether a code counts as edited — saving the
+patch file's own text back is not an edit — so `setCodeText` answers with what
+the engine holds afterwards and the marker follows that.
+
+The one trap worth the extra code: an option's value is written OVER its
+`{TAG}`, in place and at the tag's own length (`apply_tag_opts`), so a tag that
+has been retyped or deleted stops resolving and its dropdown quietly does
+nothing. The dialog watches for that while you type.
+
+## Saving the patch
+
+**Save patch file** downloads the `.savepatch` with the session's edits in it.
+The engine rebuilds it from the original bytes, splicing in only the edited
+codes, so everything the parse drops — comments, credits, `:file` lines, option
+blocks — survives. The bytes never become a JS string on the way out: 245 of
+the database's patches are Windows-1252, and decoding plus re-encoding would
+corrupt the ™/® in their names, so the worker copies the range straight out of
+the wasm heap into the Blob.
+
+A forced type is written into the title as `[SW:…]`, `[BSD:…]` or
+`[PYTHON:…]`, but only when the body alone would be read as something else —
+stating what the body already implies would add noise, and would display wrong
+on console engines older than those prefixes.
+
+Then it re-parses what it built and reports the codes that would read back
+differently, which the page passes on in the log. One case remains: a title
+carries a single marker, so a code already flagged `[DEFAULT:...]` or
+`[INFO:...]` has no room to state a type.
+
+## Byte order
+
+PS3 save data is big-endian; nothing else Apollo covers is. A patch chosen from
+the database carries its platform — the directory it lives in — so that decides
+directly. A file the user supplies has no directory, so the shared
+`apctl_is_big_endian_for()` falls back to matching known PS3 title-ID prefixes
+against the file name, then against the patch's own first lines for a file that
+has been renamed. It remains a checkbox either way.
 
 ## Scope
 

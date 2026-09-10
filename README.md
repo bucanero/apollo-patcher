@@ -1,4 +1,4 @@
-# Apollo Patcher
+# Apollo Save Patcher
 
 Desktop and web front-ends for the [Apollo save-patch engine](https://github.com/bucanero/apollo-lib).
 
@@ -18,6 +18,7 @@ The command-line tools (`patcher`, `dumper`) and the engine itself live in
 
 ```
 core/     apollo_ctrl.[ch] — stdio-free engine facade, shared by both front-ends
+                             (incl. the PS3 big-endian guess both apply)
           patchdb.[ch]     — reads the bundled patch database (apollo-patches.zip)
 gui/      Dear ImGui desktop app
 web/      WebAssembly build + static site

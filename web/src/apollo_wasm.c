@@ -25,6 +25,12 @@
 
 static apctl_session_t *g_session = NULL;
 
+/* The patch file's own bytes, kept for export: the engine's parse mutates and
+ * discards its input, and a saved patch has to carry everything the parse
+ * drops (comments, credits, `:file` lines, option blocks). */
+static char  *g_source = NULL;
+static size_t g_source_len = 0;
+
 /* ---------------------------------------------------------------------------
  * Log sink -> JS
  * ------------------------------------------------------------------------- */
@@ -130,6 +136,16 @@ const char *apw_version(void)
     return APOLLO_LIB_VERSION;
 }
 
+/* Whether this patch's save data is big-endian. `platform` is the database's
+ * tag ("PS3", ...) and wins when present; `text` is the title-ID fallback for a
+ * loose file. Pass an empty platform for the latter. See
+ * apctl_is_big_endian_for. */
+EMSCRIPTEN_KEEPALIVE
+int apw_is_be(const char *platform, const char *text)
+{
+    return apctl_is_big_endian_for(platform && *platform ? platform : NULL, text);
+}
+
 /* Parse a .savepatch from memory. Returns 1 on success, 0 on failure. */
 EMSCRIPTEN_KEEPALIVE
 int apw_open(const char *buf, int len, const char *name)
@@ -140,10 +156,21 @@ int apw_open(const char *buf, int len, const char *name)
         apctl_close(g_session);
         g_session = NULL;
     }
+    free(g_source);
+    g_source = NULL;
+    g_source_len = 0;
+
     if (len <= 0) return 0;
 
     g_session = apctl_open_buffer(buf, (size_t)len, name);
-    return g_session ? 1 : 0;
+    if (!g_session) return 0;
+
+    g_source = malloc((size_t)len);
+    if (g_source) {
+        memcpy(g_source, buf, (size_t)len);
+        g_source_len = (size_t)len;
+    }
+    return 1;
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -153,7 +180,54 @@ void apw_close(void)
         apctl_close(g_session);
         g_session = NULL;
     }
+    free(g_source);
+    g_source = NULL;
+    g_source_len = 0;
     apctl_reset_vars();
+}
+
+/* ---------------------------------------------------------------------------
+ * Saving the edited patch
+ *
+ * Two calls rather than one: the text is bytes, not a JS string. Patch files
+ * are not all UTF-8 (245 of the database's are Windows-1252), so the worker
+ * copies the range out of the heap instead of letting UTF8ToString() decode
+ * and mangle it. The buffer stays valid until the next export or close.
+ * ------------------------------------------------------------------------- */
+
+static char  *g_export = NULL;
+static size_t g_export_len = 0;
+
+/* Returns a pointer into the wasm heap, or 0 on failure. Length via
+ * apw_export_size(). */
+EMSCRIPTEN_KEEPALIVE
+const char *apw_export_patch(void)
+{
+    free(g_export);
+    g_export = NULL;
+    g_export_len = 0;
+
+    if (!g_session || !g_source) return NULL;
+
+    g_export = apctl_export_patch(g_session, g_source, g_source_len, &g_export_len);
+    return g_export;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int apw_export_size(void)
+{
+    return (int)g_export_len;
+}
+
+/* How many codes would read back differently from the text apw_export_patch()
+ * just produced, with their row indices written into `rows` (an Int32 view of
+ * `max` entries). See apctl_export_mismatches: the format cannot say
+ * "Save Wizard" or "BSD", so a forced type is the usual answer. */
+EMSCRIPTEN_KEEPALIVE
+int apw_export_mismatches(int *rows, int max)
+{
+    if (!g_session || !g_export || !g_export_len) return 0;
+    return apctl_export_mismatches(g_session, g_export, g_export_len, rows, max);
 }
 
 /* The whole code list, as JSON. Shape:
@@ -222,6 +296,67 @@ const char *apw_code_text(int index)
     const char *t = apctl_code_text(apctl_code_at(g_session, index));
     sb_puts(&b, t ? t : "");
     return publish(&b);
+}
+
+/* ---------------------------------------------------------------------------
+ * Editing a code body
+ *
+ * Session-only: the .savepatch itself is never rewritten, and closing the
+ * patch drops every edit. The engine applies from a copy of the body, so an
+ * edit survives being applied and Apply stays repeatable.
+ * ------------------------------------------------------------------------- */
+
+/* Returns 1 if the body is now `text`, 0 if the index is bad or the copy
+ * failed. Setting the original text back counts as success and clears the
+ * edited flag. */
+EMSCRIPTEN_KEEPALIVE
+int apw_set_code_text(int index, const char *text)
+{
+    if (!g_session || index < 0 || index >= apctl_code_count(g_session)) return 0;
+    return apctl_set_code_text(apctl_code_at(g_session, index), text ? text : "");
+}
+
+/* Reinterpret the body as another kind of code (APOLLO_CODE_* : 1 Save
+ * Wizard, 2 BSD, 3 Python). Returns 1 on success, 0 for a bad index or an
+ * unknown type. See apctl_set_code_type. */
+EMSCRIPTEN_KEEPALIVE
+int apw_set_code_type(int index, int type)
+{
+    if (!g_session || index < 0 || index >= apctl_code_count(g_session)) return 0;
+    return apctl_set_code_type(apctl_code_at(g_session, index), type);
+}
+
+/* The code's current type: it moves when the caller sets it, and back again on
+ * revert, so the page re-reads it rather than assuming. */
+EMSCRIPTEN_KEEPALIVE
+int apw_code_type(int index)
+{
+    if (!g_session || index < 0 || index >= apctl_code_count(g_session)) return 0;
+    return apctl_code_at(g_session, index)->type;
+}
+
+/* The code's current flag word. Worth re-reading after an edit: emptying a
+ * body (or filling an empty one) moves APOLLO_CODE_FLAG_EMPTY, which is what
+ * decides whether a row can be ticked at all. */
+EMSCRIPTEN_KEEPALIVE
+int apw_code_flags(int index)
+{
+    if (!g_session || index < 0 || index >= apctl_code_count(g_session)) return 0;
+    return apctl_code_at(g_session, index)->flags;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int apw_code_is_edited(int index)
+{
+    if (!g_session || index < 0 || index >= apctl_code_count(g_session)) return 0;
+    return apctl_code_is_edited(apctl_code_at(g_session, index));
+}
+
+EMSCRIPTEN_KEEPALIVE
+void apw_revert_code(int index)
+{
+    if (!g_session || index < 0 || index >= apctl_code_count(g_session)) return;
+    apctl_revert_code(apctl_code_at(g_session, index));
 }
 
 EMSCRIPTEN_KEEPALIVE

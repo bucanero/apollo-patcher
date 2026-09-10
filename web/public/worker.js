@@ -120,6 +120,30 @@ function workPath(name) {
 const TYPE_PYTHON = 3;    /* APOLLO_CODE_PYTHON */
 let codeTypes = [];       /* per-row type from the last open() */
 
+/* What one code looks like now: whatever the caller just did, this is the
+ * engine's own answer.
+ *
+ * `flags` comes back because emptying a body (or filling an empty one) moves
+ * APOLLO_CODE_FLAG_EMPTY, which decides whether the page lets the row be
+ * ticked. `type` comes back because the type selector moves it (and revert
+ * moves it back) — and codeTypes has to follow, since it is what decides
+ * whether the Python helper modules get fetched at all. */
+function codeState(index) {
+    const type = M._apw_code_type(index);
+    codeTypes[index] = type;
+
+    /* Switched to Python after load: start the modules now, the same way
+     * open() does for a patch that already contained one. Apply awaits it. */
+    if (type === TYPE_PYTHON) ensureModules().catch(() => {});
+
+    return {
+        text: M.UTF8ToString(M._apw_code_text(index)),
+        edited: !!M._apw_code_is_edited(index),
+        flags: M._apw_code_flags(index),
+        type,
+    };
+}
+
 const handlers = {
     async version() {
         await ready();
@@ -127,7 +151,7 @@ const handlers = {
     },
 
     /* Parse a .savepatch held in memory and return the full code list. */
-    async open({ buffer, name }) {
+    async open({ buffer, name, platform }) {
         await ready();
         const bytes = new Uint8Array(buffer);
         const ok = withBytes(bytes, (ptr, len) =>
@@ -141,18 +165,104 @@ const handlers = {
         const doc = JSON.parse(M.UTF8ToString(M._apw_codes_json()));
         codeTypes = doc.codes.map((c) => c.type);
 
+        /* PS3 save data is big-endian, and no patch in the database declares
+         * the order per code, so the mode is decided here (shared with the
+         * desktop GUI — see apctl_is_big_endian_for).
+         *
+         * A patch picked from the database carries its platform: that is the
+         * directory it lives in, so it is authoritative and no title-ID
+         * guessing is needed. A file the user supplied has none, so fall back
+         * to its name, then to its own first lines for a file that has been
+         * renamed. latin1 because a title ID is ASCII and the header may hold
+         * stray high bytes ('latin1' is the valid label; 'latin-1' throws). */
+        const plat = platform || '';
+        const askBe = (text) =>
+            withCString(plat, (pp) => withCString(text, (tp) => M._apw_is_be(pp, tp)));
+
+        const head = new TextDecoder('latin1').decode(bytes.subarray(0, 128));
+        const bigEndian = !!(plat ? askBe('') : (askBe(name || '') || askBe(head)));
+
         /* Start pulling the helper modules now, while the user reads the code
          * list, so Apply rarely has to wait. Failures are reported then, not
          * here — the patch may not need them at all. */
         if (codeTypes.some((t) => t === TYPE_PYTHON))
             ensureModules().catch(() => {});
 
-        return { ok: true, ...doc };
+        return { ok: true, bigEndian, ...doc };
     },
 
     async codeText({ index }) {
         await ready();
         return { text: M.UTF8ToString(M._apw_code_text(index)) };
+    },
+
+    /*
+     * Replace one code's body for this session.
+     *
+     * Answers with what the engine actually holds afterwards rather than
+     * echoing the request: setting the original text back is not an edit, so
+     * `edited` is the engine's own verdict and the page marks the row from it.
+     */
+    async setCodeText({ index, text }) {
+        await ready();
+        const ok = withCString(text, (tp) => M._apw_set_code_text(index, tp));
+        if (!ok) return { ok: false, error: 'Could not store the edited code.' };
+
+        return codeState(index);
+    },
+
+    /* `codeType` rather than `type`: the message envelope owns `type`. */
+    async setCodeType({ index, codeType }) {
+        await ready();
+        if (!M._apw_set_code_type(index, codeType))
+            return { ok: false, error: 'That is not a code type this engine runs.' };
+
+        return codeState(index);
+    },
+
+    async revertCode({ index }) {
+        await ready();
+        M._apw_revert_code(index);
+        return codeState(index);
+    },
+
+    /*
+     * The patch file with this session's edits in it.
+     *
+     * Comes back as bytes, never as a string: 245 of the database's patches
+     * are Windows-1252, so decoding and re-encoding would corrupt the ™/®
+     * characters in their game names. The C side hands over a heap range and
+     * this copies it out.
+     *
+     * `mismatches` is the engine's own verdict on what the file cannot carry
+     * (a forced Save Wizard/BSD type, mostly) -- worth telling the user
+     * before they walk away with the file.
+     */
+    async exportPatch() {
+        await ready();
+
+        const ptr = M._apw_export_patch();
+        const len = M._apw_export_size();
+        if (!ptr || len <= 0) return { ok: false, error: 'Could not rebuild the patch file.' };
+
+        const bytes = new Uint8Array(M.HEAPU8.subarray(ptr, ptr + len));
+
+        /* Row indices, out of a scratch int32 block. 32 is plenty: the page
+         * only names the first few. Read through an Int32Array view of the
+         * heap, since HEAP32 itself is not among the exported runtime
+         * methods. */
+        const max = 32;
+        const rowsPtr = M._malloc(max * 4);
+        const rows = [];
+        try {
+            const n = M._apw_export_mismatches(rowsPtr, max);
+            const view = new Int32Array(M.HEAPU8.buffer, rowsPtr, max);
+            for (let i = 0; i < Math.min(n, max); i++) rows.push(view[i]);
+        } finally {
+            M._free(rowsPtr);
+        }
+
+        return { patch: bytes, mismatches: rows };
     },
 
     /*
@@ -211,8 +321,13 @@ self.onmessage = async (ev) => {
         const result = (await handlers[type](args)) || {};
         const reply = { id, ok: result.ok !== false, ...result, log: drainLog() };
 
-        /* Hand the patched bytes over instead of copying them. */
-        self.postMessage(reply, result.patched ? [result.patched.buffer] : []);
+        /* Hand any bytes over instead of copying them: the patched save, or
+         * the rebuilt patch file. Both are freshly allocated here. */
+        const owned = [result.patched, result.patch]
+            .filter(Boolean)
+            .map((b) => b.buffer);
+
+        self.postMessage(reply, owned);
     } catch (err) {
         self.postMessage({ id, ok: false, error: String(err && err.message || err), log: drainLog() });
     }

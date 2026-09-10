@@ -1,4 +1,4 @@
-// Apollo Patcher GUI — Dear ImGui front-end over apollo_ctrl.
+// Apollo Save Patcher (desktop) — Dear ImGui front-end over apollo_ctrl.
 //
 // UI parity with the `patcher` CLI:
 //   - open a .savepatch  -> shows game name + code list (groups, flags)
@@ -13,13 +13,16 @@
 #include <vector>
 #include <cstdio>
 #include <cstdlib>   // _putenv_s (Windows software-GL selection)
+#include <cstring>   // strlen/strstr over the engine's C strings
 #include <fstream>
 #include <mutex>
 
 #include "imgui.h"
 #include "imgui_internal.h"   // PushItemFlag + ImGuiItemFlags_MixedValue (tri-state)
+#include "imgui_stdlib.h"      // InputTextMultiline over std::string (misc/cpp)
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl2.h"
+#include "imgui_memory_editor.h"   // vendored from ocornut/imgui_club (MIT)
 #include <GLFW/glfw3.h>
 
 // Renderer: Dear ImGui's fixed-function OpenGL2 backend on a legacy (non-core)
@@ -35,7 +38,8 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
-#include <windows.h>   // MessageBox for visible startup errors (no console with -mwindows)
+#include <windows.h>    // MessageBox for visible startup errors (no console with -mwindows)
+#include <shellapi.h>   // ShellExecuteA for opening links; WIN32_LEAN_AND_MEAN excludes it
 #endif
 
 // Window icon (Windows/Linux only). Kept fully inside the guard so macOS pulls
@@ -54,8 +58,25 @@ struct AppState {
     std::string         patch_path;
     std::string         target_path;
     std::string         game_name;
+    std::string         patch_raw;        // the .savepatch as text (CR stripped)
+    std::string         patch_bytes;      // ...and verbatim, for saving it back
+    bool                show_patch_raw = false;
+
+    std::vector<unsigned char> hex_data;   // the target file, for the hex editor
+    std::string         hex_path;          // which file hex_data came from
+    bool                show_hex = false;
+    bool                hex_dirty = false; // edits not yet written to disk
     std::vector<char>   selected;         // per-row checkbox
-    std::vector<char>   viewer_open;      // per-row raw-code window open flag
+    std::vector<char>   viewer_open;      // per-row code window open flag
+    // Editable copy of a code body, one per row. `loaded` keeps unsaved typing
+    // alive across closing and reopening the window; only opening a row for
+    // the first time (or saving/reverting) pulls the engine's text in.
+    struct CodeEdit {
+        std::string text;
+        bool        loaded = false;
+        bool        raise  = false;   // bring the window forward next frame
+    };
+    std::vector<CodeEdit> viewer_buf;
     std::string         log;
     std::mutex          log_mtx;
     bool                backup = true;    // copy target -> target.bak before patching
@@ -75,8 +96,12 @@ struct AppState {
         if (session) { apctl_close(session); session = nullptr; }
         selected.clear();
         viewer_open.clear();
+        viewer_buf.clear();
         game_name.clear();
         patch_path.clear();
+        patch_raw.clear();
+        patch_bytes.clear();
+        show_patch_raw = false;
     }
 };
 static AppState g_app;
@@ -108,6 +133,16 @@ static const char* type_tag(int t) {
         case APOLLO_CODE_PYTHON:     return "PY";
         case APOLLO_CODE_SAVEWIZARD: return "SW";
         default:                     return "?";
+    }
+}
+// Spelled out for the type selector in the code window; the table shows the
+// short tag above instead.
+static const char* type_name(int t) {
+    switch (t) {
+        case APOLLO_CODE_BSD:        return "BSD";
+        case APOLLO_CODE_PYTHON:     return "Python";
+        case APOLLO_CODE_SAVEWIZARD: return "Save Wizard";
+        default:                     return "Unknown";
     }
 }
 static ImVec4 type_color(int t) {
@@ -174,11 +209,22 @@ static bool backup_file(const std::string& src) {
     return true;
 }
 
+// Most patch files use CRLF. ImGui has no glyph for a carriage return, so it
+// would draw a box per line in the raw viewer.
+static std::string strip_cr(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in)
+        if (c != '\r') out += c;
+    return out;
+}
+
 // Shared tail of both load paths (file and database): a session exists, so set
 // up the per-row UI state around it.
 static void adopt_session(apctl_session_t* session,
                           const std::string& label,
-                          const char* display_name) {
+                          const char* display_name,
+                          const char* platform /* nullptr for a loose file */) {
     g_app.session = session;
     g_app.patch_path = label;
     g_app.game_name = display_name && *display_name ? display_name
@@ -186,19 +232,176 @@ static void adopt_session(apctl_session_t* session,
     const int n = apctl_code_count(session);
     g_app.selected.assign(n, 0);
     g_app.viewer_open.assign(n, 0);
+    g_app.viewer_buf.assign(n, AppState::CodeEdit{});
     for (int i = 0; i < n; ++i)      // pre-check [DEFAULT:] codes
         g_app.selected[i] = apctl_code_at(session, i)->activated ? 1 : 0;
 
     char buf[512];
     snprintf(buf, sizeof buf, "Loaded %d codes from %s", n, label.c_str());
     g_app.append_log(buf);
+
+    // PS3 save data is big-endian, and no patch in the database declares the
+    // order per code (the engine's [BE:...] header exists but goes unused), so
+    // pick the mode up rather than leave the user to notice. The database's own
+    // platform tag decides when there is one; a loose file falls back to its
+    // title ID. Still a checkbox they can override afterwards.
+    if (apctl_is_big_endian_for(platform, label.c_str())) {
+        if (!g_app.big_endian) {
+            g_app.big_endian = true;
+            g_app.append_log("PS3 title detected - big-endian data mode enabled");
+        }
+    } else if (g_app.big_endian) {
+        g_app.big_endian = false;
+        g_app.append_log("Non-PS3 title - big-endian data mode disabled");
+    }
+    apctl_set_big_endian(g_app.big_endian ? 1 : 0);
+}
+
+// ---- about box -------------------------------------------------------------
+
+#define APP_NAME      "Apollo Save Patcher"
+#define URL_PATCHER   "https://github.com/bucanero/apollo-patcher"
+#define URL_LIB       "https://github.com/bucanero/apollo-lib"
+#define URL_PATCHES   "https://github.com/bucanero/apollo-patches"
+
+// Hand a URL to the desktop. Every caller passes a compile-time constant from
+// the list above, so there is nothing to quote-escape.
+static void open_url(const char* url) {
+#if defined(_WIN32)
+    ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
+#else
+    std::string cmd =
+#if defined(__APPLE__)
+        "open '";
+#else
+        "xdg-open '";
+#endif
+    cmd += url;
+    cmd += "' >/dev/null 2>&1 &";
+    if (system(cmd.c_str()) != 0)
+        g_app.append_log("[!] Could not open the browser - copy the link instead");
+#endif
+}
+
+// A clickable link: ImGui has no hyperlink widget, so this is a text-coloured
+// button plus a copy action, for when opening a browser is not possible (a
+// bare Linux session with no xdg-open, say).
+static void link_row(const char* label, const char* url) {
+    ImGui::Bullet();
+    ImGui::TextColored(ImVec4(0.45f, 0.65f, 1.00f, 1.0f), "%s", label);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        ImGui::SetTooltip("%s", url);
+    }
+    if (ImGui::IsItemClicked()) open_url(url);
+    ImGui::SameLine();
+    ImGui::PushID(url);
+    if (ImGui::SmallButton("copy")) ImGui::SetClipboardText(url);
+    ImGui::PopID();
+}
+
+static bool g_want_about = false;
+
+static void draw_about() {
+    if (g_want_about) { ImGui::OpenPopup("About"); g_want_about = false; }
+
+    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("About", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    ImGui::TextUnformatted(APP_NAME);
+    ImGui::TextDisabled("Apollo engine %s", APOLLO_LIB_VERSION);
+    ImGui::Spacing();
+
+    ImGui::TextWrapped("Applies Apollo save patches - Save Wizard codes, BSD "
+                       "scripts and Python scripts - to decrypted save data.");
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    ImGui::Text("Copyright (C) 2020-2026 Damian Parrino (Bucanero)");
+    ImGui::TextWrapped("Licensed under the GNU General Public License v3 or "
+                       "later. This program comes with no warranty, to the "
+                       "extent permitted by law.");
+    ImGui::Spacing();
+
+    ImGui::TextDisabled("Project");
+    link_row("apollo-patcher (this app)", URL_PATCHER);
+    link_row("apollo-lib (the engine)", URL_LIB);
+    link_row("apollo-patches (the patch database)", URL_PATCHES);
+    ImGui::Spacing();
+
+    ImGui::TextDisabled("Third-party components");
+    ImGui::BulletText("Dear ImGui and GLFW - user interface");
+    ImGui::BulletText("imgui_club memory editor - the hex view (MIT)");
+    ImGui::BulletText("portable-file-dialogs - native file pickers (WTFPL)");
+    ImGui::BulletText("mbedTLS and zlib - crypto and compression");
+    ImGui::BulletText("MicroPython - runs the Python patch scripts");
+    ImGui::Spacing();
+
+    if (ImGui::Button("Close", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
+// Window titles get the file name; the full path goes in the body, where it
+// can wrap and be read.
+static const char* base_name(const std::string& path) {
+    size_t slash = path.find_last_of("/\\");
+    return path.c_str() + (slash == std::string::npos ? 0 : slash + 1);
+}
+
+// The hex editor works on a copy of the target file held in memory, written
+// back only when asked — so a mistyped byte costs nothing until you commit it.
+static bool hex_load(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) { g_app.append_log("[!] Could not read the target file"); return false; }
+    g_app.hex_data.assign(std::istreambuf_iterator<char>(in),
+                          std::istreambuf_iterator<char>());
+    g_app.hex_path = path;
+    g_app.hex_dirty = false;
+    char buf[512];
+    snprintf(buf, sizeof buf, "Loaded %zu bytes of %s for editing",
+             g_app.hex_data.size(), path.c_str());
+    g_app.append_log(buf);
+    return true;
+}
+
+static bool hex_write_back() {
+    if (g_app.hex_path.empty()) return false;
+
+    // Same courtesy the patch path gives: keep a .bak before overwriting.
+    if (g_app.backup && !backup_file(g_app.hex_path))
+        g_app.append_log("[!] Backup failed - writing anyway");
+
+    std::ofstream out(g_app.hex_path, std::ios::binary | std::ios::trunc);
+    if (!out) { g_app.append_log("[!] Could not write the target file"); return false; }
+    out.write(reinterpret_cast<const char*>(g_app.hex_data.data()),
+              (std::streamsize)g_app.hex_data.size());
+    if (!out) { g_app.append_log("[!] Write failed"); return false; }
+
+    g_app.hex_dirty = false;
+    char buf[512];
+    snprintf(buf, sizeof buf, "Wrote %zu bytes to %s",
+             g_app.hex_data.size(), g_app.hex_path.c_str());
+    g_app.append_log(buf);
+    return true;
 }
 
 static void load_patch(const std::string& path) {
     g_app.close();
     apctl_session_t* s = apctl_open_file(path.c_str());
     if (!s) { g_app.append_log("[!] Could not open patch file"); return; }
-    adopt_session(s, path, nullptr);
+
+    // Kept as text so it can be read: parsing keeps only the codes, dropping
+    // the author's comments, target-file lines and anything else the format
+    // allows.
+    std::ifstream in(path, std::ios::binary);
+    if (in) {
+        std::string raw((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+        g_app.patch_bytes = raw;              // verbatim: what a save writes back
+        g_app.patch_raw = strip_cr(raw);      // CR-stripped: what ImGui draws
+    }
+    adopt_session(s, path, nullptr, nullptr);   // loose file: no platform tag
 }
 
 // ---- patch database --------------------------------------------------------
@@ -287,13 +490,15 @@ static void load_patch_from_db(int index) {
     g_app.close();
     std::string label = std::string(e->platform) + "/" + e->title_id + ".savepatch";
     apctl_session_t* s = apctl_open_buffer(data, len, label.c_str());
+    g_app.patch_bytes.assign(data, len);
+    g_app.patch_raw = strip_cr(g_app.patch_bytes);
     free(data);
 
     if (!s) { g_app.append_log("[!] Could not parse that patch"); return; }
 
     // The index's name is preferred: it was decoded at build time, where the
     // 245 Windows-1252 patch files (game names with (TM)/(R)) are handled.
-    adopt_session(s, label, e->name);
+    adopt_session(s, label, e->name, e->platform);
 }
 
 static void apply_selected() {
@@ -368,13 +573,73 @@ static std::string pick_file(const char* filter_ext) {
     return sel.empty() ? std::string() : sel[0];
 }
 
+static std::string pick_save_path(const std::string& suggested) {
+    auto p = pfd::save_file("Save patch file", suggested,
+                            { "Apollo patch (*.savepatch)", "*.savepatch",
+                              "All files", "*" }).result();
+    return p;
+}
+
 // Native modals are opened AFTER the ImGui frame is rendered (see the main
 // loop), not from inside a widget callback — opening a modal mid-frame is the
 // second macOS pitfall. Widgets just raise these intents.
 static bool g_pending_open   = false;
 static bool g_pending_target = false;
+static bool g_pending_save_patch = false;
 static void do_open_patch()    { g_pending_open = true; }
 static void do_choose_target() { g_pending_target = true; }
+static void do_save_patch()    { g_pending_save_patch = true; }
+
+//
+// Write the .savepatch back out, with any code edits in it.
+//
+// The engine splices the edits into the ORIGINAL bytes rather than
+// regenerating the file from its parse, so comments, credits, target-file
+// lines and option blocks all survive (see apctl_export_patch). It then
+// re-reads what it built and reports codes that would come back different.
+// A forced type is written as a title prefix ([SW:...], [BSD:...],
+// [PYTHON:...]) and survives, but only one prefix fits per title, so a code
+// already marked [DEFAULT:...] or [INFO:...] has no room to state one.
+//
+static void save_patch_file(const std::string& path) {
+    size_t len = 0;
+    char*  text = apctl_export_patch(g_app.session, g_app.patch_bytes.data(),
+                                     g_app.patch_bytes.size(), &len);
+    if (!text) { g_app.append_log("[!] Could not rebuild the patch file"); return; }
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        g_app.append_log("[!] Could not write that file");
+        free(text);
+        return;
+    }
+    out.write(text, (std::streamsize)len);
+    out.close();
+
+    char msg[512];
+    snprintf(msg, sizeof msg, "Saved %s (%zu bytes)", base_name(path), len);
+    g_app.append_log(msg);
+
+    int rows[32];
+    int miss = apctl_export_mismatches(g_app.session, text, len, rows, 32);
+    free(text);
+
+    if (miss > 0) {
+        snprintf(msg, sizeof msg,
+                 "[!] %d code(s) will read back differently from that file - a "
+                 "title can carry only one marker, so a code that is already "
+                 "[DEFAULT:...] or [INFO:...] cannot also state its type:", miss);
+        g_app.append_log(msg);
+
+        for (int i = 0; i < miss && i < 32; i++) {
+            apctl_code_t* c = apctl_code_at(g_app.session, rows[i]);
+            snprintf(msg, sizeof msg, "      #%d %s", c ? c->id : rows[i],
+                     (c && c->name) ? c->name : "");
+            g_app.append_log(msg);
+        }
+        g_app.show_log = true;
+    }
+}
 
 static void process_pending_dialogs() {
     if (g_pending_open) {
@@ -386,6 +651,25 @@ static void process_pending_dialogs() {
         g_pending_target = false;
         std::string p = pick_file(nullptr);
         if (!p.empty()) g_app.target_path = p;
+    }
+    if (g_pending_save_patch) {
+        g_pending_save_patch = false;
+        if (g_app.session && !g_app.patch_bytes.empty()) {
+            // Suggest a new name: overwriting the file they opened (or a
+            // database patch's own name) is rarely what an edit wants. Only
+            // once, though, or a file saved from here twice ends up
+            // "-edited-edited".
+            std::string base = base_name(g_app.patch_path);
+            size_t dot = base.rfind(".savepatch");
+            if (dot != std::string::npos) base.erase(dot);
+
+            const std::string tag = "-edited";
+            bool tagged = base.size() >= tag.size() &&
+                          base.compare(base.size() - tag.size(), tag.size(), tag) == 0;
+
+            std::string p = pick_save_path(base + (tagged ? "" : tag) + ".savepatch");
+            if (!p.empty()) save_patch_file(p);
+        }
     }
 }
 
@@ -455,14 +739,36 @@ static void draw_code_list() {
             }
             if (mixed) ImGui::PopItemFlag();
 
+            // A hand-edited body is worth seeing from the list: if an apply
+            // then misbehaves, this is the first thing to suspect.
+            if (apctl_code_is_edited(c)) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "*");
+                ImGui::SetItemTooltip("Body edited in this session");
+            }
+
             if (parent || disabled) ImGui::PopStyleColor();
             if (indent) ImGui::Unindent(indent);
 
-            // --- col 1: View button opens a raw-code window ---
+            // --- col 1: View/Edit button opens a code window ---
+            // Also offered when the body is empty but edited, so a body that
+            // was emptied by an edit can still be reached and reverted.
             ImGui::TableSetColumnIndex(1);
             const char* body = apctl_code_text(c);
-            if (body && body[0]) {
-                if (ImGui::SmallButton("View")) g_app.viewer_open[i] = 1;
+            if ((body && body[0]) || apctl_code_is_edited(c)) {
+                if (ImGui::SmallButton("View")) {
+                    if (!g_app.viewer_open[i]) {
+                        g_app.viewer_open[i] = 1;
+                        // Only on the way in: reopening keeps whatever was
+                        // typed and not saved.
+                        if (!g_app.viewer_buf[i].loaded) {
+                            g_app.viewer_buf[i].text = body ? body : "";
+                            g_app.viewer_buf[i].loaded = true;
+                        }
+                    }
+                    // A window already open may be behind another one.
+                    g_app.viewer_buf[i].raise = true;
+                }
             }
 
             // --- col 2: type badge ---
@@ -503,22 +809,183 @@ static void draw_code_list() {
 }
 
 // Modeless raw-code windows (one per code whose View button was clicked).
+// The .savepatch as text. Worth having: the parser keeps only the codes, so
+// author comments, credits and the target-file lines are invisible otherwise.
+static void draw_patch_raw() {
+    if (!g_app.show_patch_raw) return;
+
+    char title[256];
+    snprintf(title, sizeof title, "Patch file: %s##rawpatch",
+             g_app.patch_path.empty() ? "(none)" : base_name(g_app.patch_path));
+
+    bool open = true;
+    ImGui::SetNextWindowSize(ImVec2(640, 520), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin(title, &open)) {
+        ImGui::Text("%zu bytes", g_app.patch_raw.size());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Copy")) ImGui::SetClipboardText(g_app.patch_raw.c_str());
+        ImGui::Separator();
+        ImGui::BeginChild("raw", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
+        // TextUnformatted skips lines outside the clip rect, so even the
+        // largest patches in the database (~430KB) stay cheap to draw.
+        ImGui::TextUnformatted(g_app.patch_raw.c_str());
+        ImGui::EndChild();
+    }
+    ImGui::End();
+    if (!open) g_app.show_patch_raw = false;
+}
+
+// Hex view/edit of the target save file.
+static void draw_hex_editor() {
+    if (!g_app.show_hex) return;
+
+    static MemoryEditor ed;
+    static bool wired = false;
+    if (!wired) {
+        // Route writes through us so an edit marks the buffer dirty; the
+        // editor otherwise pokes the bytes silently.
+        ed.WriteFn = [](ImU8* mem, size_t off, ImU8 d, void*) {
+            mem[off] = d;
+            g_app.hex_dirty = true;
+        };
+        wired = true;
+    }
+
+    char title[512];
+    snprintf(title, sizeof title, "Save data: %s%s##hexedit",
+             base_name(g_app.hex_path), g_app.hex_dirty ? " *" : "");
+
+    bool open = true;
+    ImGui::SetNextWindowSize(ImVec2(700, 520), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin(title, &open)) {
+        ImGui::TextWrapped("%s", g_app.hex_path.c_str());
+        ImGui::Text("%zu bytes", g_app.hex_data.size());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reload from disk")) hex_load(g_app.hex_path);
+        ImGui::SameLine();
+        if (g_app.hex_dirty) {
+            if (ImGui::SmallButton("Write changes")) hex_write_back();
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "unsaved edits");
+        } else {
+            ImGui::TextDisabled("no unsaved edits");
+        }
+        ImGui::Separator();
+        if (!g_app.hex_data.empty())
+            ed.DrawContents(g_app.hex_data.data(), g_app.hex_data.size());
+        else
+            ImGui::TextDisabled("(empty file)");
+    }
+    ImGui::End();
+    if (!open) g_app.show_hex = false;
+}
+
+// Modeless code windows: the body as text, and editable.
+//
+// Editing is session-only — nothing is written back to the .savepatch file, so
+// closing the patch drops it. The engine applies from a COPY of the body
+// (patches.c strdup()s it), so an edit is not consumed by applying it and
+// Apply stays repeatable. Two things an edit cannot do, both fixed at parse
+// time: change the code's type, and rename a {TAG} — see apctl_set_code_text().
 static void draw_code_viewers() {
     if (!g_app.session) return;
     for (int i = 0; i < apctl_code_count(g_app.session); ++i) {
         if (!g_app.viewer_open[i]) continue;
-        apctl_code_t* c = apctl_code_at(g_app.session, i);
-        char title[160];
-        snprintf(title, sizeof title, "Code: %s##viewer%d",
-                 (c->name && c->name[0]) ? c->name : "(unnamed)", i);
+
+        apctl_code_t*      c    = apctl_code_at(g_app.session, i);
+        AppState::CodeEdit& buf = g_app.viewer_buf[i];
+        const char* live    = apctl_code_text(c);
+        const bool  unsaved = (buf.text != live);
+        const bool  edited  = apctl_code_is_edited(c) != 0;
+
+        char title[192];
+        snprintf(title, sizeof title, "Code: %s%s##viewer%d",
+                 (c->name && c->name[0]) ? c->name : "(unnamed)",
+                 unsaved ? " *" : "", i);
+
         bool open = true;
         ImGui::SetNextWindowSize(ImVec2(560, 400), ImGuiCond_FirstUseEver);
+        if (buf.raise) { ImGui::SetNextWindowFocus(); buf.raise = false; }
         if (ImGui::Begin(title, &open)) {
             ImGui::Text("Target file: %s", (c->file && c->file[0]) ? c->file : "(none)");
+
+            // Which interpreter reads the body. The loader guesses it from the
+            // [...] header and the shape of the body -- Save Wizard only when
+            // every line is exactly "XXXXXXXX YYYYYYYY" -- so one mistyped
+            // line, or a missing [PYTHON:] header, lands a code on the wrong
+            // interpreter with no way to fix it. It is also the other half of
+            // editing: Save Wizard lines rewritten as BSD commands only mean
+            // something once the type follows.
+            static const int TYPES[] = { APOLLO_CODE_SAVEWIZARD, APOLLO_CODE_BSD,
+                                         APOLLO_CODE_PYTHON };
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+            if (ImGui::BeginCombo("Runs as", type_name(c->type))) {
+                for (int t : TYPES)
+                    if (ImGui::Selectable(type_name(t), c->type == t) && c->type != t) {
+                        apctl_set_code_type(c, t);
+                        char msg[256];
+                        snprintf(msg, sizeof msg, "Code #%d \"%s\" now runs as %s",
+                                 c->id, c->name ? c->name : "", type_name(t));
+                        g_app.append_log(msg);
+                    }
+                ImGui::EndCombo();
+            }
+
+            if (!unsaved) ImGui::BeginDisabled();
+            if (ImGui::SmallButton("Save changes")) {
+                const size_t was = strlen(live);
+                if (apctl_set_code_text(c, buf.text.c_str())) {
+                    char msg[256];
+                    snprintf(msg, sizeof msg, "Code #%d \"%s\" edited (%zu -> %zu bytes)%s",
+                             c->id, c->name ? c->name : "", was, buf.text.size(),
+                             apctl_code_is_edited(c) ? "" : " - back to the original");
+                    g_app.append_log(msg);
+                } else {
+                    g_app.append_log("Could not store the edit (out of memory)");
+                }
+                // set_code_text drops an edit that matches the original, so
+                // read the body back rather than assume it took the text.
+                buf.text = apctl_code_text(c);
+            }
+            if (!unsaved) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            if (!edited && !unsaved) ImGui::BeginDisabled();
+            if (ImGui::SmallButton("Revert to file")) {
+                apctl_revert_code(c);
+                buf.text = apctl_code_text(c);
+            }
+            if (!edited && !unsaved) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Copy")) ImGui::SetClipboardText(buf.text.c_str());
+
+            ImGui::SameLine();
+            if (unsaved)     ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "unsaved edits");
+            else if (edited) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "edited");
+            else             ImGui::TextDisabled("unchanged");
+
+            // An option's value is written OVER its tag, in place and at the
+            // tag's own length, so a tag that has been retyped or deleted stops
+            // resolving and its dropdown quietly does nothing. Cheap to catch
+            // here, and invisible otherwise until the patch misbehaves.
+            int missing = 0;
+            for (int g = 0; g < apctl_opt_group_count(c); ++g)
+                if (!strstr(buf.text.c_str(), apctl_opt_tag(c, g))) missing++;
+            if (missing) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.4f, 1.0f));
+                ImGui::TextWrapped("%d option placeholder%s missing from the text - "
+                                   "that dropdown has nothing left to fill in. Keep the "
+                                   "{TAG} exactly as the patch wrote it.",
+                                   missing, missing == 1 ? " is" : "s are");
+                ImGui::PopStyleColor();
+            }
+
             ImGui::Separator();
-            ImGui::BeginChild("body", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
-            ImGui::TextUnformatted(apctl_code_text(c));
-            ImGui::EndChild();
+            // AllowTabInput: patch bodies (Python especially) are indented, and
+            // the default would move focus out of the box instead.
+            ImGui::InputTextMultiline("##body", &buf.text, ImVec2(-FLT_MIN, -FLT_MIN),
+                                      ImGuiInputTextFlags_AllowTabInput);
         }
         ImGui::End();
         if (!open) g_app.viewer_open[i] = 0;
@@ -628,14 +1095,18 @@ static void draw_menu_bar(bool* want_quit) {
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("Find a game...", "Ctrl+F")) g_db.want_open = true;
             if (ImGui::MenuItem("Open .savepatch...", "Ctrl+O")) do_open_patch();
+            if (ImGui::MenuItem("Save .savepatch as...", "Ctrl+S",
+                                false, g_app.session != nullptr)) do_save_patch();
             if (ImGui::MenuItem("Choose target file...")) do_choose_target();
             ImGui::Separator();
             if (ImGui::MenuItem("Quit", "Ctrl+Q")) *want_quit = true;
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Help")) {
-            ImGui::MenuItem("Apollo Patcher GUI", nullptr, false, false);
             ImGui::MenuItem("Legend: SW=Save Wizard  BSD  PY=Python", nullptr, false, false);
+            ImGui::Separator();
+            if (ImGui::MenuItem("Project on GitHub")) open_url(URL_PATCHER);
+            if (ImGui::MenuItem("About " APP_NAME "...")) g_want_about = true;
             ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
@@ -646,7 +1117,7 @@ static void draw_main_window(bool* want_quit) {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
-    ImGui::Begin("Apollo Patcher", nullptr,
+    ImGui::Begin("Apollo Save Patcher", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_MenuBar);
 
@@ -662,10 +1133,37 @@ static void draw_main_window(bool* want_quit) {
     ImGui::SameLine();
     ImGui::TextUnformatted(g_app.patch_path.empty() ? "(no patch loaded)" : g_app.patch_path.c_str());
 
+    if (!g_app.patch_raw.empty()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("View patch file")) g_app.show_patch_raw = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Show the .savepatch as text, including comments\n"
+                              "and target lines that parsing leaves out.");
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Save patch file...")) do_save_patch();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Write this .savepatch out, with your code edits in it,\n"
+                              "so they can be kept or shared. Everything the parser\n"
+                              "leaves out is carried over untouched.");
+    }
+
     if (ImGui::Button("Choose target...")) do_choose_target();
     ImGui::SameLine();
     ImGui::TextUnformatted(g_app.target_path.empty() ? "(script uses patch's own target)"
                                                      : g_app.target_path.c_str());
+    if (!g_app.target_path.empty()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("View / edit data")) {
+            // Read fresh every time: applying codes rewrites the file, so a
+            // buffer from before would be stale.
+            if (hex_load(g_app.target_path)) g_app.show_hex = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Open the target file in a hex editor.\n"
+                              "Edits are written only when you ask.");
+    }
+
     ImGui::Checkbox("Back up target (.bak) before patching", &g_app.backup);
 
     // Data byte order — equivalent of the CLI's -b/--big-endian flag. Applied
@@ -726,8 +1224,12 @@ static void draw_main_window(bool* want_quit) {
     }
 
     render_db_browser();
+    draw_about();
 
     ImGui::End();
+
+    draw_patch_raw();
+    draw_hex_editor();
 }
 
 static void apply_style() {
@@ -770,7 +1272,7 @@ static void glfw_error_cb(int code, const char* desc) {
 }
 static void fatal(const std::string& msg) {
 #ifdef _WIN32
-    MessageBoxA(nullptr, msg.c_str(), "Apollo Patcher — startup error", MB_ICONERROR | MB_OK);
+    MessageBoxA(nullptr, msg.c_str(), "Apollo Save Patcher — startup error", MB_ICONERROR | MB_OK);
 #else
     fprintf(stderr, "%s\n", msg.c_str());
 #endif
@@ -792,7 +1294,7 @@ int main(int, char**) {
     if (!glfwInit()) { fatal("Failed to initialize GLFW.\n\n" + g_glfw_error); return 1; }
     // No context hints: GLFW's default legacy/compatibility context is what the
     // fixed-function opengl2 backend needs, on every platform.
-    GLFWwindow* window = glfwCreateWindow(860, 820, "Apollo Patcher", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(860, 820, "Apollo Save Patcher", nullptr, nullptr);
     if (!window) {
         fatal("Could not create an OpenGL context.\n\n"
               "This machine's graphics driver may not support OpenGL — this is "
@@ -829,6 +1331,8 @@ int main(int, char**) {
 
         // keyboard shortcuts
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_O, false)) do_open_patch();
+        if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_S, false) &&
+            g_app.session) do_save_patch();
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_F, false)) g_db.want_open = true;
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_Q, false)) want_quit = true;
 

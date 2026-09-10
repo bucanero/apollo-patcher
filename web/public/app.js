@@ -1,5 +1,5 @@
 /*
- * UI for the Apollo Patcher web front-end.
+ * UI for the Apollo Save Patcher web front-end.
  *
  * No framework and no build step: the page is served exactly as it sits in
  * dist/. All engine work happens in worker.js; this file is only state + DOM.
@@ -22,9 +22,11 @@ const state = {
     save: null,          // ArrayBuffer of the original, unpatched save
     saveName: null,
     codes: [],
+    patchText: null,     // the .savepatch verbatim, for the raw viewer
     checked: new Set(),  // indices
     options: {},         // index -> [selected value per group]
     patched: null,       // Uint8Array of the last successful run
+    edited: new Set(),   // indices whose body was hand-edited this session
 };
 
 /* ---------------------------------------------------------------------------
@@ -112,26 +114,37 @@ function wireDropZone(zoneId, inputId, onFile) {
     });
 }
 
-async function loadPatch(file, displayName) {
+async function loadPatch(file, displayName, platform) {
     const buffer = await file.arrayBuffer();
     state.patchName = file.name;
     $('patch-name').textContent = displayName || file.name;
     $('drop-patch').classList.add('filled');
 
+    /* Decode before the buffer is handed to the worker — posting it transfers
+     * ownership, so it is unreadable here afterwards. Parsing keeps only the
+     * codes, and the comments and target lines are often the only
+     * documentation a patch has, so keep the text for the raw viewer. */
+    state.patchText = decodePatch(buffer);
+
     clearLog();
-    const res = await call('open', { buffer, name: file.name }, [buffer]);
+    const res = await call('open', { buffer, name: file.name, platform }, [buffer]);
     if (!res.ok) {
         $('patch-name').textContent = res.error || 'Could not read this file';
         $('drop-patch').classList.remove('filled');
         $('workspace').hidden = true;
         state.codes = [];
         state.checked.clear();
+        state.edited.clear();
+        state.patchText = null;
+        $('view-patch').hidden = true;
+        $('save-patch').hidden = true;
         clearResult();
         return;
     }
 
     state.codes = res.codes;
     state.options = {};
+    state.edited.clear();   /* edits belong to the session that made them */
     res.codes.forEach((c, i) => {
         if (c.options.length) state.options[i] = c.options.map((o) => o.sel);
     });
@@ -139,8 +152,20 @@ async function loadPatch(file, displayName) {
     /* Prefer the index's name when the patch came from the database: the
      * engine hands back raw bytes, and 245 patches are Windows-1252, so their
      * ™/® characters arrive mojibaked through UTF8ToString. */
+    /* Byte order follows the patch, not the previous one: a PS3 patch turns
+     * big-endian on, anything else turns it back off. Still a checkbox, so it
+     * can be overridden afterwards. */
+    const be = !!res.bigEndian;
+    if ($('big-endian').checked !== be) {
+        $('big-endian').checked = be;
+        appendLog([be ? 'PS3 title detected — big-endian data mode enabled'
+                      : 'Non-PS3 title — big-endian data mode disabled']);
+    }
+
     $('game-name').textContent = displayName || res.game.trim() || file.name;
     $('code-count').textContent = `${res.codes.length} codes`;
+    $('view-patch').hidden = false;
+    $('save-patch').hidden = false;
     $('workspace').hidden = false;
     $('intro').hidden = true;
     clearResult();
@@ -150,10 +175,70 @@ async function loadPatch(file, displayName) {
 async function loadSave(file) {
     state.save = await file.arrayBuffer();
     state.saveName = file.name;
-    $('save-name').textContent = `${file.name} · ${formatSize(state.save.byteLength)}`;
-    $('drop-save').classList.add('filled');
+    showSaveLoaded();
     clearResult();
     refreshApplyButton();
+}
+
+function showSaveLoaded() {
+    $('save-name').textContent =
+        `${state.saveName} · ${formatSize(state.save.byteLength)}`;
+    $('drop-save').classList.add('filled');
+    $('save-tools').hidden = false;
+}
+
+/* ---------------------------------------------------------------------------
+ * Hex editor
+ *
+ * HexEdit is vendored from bucanero/ps2vmc-tool (see hexedit.js) and loaded as
+ * a classic script, so it is a global rather than an import.
+ * ------------------------------------------------------------------------- */
+
+function editSaveData() {
+    if (!state.save) return;
+
+    HexEdit.open({
+        title: state.saveName,
+        subtitle: `loaded save · ${formatSize(state.save.byteLength)}`,
+        data: new Uint8Array(state.save),
+        onSave: (edited) => {
+            /* slice() so the ArrayBuffer is exactly the file, whatever view
+             * the editor hands back. */
+            state.save = edited.slice().buffer;
+            showSaveLoaded();
+            /* Any previous run patched the bytes as they were, so retract it
+             * rather than leave a download that no longer matches. */
+            clearResult();
+            appendLog([`Save data edited by hand — ${formatSize(state.save.byteLength)}`]);
+            refreshApplyButton();
+        },
+    });
+}
+
+/* The patched result, read-only: editing it would produce a file no patch
+ * chain accounts for, and it is one Download away anyway. */
+function viewResultData() {
+    if (!state.patched) return;
+    HexEdit.open({
+        title: state.saveName,
+        subtitle: `patched result · ${formatSize(state.patched.length)}`,
+        data: state.patched,
+        readOnly: true,
+    });
+}
+
+/*
+ * Patch files are mostly UTF-8, but 245 of the ~2240 in the database are
+ * Windows-1252 (game names with ™ / ®). Decoding those as UTF-8 would replace
+ * the bytes with U+FFFD, so try strict UTF-8 first and fall back — the same
+ * rule tools/build-index.py applies.
+ */
+function decodePatch(buffer) {
+    try {
+        return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+    } catch (e) {
+        return new TextDecoder('windows-1252').decode(buffer);
+    }
 }
 
 function formatSize(n) {
@@ -179,6 +264,31 @@ function childrenOf(index) {
 
 function selectable(code) {
     return !code.parent && !(code.flags & FLAG.EMPTY);
+}
+
+/*
+ * Ticking any code pulls in every [R] code in the file.
+ *
+ * "(Required)" entries are the wrappers a patch needs around whatever else you
+ * choose — typically a pair that decompresses a payload before the real codes
+ * run and recompresses it afterwards — so picking one code without them
+ * produces a save the game cannot read. The desktop GUI has always done this
+ * (auto_enable_required in gui/src/main.cpp); the web app had not.
+ *
+ * Only additive, and only on check: unticking leaves them alone, so they can
+ * still be turned off deliberately.
+ *
+ * Returns true if anything changed, so the caller knows to re-render.
+ */
+function enableRequired() {
+    let changed = false;
+    state.codes.forEach((code, i) => {
+        if ((code.flags & FLAG.REQUIRED) && selectable(code) && !state.checked.has(i)) {
+            state.checked.add(i);
+            changed = true;
+        }
+    });
+    return changed;
 }
 
 function selectDefaults() {
@@ -220,9 +330,11 @@ function renderCodes() {
             box.checked = state.checked.has(index);
             box.addEventListener('change', () => {
                 toggle(index, box.checked);
-                /* Ticking a code with option groups changes how they render
-                 * (an unanswered one is flagged only while ticked). */
-                if (code.options.length) renderCodes();
+                const pulled = box.checked && enableRequired();
+                /* Re-render when a required code was pulled in (its box has to
+                 * show as ticked), or when this code has option groups — an
+                 * unanswered one is flagged only while ticked. */
+                if (pulled || code.options.length) renderCodes();
                 refreshApplyButton();
             });
             row.append(box);
@@ -235,6 +347,7 @@ function renderCodes() {
             box.indeterminate = on > 0 && on < kids.length;
             box.addEventListener('change', () => {
                 kids.forEach((i) => toggle(i, box.checked));
+                if (box.checked) enableRequired();
                 renderCodes();
                 refreshApplyButton();
             });
@@ -247,6 +360,16 @@ function renderCodes() {
         label.className = 'code-name';
         label.textContent = code.name;
         row.append(label);
+
+        /* A hand-edited body is worth seeing from the list: if an apply then
+         * misbehaves, this is the first thing to suspect. */
+        if (state.edited.has(index)) {
+            const badge = document.createElement('span');
+            badge.className = 'marker edited';
+            badge.textContent = 'E';
+            badge.title = 'Body edited in this session';
+            row.append(badge);
+        }
 
         for (const [flag, text, title] of [
             [FLAG.ALERT, '!', 'Note from the patch author'],
@@ -274,6 +397,7 @@ function renderCodes() {
             view.type = 'button';
             view.className = 'ghost small';
             view.textContent = 'View';
+            view.title = 'View and edit this code';
             view.addEventListener('click', () => showCode(index, code.name));
             row.append(view);
         }
@@ -348,11 +472,171 @@ function refreshApplyButton() {
     else $('apply').title = '';
 }
 
+function showPatchText() {
+    if (!state.patchText) return;
+    editing = null;
+    $('dialog-title').textContent = state.patchName || 'Patch file';
+    $('dialog-body').textContent = state.patchText;
+    $('dialog-body').hidden = false;
+    $('dialog-edit').hidden = true;
+    $('dialog-actions').hidden = true;
+    $('code-dialog').showModal();
+}
+
+/*
+ * A code, in the same window, editable.
+ *
+ * Edits live in this session only: nothing is written back to the .savepatch,
+ * and loading another patch drops them. The engine applies from a copy of the
+ * body, so an edit is not consumed by applying it and Apply stays repeatable.
+ *
+ * `editing.saved` tracks what the engine currently holds, which is not always
+ * what was sent: setting a body back to the patch file's text is not an edit,
+ * and the engine says so.
+ */
+let editing = null;    // { index, saved } while a code is open
+
 async function showCode(index, name) {
     const { text } = await call('codeText', { index });
+
+    editing = { index, saved: text };
     $('dialog-title').textContent = name;
-    $('dialog-body').textContent = text || '(no code body)';
+    $('dialog-body').hidden = true;
+    $('dialog-edit').hidden = false;
+    $('dialog-edit').value = text;
+    $('dialog-type').value = String(state.codes[index].type);
+    $('dialog-actions').hidden = false;
+    refreshCodeDialog();
     $('code-dialog').showModal();
+}
+
+function refreshCodeDialog() {
+    if (!editing) return;
+
+    const box = $('dialog-edit');
+    const unsaved = box.value !== editing.saved;
+    const edited = state.edited.has(editing.index);
+
+    /* The type can move under the dialog (revert puts it back), so read it
+     * from state rather than leaving whatever was picked. */
+    $('dialog-type').value = String(state.codes[editing.index].type);
+
+    $('dialog-save').disabled = !unsaved;
+    $('dialog-revert').disabled = !edited && !unsaved;
+
+    /* An option's value is written OVER its {TAG}, in place and at the tag's
+     * own length, so a tag that has been retyped or deleted stops resolving
+     * and its dropdown quietly does nothing. Cheap to catch here, invisible
+     * otherwise until the patch misbehaves. */
+    const missing = (state.codes[editing.index].options || [])
+        .filter((g) => g.tag && !box.value.includes(g.tag));
+
+    const note = $('dialog-note');
+    if (missing.length) {
+        note.className = 'warn';
+        note.textContent = `${missing.map((g) => g.tag).join(', ')} no longer appears in the ` +
+                           'text — that dropdown has nothing left to fill in.';
+    } else if (unsaved) {
+        note.className = 'warn';
+        note.textContent = 'Unsaved edits.';
+    } else if (edited) {
+        note.className = 'warn';
+        note.textContent = 'Edited — the patch file itself is untouched.';
+    } else {
+        note.className = '';
+        note.textContent = box.value ? '' : '(no code body)';
+    }
+}
+
+/* Store what is in the box, then adopt the engine's answer. */
+async function saveCode() {
+    if (!editing) return;
+    const { index } = editing;
+
+    const res = await call('setCodeText', { index, text: $('dialog-edit').value });
+    if (!res.ok) {
+        $('dialog-note').className = 'warn';
+        $('dialog-note').textContent = res.error || 'Could not store the edit.';
+        return;
+    }
+
+    editing.saved = res.text;
+    $('dialog-edit').value = res.text;
+    if (res.edited) state.edited.add(index);
+    else state.edited.delete(index);
+
+    /* An emptied body is no longer tickable, and a filled-in one becomes so —
+     * the engine moves APOLLO_CODE_FLAG_EMPTY, and the list reads it. */
+    state.codes[index].flags = res.flags;
+    state.codes[index].type = res.type;
+    if (!selectable(state.codes[index])) state.checked.delete(index);
+
+    appendLog([res.edited
+        ? `Code #${index + 1} body edited (${res.text.length} bytes)`
+        : `Code #${index + 1} back to the patch file's body`]);
+
+    /* Any previous result came out of the old body. */
+    clearResult();
+    renderCodes();
+    refreshApplyButton();
+    refreshCodeDialog();
+}
+
+/*
+ * Reinterpret the body as another kind of code.
+ *
+ * Applies straight away rather than waiting for Save: the text box and the
+ * type are separate things, and a wrongly-typed code is often the whole
+ * problem, with nothing to type. Counts as an edit either way, so the row is
+ * marked and Revert brings the patch's own type back.
+ */
+async function changeCodeType() {
+    if (!editing) return;
+    const { index } = editing;
+    const type = Number($('dialog-type').value);
+    if (type === state.codes[index].type) return;
+
+    /* `codeType`, not `type`: the worker protocol spends that name on the
+     * message kind itself (see call()), so an arg called `type` would
+     * overwrite it and the message would arrive addressed to nothing. */
+    const res = await call('setCodeType', { index, codeType: type });
+    if (!res.ok) {
+        $('dialog-type').value = String(state.codes[index].type);
+        $('dialog-note').className = 'warn';
+        $('dialog-note').textContent = res.error || 'Could not change the type.';
+        return;
+    }
+
+    state.codes[index].type = res.type;
+    state.codes[index].flags = res.flags;
+    if (res.edited) state.edited.add(index);
+    else state.edited.delete(index);
+
+    appendLog([`Code #${index + 1} now runs as ${TYPE[res.type]}`]);
+
+    /* Any previous result came out of the other interpreter. */
+    clearResult();
+    renderCodes();
+    refreshApplyButton();
+    refreshCodeDialog();
+}
+
+async function revertCode() {
+    if (!editing) return;
+    const { index } = editing;
+
+    const res = await call('revertCode', { index });
+    editing.saved = res.text;
+    $('dialog-edit').value = res.text;
+    state.edited.delete(index);
+    state.codes[index].flags = res.flags;
+    state.codes[index].type = res.type;
+    if (!selectable(state.codes[index])) state.checked.delete(index);
+
+    clearResult();
+    renderCodes();
+    refreshApplyButton();
+    refreshCodeDialog();
 }
 
 /* ---------------------------------------------------------------------------
@@ -414,6 +698,7 @@ function showResult(good, title, detail) {
     $('result-title').textContent = title;
     $('result-detail').textContent = detail;
     $('download').hidden = !state.patched;
+    $('view-result').hidden = !state.patched;
 }
 
 function download() {
@@ -424,6 +709,61 @@ function download() {
     a.download = state.saveName;
     a.click();
     URL.revokeObjectURL(url);
+}
+
+/*
+ * Save the .savepatch, edits included.
+ *
+ * The engine rebuilds it from the original file rather than from its own
+ * parse, so comments, credits, target-file lines and option blocks all
+ * survive; only edited codes are rewritten. Bytes go straight from the worker
+ * into the download, because patch files are not all UTF-8.
+ *
+ * A forced type is written into the title ([SW:...], [BSD:...], [PYTHON:...])
+ * and survives a reload -- but a title carries only one marker, so a code
+ * already flagged [DEFAULT:...] or [INFO:...] has no room to state one. The
+ * engine re-parses what it just built and says which codes those are, and the
+ * page passes that on rather than letting the user find out later.
+ */
+async function savePatchFile() {
+    if (!state.patchName) return;
+
+    const res = await call('exportPatch');
+    if (!res.ok) {
+        appendLog([res.error || 'Could not rebuild the patch file.']);
+        return;
+    }
+
+    /* Suggest a new name rather than the one they opened -- but only once, or
+     * saving a file that came out of here again gives "-edited-edited". */
+    const base = state.patchName.replace(/\.savepatch$/i, '');
+    const name = (state.edited.size && !/-edited$/.test(base) ? `${base}-edited` : base) +
+                 '.savepatch';
+
+    const url = URL.createObjectURL(new Blob([res.patch], { type: 'application/octet-stream' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    appendLog([`Saved ${name} (${res.patch.length} bytes, ${state.edited.size} edited code${
+        state.edited.size === 1 ? '' : 's'})`]);
+
+    if (res.mismatches && res.mismatches.length) {
+        const names = res.mismatches
+            .slice(0, 3)
+            .map((i) => `“${state.codes[i] ? state.codes[i].name : i}”`)
+            .join(', ');
+        appendLog([
+            `Note: ${res.mismatches.length} code${res.mismatches.length === 1 ? '' : 's'} ` +
+            `will read back differently from that file (${names}${
+                res.mismatches.length > 3 ? ', …' : ''}). A code title carries only one ` +
+            'marker, so one that is already [DEFAULT:…] or [INFO:…] cannot also state its type.',
+        ]);
+        /* Say it where it will be seen: the log is collapsed by default. */
+        $('log-panel').open = true;
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -559,7 +899,9 @@ async function dbPick(row) {
         const buffer = await res.arrayBuffer();
 
         $('db-dialog').close();
-        await loadPatch(new File([buffer], `${row.id}.savepatch`), row.name);
+        /* row.platform is the database directory — authoritative, so the
+         * title-ID fallback is never consulted for these. */
+        await loadPatch(new File([buffer], `${row.id}.savepatch`), row.name, row.platform);
     } catch (err) {
         $('db-status').textContent =
             `Could not fetch ${row.id} (${err.message}). It may have been renamed ` +
@@ -586,8 +928,19 @@ $('select-none').addEventListener('click', () => {
 $('apply').addEventListener('click', apply);
 $('download').addEventListener('click', download);
 $('dialog-close').addEventListener('click', () => $('code-dialog').close());
+$('dialog-edit').addEventListener('input', refreshCodeDialog);
+$('dialog-type').addEventListener('change', changeCodeType);
+$('dialog-save').addEventListener('click', saveCode);
+$('dialog-revert').addEventListener('click', revertCode);
+/* Closing with unsaved text in the box discards it; the engine only ever holds
+ * what Save sent, so there is nothing to clean up. */
+$('code-dialog').addEventListener('close', () => { editing = null; });
 
 $('open-db').addEventListener('click', openDb);
+$('view-patch').addEventListener('click', showPatchText);
+$('save-patch').addEventListener('click', savePatchFile);
+$('view-save').addEventListener('click', editSaveData);
+$('view-result').addEventListener('click', viewResultData);
 $('db-close').addEventListener('click', () => $('db-dialog').close());
 $('db-search').addEventListener('input', dbRender);
 $('db-search').addEventListener('keydown', (e) => {

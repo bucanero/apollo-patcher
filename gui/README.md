@@ -1,4 +1,4 @@
-# Apollo Patcher GUI
+# Apollo Save Patcher — desktop app
 
 A cross-platform (Windows / macOS / Linux) graphical front-end for the Apollo
 save-patch engine, built on **Dear ImGui + GLFW/OpenGL3**.
@@ -11,6 +11,7 @@ engine and drives the same functions the CLI does
 
 ```
   src/main.cpp                     Dear ImGui UI (file pickers, code list, option combos, log)
+  src/imgui_memory_editor.h        hex editor, vendored from ocornut/imgui_club (MIT)
   ../core/apollo_ctrl.[ch]         stdio-free facade over libapollo — shared with the web front-end
   ../core/patchdb.[ch]             reads apollo-patches.zip (the bundled database)
   ../../apollo-lib/source/*.c      libapollo engine (unchanged)
@@ -108,6 +109,63 @@ worked if the app happened to be launched from a directory containing
 including the Windows-1252 fallback that 245 of the patch files need. Without it
 the app would have to inflate 2240 entries at startup just to read their second
 line.
+
+## Viewing and editing data
+
+- **View / edit data** (next to the target picker) opens the save file in a hex
+  editor — `src/imgui_memory_editor.h`, vendored from
+  [imgui_club](https://github.com/ocornut/imgui_club). It works on a copy held
+  in memory and writes back only when asked, so a mistyped byte costs nothing
+  until committed; a `.bak` is kept first, like the patch path does. The buffer
+  is re-read every time the window is opened, because applying codes rewrites
+  the file underneath it.
+- **View** (per code row) opens that code's body — and it is editable. Save
+  changes replaces the body the engine will run; *Revert to file* puts the
+  patch's own text back, and the row carries a `*` while it differs. The edit
+  lives in the session only: the `.savepatch` is never rewritten and closing
+  the patch drops it. Applying works on a copy of the body, so an edit is not
+  consumed by applying it and Apply stays repeatable.
+
+  **Runs as** in the same window picks the interpreter — Save Wizard, BSD or
+  Python — and takes effect immediately, since a wrongly-typed code is often
+  the whole problem and has nothing to type. The loader takes the type from a
+  `[SW:…]` / `[BSD:…]` / `[PYTHON:…]` title prefix when there is one, and
+  otherwise from the shape of the body (Save Wizard only when *every* line is
+  exactly `XXXXXXXX YYYYYYYY`), so one mistyped line used to be unfixable here.
+  It counts as an edit, *Revert to file* puts the declared type back with the
+  body, and saving the patch writes the choice into the title.
+
+  What an edit cannot do is rename a **`{TAG}`** — the engine writes an
+  option's value over the tag in place, at the tag's own length, so a tag that
+  has been retyped or deleted stops resolving. The window says so when a
+  placeholder goes missing, since nothing else would until the patch
+  misbehaved.
+- **Save patch file…** (also File ▸ Save .savepatch as…, Ctrl+S) writes the
+  patch back out with your edits in it, so a hand-modified code can be kept or
+  shared. The engine splices the edits into the *original* bytes instead of
+  regenerating the file from its parse, so comments, credits, `:file` lines and
+  option blocks come through untouched — the parse keeps codes and drops all of
+  that. It then re-reads the file it just built and logs any code that would
+  come back different. A forced type is written as a title prefix (`[SW:…]`,
+  `[BSD:…]`, `[PYTHON:…]`) and does survive — but a title carries only one
+  marker, so a code already flagged `[DEFAULT:…]` or `[INFO:…]` has no room to
+  state one, and that is what gets reported.
+- **View patch file** shows the `.savepatch` as text. Worth having: parsing
+  keeps only the codes, so author comments, credits, `[INFO:]` notes and the
+  target-file lines are invisible otherwise. Carriage returns are stripped for
+  display — most patches are CRLF and ImGui has no glyph for CR.
+- **Big-endian mode** is set on load. PS3 is the only big-endian platform
+  Apollo covers, and although the engine accepts a per-code `[BE:...]` header,
+  no patch in the database uses one — so every PS3 patch relied on the user
+  knowing to tick the box.
+
+  `apctl_is_big_endian_for()` decides, shared by both front-ends. A patch picked
+  from the database carries its **platform tag**, which is simply the directory
+  it lives in, so it is authoritative and needs no guessing — a PS3 title with a
+  prefix nobody has catalogued yet still comes out right. A loose file has no
+  directory, so it falls back to matching the known PS3 title-ID prefixes
+  against the file name and then the patch's own first lines. Still a checkbox,
+  so it can be overridden.
 
 ## Features
 

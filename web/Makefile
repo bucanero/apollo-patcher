@@ -83,7 +83,7 @@ CFLAGS      = -O3 -Wall \
 LDFLAGS     = -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=worker \
 			  -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4MB -sINVOKE_RUN=0 \
 			  -sEXPORTED_RUNTIME_METHODS='["FS","UTF8ToString","stringToNewUTF8","HEAPU8"]' \
-			  -sEXPORTED_FUNCTIONS='["_malloc","_free","_apw_version","_apw_open","_apw_close","_apw_codes_json","_apw_code_text","_apw_set_option","_apw_apply","_apw_reset_vars"]'
+			  -sEXPORTED_FUNCTIONS='["_malloc","_free","_apw_version","_apw_is_be","_apw_open","_apw_close","_apw_codes_json","_apw_code_text","_apw_set_code_text","_apw_code_is_edited","_apw_code_flags","_apw_set_code_type","_apw_code_type","_apw_export_patch","_apw_export_size","_apw_export_mismatches","_apw_revert_code","_apw_set_option","_apw_apply","_apw_reset_vars"]'
 
 .PHONY: all serve clean
 

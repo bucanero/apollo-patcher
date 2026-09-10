@@ -33,15 +33,21 @@ FetchContent_MakeAvailable(glfw)
 # only OpenGL 1.1, which runs on a real GPU's compat profile and on the
 # software GL fallbacks present on every platform (see main.cpp). Must match
 # the backend used in main.cpp.
+#
+# misc/cpp/imgui_stdlib.cpp is upstream's std::string binding for InputText.
+# The code editor needs it: a code body can be 100KB (the largest in the
+# database) and grows as it is typed into, so a fixed char[] is the wrong
+# shape.
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl2.cpp)
 target_include_directories(imgui PUBLIC
-    ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+    ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends ${imgui_SOURCE_DIR}/misc/cpp)
 target_link_libraries(imgui PUBLIC glfw)
 
 find_package(OpenGL REQUIRED)
@@ -67,6 +73,6 @@ if(APPLE)
         MACOSX_PACKAGE_LOCATION Resources)
     set_target_properties(apollo_patcher_gui PROPERTIES
         MACOSX_BUNDLE TRUE
-        MACOSX_BUNDLE_BUNDLE_NAME "Apollo Patcher"
+        MACOSX_BUNDLE_BUNDLE_NAME "Apollo Save Patcher"
         MACOSX_BUNDLE_ICON_FILE icon.icns)
 endif()
