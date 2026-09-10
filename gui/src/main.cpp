@@ -199,7 +199,8 @@ static std::string strip_cr(const std::string& in) {
 // up the per-row UI state around it.
 static void adopt_session(apctl_session_t* session,
                           const std::string& label,
-                          const char* display_name) {
+                          const char* display_name,
+                          const char* platform /* nullptr for a loose file */) {
     g_app.session = session;
     g_app.patch_path = label;
     g_app.game_name = display_name && *display_name ? display_name
@@ -216,9 +217,10 @@ static void adopt_session(apctl_session_t* session,
 
     // PS3 save data is big-endian, and no patch in the database declares the
     // order per code (the engine's [BE:...] header exists but goes unused), so
-    // pick the mode up from the title ID rather than leave the user to notice.
-    // Still a checkbox they can override afterwards.
-    if (apctl_title_is_big_endian(label.c_str())) {
+    // pick the mode up rather than leave the user to notice. The database's own
+    // platform tag decides when there is one; a loose file falls back to its
+    // title ID. Still a checkbox they can override afterwards.
+    if (apctl_is_big_endian_for(platform, label.c_str())) {
         if (!g_app.big_endian) {
             g_app.big_endian = true;
             g_app.append_log("PS3 title detected - big-endian data mode enabled");
@@ -373,7 +375,7 @@ static void load_patch(const std::string& path) {
                         std::istreambuf_iterator<char>());
         g_app.patch_raw = strip_cr(raw);
     }
-    adopt_session(s, path, nullptr);
+    adopt_session(s, path, nullptr, nullptr);   // loose file: no platform tag
 }
 
 // ---- patch database --------------------------------------------------------
@@ -469,7 +471,7 @@ static void load_patch_from_db(int index) {
 
     // The index's name is preferred: it was decoded at build time, where the
     // 245 Windows-1252 patch files (game names with (TM)/(R)) are handled.
-    adopt_session(s, label, e->name);
+    adopt_session(s, label, e->name, e->platform);
 }
 
 static void apply_selected() {

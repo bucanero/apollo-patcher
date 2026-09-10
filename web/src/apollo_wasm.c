@@ -130,12 +130,14 @@ const char *apw_version(void)
     return APOLLO_LIB_VERSION;
 }
 
-/* Whether this patch's save data is big-endian, guessed from a title ID (see
- * apctl_title_is_big_endian). Accepts a file name, a bare ID or patch text. */
+/* Whether this patch's save data is big-endian. `platform` is the database's
+ * tag ("PS3", ...) and wins when present; `text` is the title-ID fallback for a
+ * loose file. Pass an empty platform for the latter. See
+ * apctl_is_big_endian_for. */
 EMSCRIPTEN_KEEPALIVE
-int apw_title_is_be(const char *text)
+int apw_is_be(const char *platform, const char *text)
 {
-    return apctl_title_is_big_endian(text);
+    return apctl_is_big_endian_for(platform && *platform ? platform : NULL, text);
 }
 
 /* Parse a .savepatch from memory. Returns 1 on success, 0 on failure. */

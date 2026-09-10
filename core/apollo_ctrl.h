@@ -90,20 +90,32 @@ void         apctl_opt_set_selected(apctl_code_t *c, int group, int idx);
 void        apctl_set_data_path(const char *dir);
 const char *apctl_get_data_path(void);
 
-/* ---- Platform guess ---- */
-/* Whether a patch's save data is big-endian, guessed from a title ID.
- *
+/* ---- Byte order for a patch ---- */
+/*
  * PS3 is the only big-endian platform Apollo covers. The engine does accept a
  * per-code [BE:...] / [LE:...] header (see loader.c), but no patch in the
  * database uses one, so EVERY PS3 patch depends on the caller selecting the
  * mode. A front-end that loads a PS3 patch should therefore turn it on rather
  * than let someone silently patch a save with the wrong byte order.
  *
- * `text` may be a bare title ID, a file name ("BLUS30279.savepatch") or a
- * patch's first line ("; BLUS30279"); the first CCCCNNNNN-shaped token in it
- * decides. Returns 0 when nothing recognisable is found, so an unknown patch
- * keeps the little-endian default.
+ * Two sources, in order of trust:
+ *
+ *   platform    the patch database's own tag ("PS3", "PS4", ...). Authoritative
+ *               when the patch came from there: it is the directory the file
+ *               lives in, which is how the database is organised and where the
+ *               index gets it. Pass NULL when there is none.
+ *   title_text  a title ID, file name ("BLUS30279.savepatch") or header line
+ *               ("; BLUS30279"). The fallback for a loose file, where there is
+ *               no directory to consult — matched against the known PS3 title
+ *               prefixes.
+ *
+ * Returns 0 when neither says anything recognisable, so an unknown patch keeps
+ * the little-endian default.
  */
+int apctl_is_big_endian_for(const char *platform, const char *title_text);
+
+/* The prefix match on its own. Exposed mainly for testing; callers that have a
+ * platform tag should use apctl_is_big_endian_for(), which prefers it. */
 int apctl_title_is_big_endian(const char *text);
 
 /* ---- Data endianness ---- */

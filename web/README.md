@@ -154,6 +154,15 @@ retracts any previous result, since that output was produced from the bytes as
 they were. The patched result is offered read-only — editing it would produce a
 file no patch chain accounts for, and it is one Download away.
 
+## Byte order
+
+PS3 save data is big-endian; nothing else Apollo covers is. A patch chosen from
+the database carries its platform — the directory it lives in — so that decides
+directly. A file the user supplies has no directory, so the shared
+`apctl_is_big_endian_for()` falls back to matching known PS3 title-ID prefixes
+against the file name, then against the patch's own first lines for a file that
+has been renamed. It remains a checkbox either way.
+
 ## Scope
 
 This patches save *data*. It cannot decrypt or re-sign console saves — that

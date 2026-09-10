@@ -126,7 +126,7 @@ static void *apctl_host_cb(int info, uint32_t *size)
 }
 
 /* ---------------------------------------------------------------------------
- * Platform guess (see apctl_title_is_big_endian)
+ * Byte order for a patch (see apctl_is_big_endian_for)
  *
  * The PS3 title-ID prefixes, taken from the platform directories of
  * bucanero/apollo-patches. No prefix there is shared with PS2, PS4, PSP or PS
@@ -141,6 +141,18 @@ static const char *const PS3_PREFIXES[] = {
 
 static int is_upper(char c) { return c >= 'A' && c <= 'Z'; }
 static int is_digit(char c) { return c >= '0' && c <= '9'; }
+
+/* The database's platform tag decides on its own: it is the directory name, so
+ * a patch filed under PS3/ is a PS3 patch by definition, whatever its title ID
+ * looks like. That also means a title prefix nobody has seen yet needs no code
+ * change to be handled correctly. */
+int apctl_is_big_endian_for(const char *platform, const char *title_text)
+{
+    if (platform && *platform)
+        return strcmp(platform, "PS3") == 0;
+
+    return apctl_title_is_big_endian(title_text);
+}
 
 int apctl_title_is_big_endian(const char *text)
 {

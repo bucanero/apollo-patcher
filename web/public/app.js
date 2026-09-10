@@ -113,7 +113,7 @@ function wireDropZone(zoneId, inputId, onFile) {
     });
 }
 
-async function loadPatch(file, displayName) {
+async function loadPatch(file, displayName, platform) {
     const buffer = await file.arrayBuffer();
     state.patchName = file.name;
     $('patch-name').textContent = displayName || file.name;
@@ -126,7 +126,7 @@ async function loadPatch(file, displayName) {
     state.patchText = decodePatch(buffer);
 
     clearLog();
-    const res = await call('open', { buffer, name: file.name }, [buffer]);
+    const res = await call('open', { buffer, name: file.name, platform }, [buffer]);
     if (!res.ok) {
         $('patch-name').textContent = res.error || 'Could not read this file';
         $('drop-patch').classList.remove('filled');
@@ -675,7 +675,9 @@ async function dbPick(row) {
         const buffer = await res.arrayBuffer();
 
         $('db-dialog').close();
-        await loadPatch(new File([buffer], `${row.id}.savepatch`), row.name);
+        /* row.platform is the database directory — authoritative, so the
+         * title-ID fallback is never consulted for these. */
+        await loadPatch(new File([buffer], `${row.id}.savepatch`), row.name, row.platform);
     } catch (err) {
         $('db-status').textContent =
             `Could not fetch ${row.id} (${err.message}). It may have been renamed ` +

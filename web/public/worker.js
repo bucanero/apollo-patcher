@@ -127,7 +127,7 @@ const handlers = {
     },
 
     /* Parse a .savepatch held in memory and return the full code list. */
-    async open({ buffer, name }) {
+    async open({ buffer, name, platform }) {
         await ready();
         const bytes = new Uint8Array(buffer);
         const ok = withBytes(bytes, (ptr, len) =>
@@ -142,15 +142,21 @@ const handlers = {
         codeTypes = doc.codes.map((c) => c.type);
 
         /* PS3 save data is big-endian, and no patch in the database declares
-         * the order per code, so the mode is guessed from the title ID (shared
-         * with the desktop GUI — see apctl_title_is_big_endian). The name usually
-         * carries it; a patch's own first lines are the fallback for a file
-         * that has been renamed. latin1 because a title ID is ASCII and the
-         * header may hold stray high bytes ('latin1' is the valid label;
-         * 'latin-1' throws). */
+         * the order per code, so the mode is decided here (shared with the
+         * desktop GUI — see apctl_is_big_endian_for).
+         *
+         * A patch picked from the database carries its platform: that is the
+         * directory it lives in, so it is authoritative and no title-ID
+         * guessing is needed. A file the user supplied has none, so fall back
+         * to its name, then to its own first lines for a file that has been
+         * renamed. latin1 because a title ID is ASCII and the header may hold
+         * stray high bytes ('latin1' is the valid label; 'latin-1' throws). */
+        const plat = platform || '';
+        const askBe = (text) =>
+            withCString(plat, (pp) => withCString(text, (tp) => M._apw_is_be(pp, tp)));
+
         const head = new TextDecoder('latin1').decode(bytes.subarray(0, 128));
-        const bigEndian = !!(withCString(name || '', (p) => M._apw_title_is_be(p)) ||
-                             withCString(head, (p) => M._apw_title_is_be(p)));
+        const bigEndian = !!(plat ? askBe('') : (askBe(name || '') || askBe(head)));
 
         /* Start pulling the helper modules now, while the user reads the code
          * list, so Apply rarely has to wait. Failures are reported then, not

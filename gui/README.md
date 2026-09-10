@@ -123,12 +123,18 @@ line.
   keeps only the codes, so author comments, credits, `[INFO:]` notes and the
   target-file lines are invisible otherwise. Carriage returns are stripped for
   display — most patches are CRLF and ImGui has no glyph for CR.
-- **Big-endian mode** is now set from the patch's title ID on load. PS3 is the
-  only big-endian platform Apollo covers, and although the engine accepts a
-  per-code `[BE:...]` header, no patch in the database uses one — so every PS3
-  patch relied on the user knowing to tick the box. The rule lives in
-  `apctl_title_is_big_endian()` so both front-ends share it. It is still a
-  checkbox, so it can be overridden.
+- **Big-endian mode** is set on load. PS3 is the only big-endian platform
+  Apollo covers, and although the engine accepts a per-code `[BE:...]` header,
+  no patch in the database uses one — so every PS3 patch relied on the user
+  knowing to tick the box.
+
+  `apctl_is_big_endian_for()` decides, shared by both front-ends. A patch picked
+  from the database carries its **platform tag**, which is simply the directory
+  it lives in, so it is authoritative and needs no guessing — a PS3 title with a
+  prefix nobody has catalogued yet still comes out right. A loose file has no
+  directory, so it falls back to matching the known PS3 title-ID prefixes
+  against the file name and then the patch's own first lines. Still a checkbox,
+  so it can be overridden.
 
 ## Features
 
