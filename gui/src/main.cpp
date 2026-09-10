@@ -13,11 +13,13 @@
 #include <vector>
 #include <cstdio>
 #include <cstdlib>   // _putenv_s (Windows software-GL selection)
+#include <cstring>   // strlen/strstr over the engine's C strings
 #include <fstream>
 #include <mutex>
 
 #include "imgui.h"
 #include "imgui_internal.h"   // PushItemFlag + ImGuiItemFlags_MixedValue (tri-state)
+#include "imgui_stdlib.h"      // InputTextMultiline over std::string (misc/cpp)
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl2.h"
 #include "imgui_memory_editor.h"   // vendored from ocornut/imgui_club (MIT)
@@ -64,7 +66,16 @@ struct AppState {
     bool                show_hex = false;
     bool                hex_dirty = false; // edits not yet written to disk
     std::vector<char>   selected;         // per-row checkbox
-    std::vector<char>   viewer_open;      // per-row raw-code window open flag
+    std::vector<char>   viewer_open;      // per-row code window open flag
+    // Editable copy of a code body, one per row. `loaded` keeps unsaved typing
+    // alive across closing and reopening the window; only opening a row for
+    // the first time (or saving/reverting) pulls the engine's text in.
+    struct CodeEdit {
+        std::string text;
+        bool        loaded = false;
+        bool        raise  = false;   // bring the window forward next frame
+    };
+    std::vector<CodeEdit> viewer_buf;
     std::string         log;
     std::mutex          log_mtx;
     bool                backup = true;    // copy target -> target.bak before patching
@@ -84,6 +95,7 @@ struct AppState {
         if (session) { apctl_close(session); session = nullptr; }
         selected.clear();
         viewer_open.clear();
+        viewer_buf.clear();
         game_name.clear();
         patch_path.clear();
         patch_raw.clear();
@@ -208,6 +220,7 @@ static void adopt_session(apctl_session_t* session,
     const int n = apctl_code_count(session);
     g_app.selected.assign(n, 0);
     g_app.viewer_open.assign(n, 0);
+    g_app.viewer_buf.assign(n, AppState::CodeEdit{});
     for (int i = 0; i < n; ++i)      // pre-check [DEFAULT:] codes
         g_app.selected[i] = apctl_code_at(session, i)->activated ? 1 : 0;
 
@@ -633,14 +646,36 @@ static void draw_code_list() {
             }
             if (mixed) ImGui::PopItemFlag();
 
+            // A hand-edited body is worth seeing from the list: if an apply
+            // then misbehaves, this is the first thing to suspect.
+            if (apctl_code_is_edited(c)) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "*");
+                ImGui::SetItemTooltip("Body edited in this session");
+            }
+
             if (parent || disabled) ImGui::PopStyleColor();
             if (indent) ImGui::Unindent(indent);
 
-            // --- col 1: View button opens a raw-code window ---
+            // --- col 1: View/Edit button opens a code window ---
+            // Also offered when the body is empty but edited, so a body that
+            // was emptied by an edit can still be reached and reverted.
             ImGui::TableSetColumnIndex(1);
             const char* body = apctl_code_text(c);
-            if (body && body[0]) {
-                if (ImGui::SmallButton("View")) g_app.viewer_open[i] = 1;
+            if ((body && body[0]) || apctl_code_is_edited(c)) {
+                if (ImGui::SmallButton("View")) {
+                    if (!g_app.viewer_open[i]) {
+                        g_app.viewer_open[i] = 1;
+                        // Only on the way in: reopening keeps whatever was
+                        // typed and not saved.
+                        if (!g_app.viewer_buf[i].loaded) {
+                            g_app.viewer_buf[i].text = body ? body : "";
+                            g_app.viewer_buf[i].loaded = true;
+                        }
+                    }
+                    // A window already open may be behind another one.
+                    g_app.viewer_buf[i].raise = true;
+                }
             }
 
             // --- col 2: type badge ---
@@ -752,22 +787,90 @@ static void draw_hex_editor() {
     if (!open) g_app.show_hex = false;
 }
 
+// Modeless code windows: the body as text, and editable.
+//
+// Editing is session-only — nothing is written back to the .savepatch file, so
+// closing the patch drops it. The engine applies from a COPY of the body
+// (patches.c strdup()s it), so an edit is not consumed by applying it and
+// Apply stays repeatable. Two things an edit cannot do, both fixed at parse
+// time: change the code's type, and rename a {TAG} — see apctl_set_code_text().
 static void draw_code_viewers() {
     if (!g_app.session) return;
     for (int i = 0; i < apctl_code_count(g_app.session); ++i) {
         if (!g_app.viewer_open[i]) continue;
-        apctl_code_t* c = apctl_code_at(g_app.session, i);
-        char title[160];
-        snprintf(title, sizeof title, "Code: %s##viewer%d",
-                 (c->name && c->name[0]) ? c->name : "(unnamed)", i);
+
+        apctl_code_t*      c    = apctl_code_at(g_app.session, i);
+        AppState::CodeEdit& buf = g_app.viewer_buf[i];
+        const char* live    = apctl_code_text(c);
+        const bool  unsaved = (buf.text != live);
+        const bool  edited  = apctl_code_is_edited(c) != 0;
+
+        char title[192];
+        snprintf(title, sizeof title, "Code: %s%s##viewer%d",
+                 (c->name && c->name[0]) ? c->name : "(unnamed)",
+                 unsaved ? " *" : "", i);
+
         bool open = true;
         ImGui::SetNextWindowSize(ImVec2(560, 400), ImGuiCond_FirstUseEver);
+        if (buf.raise) { ImGui::SetNextWindowFocus(); buf.raise = false; }
         if (ImGui::Begin(title, &open)) {
             ImGui::Text("Target file: %s", (c->file && c->file[0]) ? c->file : "(none)");
+
+            if (!unsaved) ImGui::BeginDisabled();
+            if (ImGui::SmallButton("Save changes")) {
+                const size_t was = strlen(live);
+                if (apctl_set_code_text(c, buf.text.c_str())) {
+                    char msg[256];
+                    snprintf(msg, sizeof msg, "Code #%d \"%s\" edited (%zu -> %zu bytes)%s",
+                             c->id, c->name ? c->name : "", was, buf.text.size(),
+                             apctl_code_is_edited(c) ? "" : " - back to the original");
+                    g_app.append_log(msg);
+                } else {
+                    g_app.append_log("Could not store the edit (out of memory)");
+                }
+                // set_code_text drops an edit that matches the original, so
+                // read the body back rather than assume it took the text.
+                buf.text = apctl_code_text(c);
+            }
+            if (!unsaved) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            if (!edited && !unsaved) ImGui::BeginDisabled();
+            if (ImGui::SmallButton("Revert to file")) {
+                apctl_revert_code(c);
+                buf.text = apctl_code_text(c);
+            }
+            if (!edited && !unsaved) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Copy")) ImGui::SetClipboardText(buf.text.c_str());
+
+            ImGui::SameLine();
+            if (unsaved)     ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "unsaved edits");
+            else if (edited) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "edited");
+            else             ImGui::TextDisabled("unchanged");
+
+            // An option's value is written OVER its tag, in place and at the
+            // tag's own length, so a tag that has been retyped or deleted stops
+            // resolving and its dropdown quietly does nothing. Cheap to catch
+            // here, and invisible otherwise until the patch misbehaves.
+            int missing = 0;
+            for (int g = 0; g < apctl_opt_group_count(c); ++g)
+                if (!strstr(buf.text.c_str(), apctl_opt_tag(c, g))) missing++;
+            if (missing) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.4f, 1.0f));
+                ImGui::TextWrapped("%d option placeholder%s missing from the text - "
+                                   "that dropdown has nothing left to fill in. Keep the "
+                                   "{TAG} exactly as the patch wrote it.",
+                                   missing, missing == 1 ? " is" : "s are");
+                ImGui::PopStyleColor();
+            }
+
             ImGui::Separator();
-            ImGui::BeginChild("body", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
-            ImGui::TextUnformatted(apctl_code_text(c));
-            ImGui::EndChild();
+            // AllowTabInput: patch bodies (Python especially) are indented, and
+            // the default would move focus out of the box instead.
+            ImGui::InputTextMultiline("##body", &buf.text, ImVec2(-FLT_MIN, -FLT_MIN),
+                                      ImGuiInputTextFlags_AllowTabInput);
         }
         ImGui::End();
         if (!open) g_app.viewer_open[i] = 0;

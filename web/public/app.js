@@ -26,6 +26,7 @@ const state = {
     checked: new Set(),  // indices
     options: {},         // index -> [selected value per group]
     patched: null,       // Uint8Array of the last successful run
+    edited: new Set(),   // indices whose body was hand-edited this session
 };
 
 /* ---------------------------------------------------------------------------
@@ -133,6 +134,7 @@ async function loadPatch(file, displayName, platform) {
         $('workspace').hidden = true;
         state.codes = [];
         state.checked.clear();
+        state.edited.clear();
         state.patchText = null;
         $('view-patch').hidden = true;
         clearResult();
@@ -141,6 +143,7 @@ async function loadPatch(file, displayName, platform) {
 
     state.codes = res.codes;
     state.options = {};
+    state.edited.clear();   /* edits belong to the session that made them */
     res.codes.forEach((c, i) => {
         if (c.options.length) state.options[i] = c.options.map((o) => o.sel);
     });
@@ -356,6 +359,16 @@ function renderCodes() {
         label.textContent = code.name;
         row.append(label);
 
+        /* A hand-edited body is worth seeing from the list: if an apply then
+         * misbehaves, this is the first thing to suspect. */
+        if (state.edited.has(index)) {
+            const badge = document.createElement('span');
+            badge.className = 'marker edited';
+            badge.textContent = 'E';
+            badge.title = 'Body edited in this session';
+            row.append(badge);
+        }
+
         for (const [flag, text, title] of [
             [FLAG.ALERT, '!', 'Note from the patch author'],
             [FLAG.REQUIRED, 'R', 'Required — apply this one too'],
@@ -382,6 +395,7 @@ function renderCodes() {
             view.type = 'button';
             view.className = 'ghost small';
             view.textContent = 'View';
+            view.title = 'View and edit this code';
             view.addEventListener('click', () => showCode(index, code.name));
             row.append(view);
         }
@@ -458,16 +472,123 @@ function refreshApplyButton() {
 
 function showPatchText() {
     if (!state.patchText) return;
+    editing = null;
     $('dialog-title').textContent = state.patchName || 'Patch file';
     $('dialog-body').textContent = state.patchText;
+    $('dialog-body').hidden = false;
+    $('dialog-edit').hidden = true;
+    $('dialog-actions').hidden = true;
     $('code-dialog').showModal();
 }
 
+/*
+ * A code, in the same window, editable.
+ *
+ * Edits live in this session only: nothing is written back to the .savepatch,
+ * and loading another patch drops them. The engine applies from a copy of the
+ * body, so an edit is not consumed by applying it and Apply stays repeatable.
+ *
+ * `editing.saved` tracks what the engine currently holds, which is not always
+ * what was sent: setting a body back to the patch file's text is not an edit,
+ * and the engine says so.
+ */
+let editing = null;    // { index, saved } while a code is open
+
 async function showCode(index, name) {
     const { text } = await call('codeText', { index });
+
+    editing = { index, saved: text };
     $('dialog-title').textContent = name;
-    $('dialog-body').textContent = text || '(no code body)';
+    $('dialog-body').hidden = true;
+    $('dialog-edit').hidden = false;
+    $('dialog-edit').value = text;
+    $('dialog-actions').hidden = false;
+    refreshCodeDialog();
     $('code-dialog').showModal();
+}
+
+function refreshCodeDialog() {
+    if (!editing) return;
+
+    const box = $('dialog-edit');
+    const unsaved = box.value !== editing.saved;
+    const edited = state.edited.has(editing.index);
+
+    $('dialog-save').disabled = !unsaved;
+    $('dialog-revert').disabled = !edited && !unsaved;
+
+    /* An option's value is written OVER its {TAG}, in place and at the tag's
+     * own length, so a tag that has been retyped or deleted stops resolving
+     * and its dropdown quietly does nothing. Cheap to catch here, invisible
+     * otherwise until the patch misbehaves. */
+    const missing = (state.codes[editing.index].options || [])
+        .filter((g) => g.tag && !box.value.includes(g.tag));
+
+    const note = $('dialog-note');
+    if (missing.length) {
+        note.className = 'warn';
+        note.textContent = `${missing.map((g) => g.tag).join(', ')} no longer appears in the ` +
+                           'text — that dropdown has nothing left to fill in.';
+    } else if (unsaved) {
+        note.className = 'warn';
+        note.textContent = 'Unsaved edits.';
+    } else if (edited) {
+        note.className = 'warn';
+        note.textContent = 'Edited — the patch file itself is untouched.';
+    } else {
+        note.className = '';
+        note.textContent = box.value ? '' : '(no code body)';
+    }
+}
+
+/* Store what is in the box, then adopt the engine's answer. */
+async function saveCode() {
+    if (!editing) return;
+    const { index } = editing;
+
+    const res = await call('setCodeText', { index, text: $('dialog-edit').value });
+    if (!res.ok) {
+        $('dialog-note').className = 'warn';
+        $('dialog-note').textContent = res.error || 'Could not store the edit.';
+        return;
+    }
+
+    editing.saved = res.text;
+    $('dialog-edit').value = res.text;
+    if (res.edited) state.edited.add(index);
+    else state.edited.delete(index);
+
+    /* An emptied body is no longer tickable, and a filled-in one becomes so —
+     * the engine moves APOLLO_CODE_FLAG_EMPTY, and the list reads it. */
+    state.codes[index].flags = res.flags;
+    if (!selectable(state.codes[index])) state.checked.delete(index);
+
+    appendLog([res.edited
+        ? `Code #${index + 1} body edited (${res.text.length} bytes)`
+        : `Code #${index + 1} back to the patch file's body`]);
+
+    /* Any previous result came out of the old body. */
+    clearResult();
+    renderCodes();
+    refreshApplyButton();
+    refreshCodeDialog();
+}
+
+async function revertCode() {
+    if (!editing) return;
+    const { index } = editing;
+
+    const res = await call('revertCode', { index });
+    editing.saved = res.text;
+    $('dialog-edit').value = res.text;
+    state.edited.delete(index);
+    state.codes[index].flags = res.flags;
+    if (!selectable(state.codes[index])) state.checked.delete(index);
+
+    clearResult();
+    renderCodes();
+    refreshApplyButton();
+    refreshCodeDialog();
 }
 
 /* ---------------------------------------------------------------------------
@@ -704,6 +825,12 @@ $('select-none').addEventListener('click', () => {
 $('apply').addEventListener('click', apply);
 $('download').addEventListener('click', download);
 $('dialog-close').addEventListener('click', () => $('code-dialog').close());
+$('dialog-edit').addEventListener('input', refreshCodeDialog);
+$('dialog-save').addEventListener('click', saveCode);
+$('dialog-revert').addEventListener('click', revertCode);
+/* Closing with unsaved text in the box discards it; the engine only ever holds
+ * what Save sent, so there is nothing to clean up. */
+$('code-dialog').addEventListener('close', () => { editing = null; });
 
 $('open-db').addEventListener('click', openDb);
 $('view-patch').addEventListener('click', showPatchText);

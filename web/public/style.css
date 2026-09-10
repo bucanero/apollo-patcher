@@ -345,6 +345,53 @@ footer {
     white-space: pre-wrap;
 }
 
+/* The editable body, in place of #dialog-body for a single code. Same metrics
+   as the read-only view so switching between them does not move the text. */
+#dialog-edit {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    height: min(52vh, 460px);
+    resize: vertical;
+    margin: 0;
+    padding: 14px;
+    border: none;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--ink);
+    font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    /* wrap="off" gives horizontal scrolling, which is what code lines want. */
+    overflow: auto;
+}
+
+#dialog-edit:focus { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+
+#dialog-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 12px 14px;
+}
+
+/* The note sits after the buttons and carries the .warn colour when it has
+   something to say; keep it from pushing them around. */
+#dialog-note {
+    font-size: 13px;
+    color: var(--ink-dim);
+    flex: 1 1 12ch;
+}
+
+#dialog-note.warn { margin: 0; }
+
+/* Hand-edited code body. Louder than the flag markers next to it: those
+   describe the patch, this one says the user changed something. */
+.marker.edited {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: transparent;
+}
+
 /* An option group on a ticked code that still has no value chosen. Apply stays
    blocked until every one of these is answered (see app.js). */
 .option select.unfilled {

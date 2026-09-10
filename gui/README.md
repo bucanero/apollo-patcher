@@ -119,6 +119,19 @@ line.
   until committed; a `.bak` is kept first, like the patch path does. The buffer
   is re-read every time the window is opened, because applying codes rewrites
   the file underneath it.
+- **View** (per code row) opens that code's body — and it is editable. Save
+  changes replaces the body the engine will run; *Revert to file* puts the
+  patch's own text back, and the row carries a `*` while it differs. The edit
+  lives in the session only: the `.savepatch` is never rewritten and closing
+  the patch drops it. Applying works on a copy of the body, so an edit is not
+  consumed by applying it and Apply stays repeatable.
+
+  Two things an edit cannot do, both settled at parse time: change the code's
+  **type** (an edited Save Wizard code is still read as Save Wizard), and
+  rename a **`{TAG}`** — the engine writes an option's value over the tag in
+  place, at the tag's own length, so a tag that has been retyped or deleted
+  stops resolving. The window says so when a placeholder goes missing, since
+  nothing else would until the patch misbehaved.
 - **View patch file** shows the `.savepatch` as text. Worth having: parsing
   keeps only the codes, so author comments, credits, `[INFO:]` notes and the
   target-file lines are invisible otherwise. Carriage returns are stripped for

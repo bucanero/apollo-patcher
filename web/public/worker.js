@@ -120,6 +120,19 @@ function workPath(name) {
 const TYPE_PYTHON = 3;    /* APOLLO_CODE_PYTHON */
 let codeTypes = [];       /* per-row type from the last open() */
 
+/* What one code looks like now. `flags` comes back with it because emptying a
+ * body (or filling an empty one) moves APOLLO_CODE_FLAG_EMPTY, and that is
+ * what decides whether the page lets the row be ticked. The type never moves:
+ * it was decided by the [...] header at parse time, so codeTypes stays valid
+ * across an edit. */
+function codeState(index) {
+    return {
+        text: M.UTF8ToString(M._apw_code_text(index)),
+        edited: !!M._apw_code_is_edited(index),
+        flags: M._apw_code_flags(index),
+    };
+}
+
 const handlers = {
     async version() {
         await ready();
@@ -170,6 +183,27 @@ const handlers = {
     async codeText({ index }) {
         await ready();
         return { text: M.UTF8ToString(M._apw_code_text(index)) };
+    },
+
+    /*
+     * Replace one code's body for this session.
+     *
+     * Answers with what the engine actually holds afterwards rather than
+     * echoing the request: setting the original text back is not an edit, so
+     * `edited` is the engine's own verdict and the page marks the row from it.
+     */
+    async setCodeText({ index, text }) {
+        await ready();
+        const ok = withCString(text, (tp) => M._apw_set_code_text(index, tp));
+        if (!ok) return { ok: false, error: 'Could not store the edited code.' };
+
+        return codeState(index);
+    },
+
+    async revertCode({ index }) {
+        await ready();
+        M._apw_revert_code(index);
+        return codeState(index);
     },
 
     /*

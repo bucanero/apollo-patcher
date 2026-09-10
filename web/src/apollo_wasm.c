@@ -234,6 +234,48 @@ const char *apw_code_text(int index)
     return publish(&b);
 }
 
+/* ---------------------------------------------------------------------------
+ * Editing a code body
+ *
+ * Session-only: the .savepatch itself is never rewritten, and closing the
+ * patch drops every edit. The engine applies from a copy of the body, so an
+ * edit survives being applied and Apply stays repeatable.
+ * ------------------------------------------------------------------------- */
+
+/* Returns 1 if the body is now `text`, 0 if the index is bad or the copy
+ * failed. Setting the original text back counts as success and clears the
+ * edited flag. */
+EMSCRIPTEN_KEEPALIVE
+int apw_set_code_text(int index, const char *text)
+{
+    if (!g_session || index < 0 || index >= apctl_code_count(g_session)) return 0;
+    return apctl_set_code_text(apctl_code_at(g_session, index), text ? text : "");
+}
+
+/* The code's current flag word. Worth re-reading after an edit: emptying a
+ * body (or filling an empty one) moves APOLLO_CODE_FLAG_EMPTY, which is what
+ * decides whether a row can be ticked at all. */
+EMSCRIPTEN_KEEPALIVE
+int apw_code_flags(int index)
+{
+    if (!g_session || index < 0 || index >= apctl_code_count(g_session)) return 0;
+    return apctl_code_at(g_session, index)->flags;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int apw_code_is_edited(int index)
+{
+    if (!g_session || index < 0 || index >= apctl_code_count(g_session)) return 0;
+    return apctl_code_is_edited(apctl_code_at(g_session, index));
+}
+
+EMSCRIPTEN_KEEPALIVE
+void apw_revert_code(int index)
+{
+    if (!g_session || index < 0 || index >= apctl_code_count(g_session)) return;
+    apctl_revert_code(apctl_code_at(g_session, index));
+}
+
 EMSCRIPTEN_KEEPALIVE
 int apw_set_option(int index, int group, int value)
 {

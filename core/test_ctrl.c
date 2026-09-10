@@ -4,10 +4,12 @@
  *   test_ctrl <file.savepatch>   list its codes, like `patcher <file>`
  *   test_ctrl --db [query]       open the bundled database, report what it
  *                                holds, and read one patch back out of it
+ *   test_ctrl --edit <file>      exercise the session-only code editor
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "apollo_ctrl.h"
 #include "patchdb.h"
 
@@ -94,14 +96,131 @@ static int run_db(const char *query)
     return 0;
 }
 
+/* Patch a fresh zero-filled file with `body` and read the result back. */
+static int run_one(apctl_session_t *s, apctl_code_t *c, const char *path,
+                   const char *body, uint8_t *out, size_t out_len)
+{
+    uint8_t  zeros[32] = {0};
+    uint8_t *patched = NULL;
+    size_t   len = 0;
+
+    if (!apctl_set_code_text(c, body)) return 0;
+    if (write_buffer(path, zeros, sizeof zeros) != 0) return 0;
+    if (!apctl_apply(s, c, path)) return 0;
+    if (read_buffer(path, &patched, &len) != 0) return 0;
+
+    memcpy(out, patched, len < out_len ? len : out_len);
+    free(patched);
+    return 1;
+}
+
+/*
+ * The View/Edit window's contract, headless: an edit replaces the body the
+ * engine will run, survives being applied, and can be taken back.
+ */
+static int run_edit(const char *path)
+{
+    apctl_session_t *s = apctl_open_file(path);
+    if (!s) { fprintf(stderr, "Could not open %s\n", path); return 1; }
+
+    apctl_code_t *c = NULL;
+    for (int i = 0; i < apctl_code_count(s) && !c; i++) {
+        apctl_code_t *r = apctl_code_at(s, i);
+        if (apctl_code_text(r)[0]) c = r;
+    }
+    if (!c) { fprintf(stderr, "no code with a body in %s\n", path); apctl_close(s); return 1; }
+
+    char *original = strdup(apctl_code_text(c));
+    int   fails = 0;
+
+    printf("editing code %d: %s (%zu bytes)\n", c->id, c->name, strlen(original));
+
+/* One evaluation: half of these conditions call into the editor. */
+#define CHECK(what, cond) do { \
+        int ok_ = (cond) ? 1 : 0; \
+        printf("  %-34s %s\n", what, ok_ ? "ok" : "FAILED"); \
+        fails += !ok_; \
+    } while (0)
+
+    CHECK("starts unedited", !apctl_code_is_edited(c));
+
+    CHECK("set_code_text stored", apctl_set_code_text(c, "80001000 0000FFFF\n"));
+    CHECK("body is the edit", strcmp(apctl_code_text(c), "80001000 0000FFFF\n") == 0);
+    CHECK("marked edited", apctl_code_is_edited(c));
+    CHECK("type unchanged by an edit", c->type == c->raw->type);
+
+    /* A second edit must free the first, not the original. */
+    CHECK("second edit stored", apctl_set_code_text(c, "; nothing to do\n"));
+    CHECK("body is the second edit", strcmp(apctl_code_text(c), "; nothing to do\n") == 0);
+
+    apctl_revert_code(c);
+    CHECK("revert restores the file's body", strcmp(apctl_code_text(c), original) == 0);
+    CHECK("revert clears the flag", !apctl_code_is_edited(c));
+
+    /* Editing to the original text is not an edit. */
+    CHECK("identical text is not an edit",
+          apctl_set_code_text(c, original) && !apctl_code_is_edited(c));
+
+    /* Emptying a body and filling it again must track the EMPTY flag, which is
+     * what greys a code out in the front-ends. */
+    apctl_set_code_text(c, "");
+    CHECK("emptied body -> EMPTY flag", (c->flags & APOLLO_CODE_FLAG_EMPTY) != 0);
+    apctl_set_code_text(c, "80001000 0000FFFF\n");
+    CHECK("refilled body -> flag cleared", (c->flags & APOLLO_CODE_FLAG_EMPTY) == 0);
+
+    /*
+     * The point of the whole feature: what runs is the edited body, and it
+     * still runs the second time. Save Wizard codes only, so the check does
+     * not depend on which patch file was passed in — "20000004 12345678"
+     * writes a 32-bit value at offset 4.
+     */
+    apctl_code_t *sw = NULL;
+    for (int i = 0; i < apctl_code_count(s) && !sw; i++) {
+        apctl_code_t *r = apctl_code_at(s, i);
+        if (r->type == APOLLO_CODE_SAVEWIZARD && apctl_code_text(r)[0]) sw = r;
+    }
+    if (sw) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/apollo_edit_%d.bin",
+                 getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp",
+                 (int)getpid());
+
+        uint8_t first[32], again[32], other[32];
+
+        CHECK("apply edit A", run_one(s, sw, path, "20000004 12345678", first, sizeof first));
+        CHECK("apply edit A again", run_one(s, sw, path, "20000004 12345678", again, sizeof again));
+        CHECK("same edit -> same bytes", memcmp(first, again, sizeof first) == 0);
+        CHECK("edit A changed the file", memcmp(first, "\0\0\0\0\0\0\0\0", 8) != 0);
+
+        CHECK("apply edit B", run_one(s, sw, path, "20000004 000000FF", other, sizeof other));
+        CHECK("a different edit -> different bytes", memcmp(first, other, sizeof first) != 0);
+
+        remove(path);
+    } else {
+        printf("  (no Save Wizard code here, skipped the apply checks)\n");
+    }
+
+#undef CHECK
+
+    free(original);
+    apctl_close(s);   /* frees both the edit and the parked original */
+
+    printf("\nedit checks: %s\n", fails ? "FAILED" : "all passed");
+    return fails ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--db") == 0)
         return run_db(argc >= 3 ? argv[2] : NULL);
 
+    if (argc >= 3 && strcmp(argv[1], "--edit") == 0)
+        return run_edit(argv[2]);
+
     if (argc < 2) {
         fprintf(stderr, "usage: %s file.savepatch\n", argv[0]);
         fprintf(stderr, "       %s --db [query]\n", argv[0]);
+        fprintf(stderr, "       %s --edit file.savepatch\n", argv[0]);
         return 2;
     }
 

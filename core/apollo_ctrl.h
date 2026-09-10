@@ -55,6 +55,9 @@ typedef struct {
     const char    *name;
     const char    *file;           /* target-file hint from the patch         */
     code_entry_t  *raw;
+    int            edited;         /* body replaced via apctl_set_code_text() */
+    char          *orig_text;      /* the patch file's body, kept for revert;
+                                      owned by the session, NULL until edited */
 } apctl_code_t;
 
 typedef struct apctl_session apctl_session_t;
@@ -70,6 +73,35 @@ apctl_code_t    *apctl_code_at(apctl_session_t *s, int index);  /* 0-based      
 /* Raw code/script body (Save Wizard lines, BSD commands, or Python source).
  * Owned by the session; may be empty for header/group entries. */
 const char *apctl_code_text(const apctl_code_t *c);
+
+/* ---- Editing a code body ---- */
+/*
+ * Replace one code's body for this session. Returns 1 on success, 0 if the
+ * text could not be stored (the previous body is then untouched).
+ *
+ * Safe to apply repeatedly: the engine copies the body before it runs, so an
+ * edit is not consumed by applying it. Nothing is written back to the
+ * .savepatch — apctl_close() is the end of an edit's life.
+ *
+ * Two things an edit cannot do, both because they were decided at parse time:
+ *
+ *   - change the code's TYPE. Editing a Save Wizard body into BSD commands
+ *     leaves it a Save Wizard code, interpreted as such.
+ *   - rename a {TAG}. The engine substitutes an option's value over the tag
+ *     IN PLACE, at the tag's own length (see apply_tag_opts), so a tag that
+ *     has been retyped or deleted stops resolving and the dropdown silently
+ *     does nothing. Callers with option groups should say so.
+ *
+ * Setting the body back to the original text clears the edited flag, so the
+ * flag always means "differs from the patch file".
+ */
+int apctl_set_code_text(apctl_code_t *c, const char *text);
+
+/* Non-zero while this code's body differs from the one the patch declared. */
+int apctl_code_is_edited(const apctl_code_t *c);
+
+/* Put the patch file's own body back. No-op on an unedited code. */
+void apctl_revert_code(apctl_code_t *c);
 
 /* ---- Interactive options (dropdowns) ---- */
 int          apctl_opt_group_count(const apctl_code_t *c);

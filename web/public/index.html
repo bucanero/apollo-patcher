@@ -157,6 +157,16 @@
     <button type="button" id="dialog-close" aria-label="Close">&times;</button>
   </header>
   <pre id="dialog-body"></pre>
+
+  <!-- Single-code view: the same window, but the body is editable. Hidden for
+       the whole-patch-file view, which is read-only. -->
+  <textarea id="dialog-edit" spellcheck="false" wrap="off" hidden
+            aria-label="Code body"></textarea>
+  <div id="dialog-actions" hidden>
+    <button type="button" id="dialog-save">Save changes</button>
+    <button type="button" id="dialog-revert" class="ghost">Revert to file</button>
+    <span id="dialog-note"></span>
+  </div>
 </dialog>
 
 <footer>

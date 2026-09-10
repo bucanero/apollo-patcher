@@ -154,6 +154,28 @@ retracts any previous result, since that output was produced from the bytes as
 they were. The patched result is offered read-only — editing it would produce a
 file no patch chain accounts for, and it is one Download away.
 
+## Editing a code
+
+The per-code **View** window is a text editor: *Save changes* replaces the body
+the engine runs, *Revert to file* restores the patch's own, and the row gets an
+`E` marker while the two differ. Saving also retracts any previous result — it
+came out of the old body.
+
+Session-only, deliberately. The `.savepatch` is never rewritten, and loading
+another patch drops every edit; exporting a modified patch file would be a
+different feature. Applying does not consume an edit either, because the engine
+copies the body before it runs, so Apply stays as repeatable as it is for an
+unedited patch.
+
+The engine, not the page, decides whether a code counts as edited — saving the
+patch file's own text back is not an edit — so `setCodeText` answers with what
+the engine holds afterwards and the marker follows that.
+
+The one trap worth the extra code: an option's value is written OVER its
+`{TAG}`, in place and at the tag's own length (`apply_tag_opts`), so a tag that
+has been retyped or deleted stops resolving and its dropdown quietly does
+nothing. The dialog watches for that while you type.
+
 ## Byte order
 
 PS3 save data is big-endian; nothing else Apollo covers is. A patch chosen from

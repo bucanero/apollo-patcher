@@ -285,6 +285,70 @@ const char *apctl_code_text(const apctl_code_t *c)
     return c->raw->codes;
 }
 
+/* ---- editing a code body ---- */
+
+/* The loader flags a code EMPTY when its body has no characters, and
+ * front-ends use that to grey it out. An edit can cross that line in either
+ * direction, so re-derive it with the loader's own rule. */
+static void refresh_empty_flag(apctl_code_t *c)
+{
+    const char *body = c->raw->codes;
+
+    if (body && body[0]) c->raw->flags &= ~APOLLO_CODE_FLAG_EMPTY;
+    else                 c->raw->flags |= APOLLO_CODE_FLAG_EMPTY;
+
+    c->flags = c->raw->flags;
+}
+
+int apctl_set_code_text(apctl_code_t *c, const char *text)
+{
+    char *copy;
+
+    if (!c || !c->raw || !text) return 0;
+
+    /* Nothing actually changed: a front-end hands us the whole buffer on every
+     * save, so this is the common case when someone opens the window, looks,
+     * and saves anyway. Leaving the flag alone keeps it honest. */
+    if (c->raw->codes && strcmp(text, c->raw->codes) == 0) return 1;
+
+    /* Back to what the file said: drop the edit rather than store an identical
+     * copy, so `edited` keeps meaning "differs from the patch file". */
+    if (c->edited && c->orig_text && strcmp(text, c->orig_text) == 0) {
+        apctl_revert_code(c);
+        return 1;
+    }
+
+    copy = strdup(text);
+    if (!copy) return 0;
+
+    if (c->edited) {
+        free(c->raw->codes);        /* a previous edit; the original is safe */
+    } else {
+        c->orig_text = c->raw->codes;   /* first edit: take ownership of it */
+        c->edited = 1;
+    }
+
+    c->raw->codes = copy;
+    refresh_empty_flag(c);
+    return 1;
+}
+
+int apctl_code_is_edited(const apctl_code_t *c)
+{
+    return (c && c->edited) ? 1 : 0;
+}
+
+void apctl_revert_code(apctl_code_t *c)
+{
+    if (!c || !c->edited) return;
+
+    free(c->raw->codes);
+    c->raw->codes = c->orig_text;
+    c->orig_text  = NULL;
+    c->edited     = 0;
+    refresh_empty_flag(c);
+}
+
 /* ---- options ---- */
 int apctl_opt_group_count(const apctl_code_t *c)
 {
@@ -361,8 +425,18 @@ void apctl_reset_vars(void) { apollo_free_var_list(); }
 void apctl_close(apctl_session_t *s)
 {
     if (!s) return;
-    /* list_free walks the engine's code_entry_t entries; the header is ours. */
-    if (s->codes) list_free(s->codes);
+
+    /* The parsed entries and the list go back to the library, which is the
+     * only side that knows what apollo_load_code_list() allocated. The header
+     * node is ours and stops there: its name/file alias game_name and the
+     * caller's label rather than being allocations of their own. */
+    if (s->codes)
+        apollo_free_code_list(s->codes, list_next(list_head(s->codes)));
+    free(s->header);
+    /* An edited code parked its original body here; the edit itself is in the
+     * entry the library just freed. */
+    for (int i = 0; i < s->n_rows; i++)
+        free(s->rows[i].orig_text);
     free(s->rows);
     free(s->game_name);
     free(s);
