@@ -54,6 +54,11 @@ DIST        = dist
 MODULE      = $(DIST)/apollo.mjs
 INDEX       = $(DIST)/patches.json
 MODLIST     = $(DIST)/python-modules.json
+TOOLS       = $(DIST)/tools.json
+# A committed INPUT, not build output: producing it needs the real game saves
+# in bucanero/save-decrypters, which are not vendored. `make verify` rewrites
+# it; a plain build just reads it, so dist/ can be wiped without losing it.
+VERIFIED    = ../tools/verified.json
 
 SRCS        = src/apollo_wasm.c ../core/apollo_ctrl.c
 STATIC      = $(wildcard public/*)
@@ -112,9 +117,9 @@ LDFLAGS     = -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=worker \
 			  -sEXPORTED_RUNTIME_METHODS='["FS","UTF8ToString","stringToNewUTF8","HEAPU8"]' \
 			  -sEXPORTED_FUNCTIONS='["_malloc","_free","_apw_version","_apw_is_be","_apw_open","_apw_close","_apw_codes_json","_apw_code_text","_apw_set_code_text","_apw_code_is_edited","_apw_code_flags","_apw_set_code_type","_apw_code_type","_apw_export_patch","_apw_export_size","_apw_export_mismatches","_apw_revert_code","_apw_set_option","_apw_apply","_apw_reset_vars"]'
 
-.PHONY: all serve clean
+.PHONY: all serve verify clean
 
-all: $(MODULE) $(INDEX) $(MODLIST) static
+all: $(MODULE) $(INDEX) $(MODLIST) $(TOOLS) static
 
 # The --spill-pointers step is not optional: without it the MicroPython path
 # corrupts memory in this module.
@@ -151,6 +156,26 @@ $(MODULE): $(SRCS) $(LIBAPOLLO) $(LIBMBED) Makefile | $(DIST)
 $(INDEX): ../tools/build-index.py $(PYTHON_MODULES) | $(DIST)
 	@python3 ../tools/build-index.py $(APOLLO_PATCHES) $@
 
+# The tools page's catalog: one row per patch that can decrypt, re-encrypt or
+# fix a checksum, of the ones proven against a real save.
+#
+# --verified-only is the whole scoping decision for the first release. The
+# catalog knows about 1148 patches; 37 of them have been run end to end by
+# `make verify`, and only those are listed. Drop the flag to publish the rest
+# as an unverified long tail — but then the page promises something nobody has
+# checked.
+#
+# ../tools/verified.json is a committed input (see above), so a clean checkout
+# builds the page without needing the game saves.
+$(TOOLS): ../tools/build-index.py $(VERIFIED) | $(DIST)
+	@python3 ../tools/build-index.py $(APOLLO_PATCHES) $@ \
+		--format=tools --verified=$(VERIFIED) --verified-only
+
+$(VERIFIED):
+	@echo "missing $@ — the list of patches proven against a real save."
+	@echo "regenerate it with:  make verify SAMPLES=/path/to/save-decrypters"
+	@exit 2
+
 # Just the helper-module names, so the worker knows what to fetch without
 # crawling a directory listing. 300 bytes.
 $(MODLIST): ../tools/build-index.py $(PYTHON_MODULES) | $(DIST)
@@ -177,6 +202,33 @@ $(LIBAPOLLO) $(LIBMBED):
 		echo "    cd $(APOLLO_LIB) && make -f Makefile.wasm mbedtls && make -f Makefile.wasm"; \
 	fi
 	@exit 2
+
+# Prove the catalogued tools against real saves, and write dist/verified.json.
+#
+# Needs a clone of https://github.com/bucanero/save-decrypters for the samples
+# (not vendored — they are real game saves):
+#
+#   make verify SAMPLES=/path/to/save-decrypters
+#
+# The module is rebuilt for node because the shipped one is -sENVIRONMENT=worker
+# and will not load outside one. Only the JS bootstrap differs; the .wasm is
+# byte-identical, so what this proves is what ships.
+VERIFY_DIST = $(DIST)/node
+VERIFY_MOD  = $(VERIFY_DIST)/apollo.mjs
+
+verify: $(INDEX) | $(DIST)
+	@[ -n "$(SAMPLES)" ] || { echo "set SAMPLES=/path/to/save-decrypters"; exit 2; }
+	@mkdir -p $(VERIFY_DIST)
+	$(CC) $(CFLAGS) $(SRCS) $(LIBAPOLLO) $(LIBMBED) \
+		$(subst -sENVIRONMENT=worker,-sENVIRONMENT=node,$(LDFLAGS)) -o $(VERIFY_MOD)
+	@[ -x "$(WASM_OPT)" ] || { echo "wasm-opt not found; set WASM_OPT=..."; exit 2; }
+	@$(WASM_OPT) --spill-pointers --strip-debug \
+		$(VERIFY_DIST)/apollo.wasm -o $(VERIFY_DIST)/apollo.wasm $(WASM_FEATURES)
+	@cmp -s $(VERIFY_DIST)/apollo.wasm $(DIST)/apollo.wasm \
+		&& echo "verify module wasm == shipped wasm" \
+		|| echo "NOTE: verify wasm differs from dist/apollo.wasm (rebuild dist?)"
+	node ../tools/verify-tools.mjs $(APOLLO_PATCHES) $(SAMPLES) \
+		--module $(VERIFY_MOD) --out $(VERIFIED)
 
 # Static assets are copied rather than referenced so that dist/ is a complete,
 # self-contained site — the same tree the Pages workflow uploads.

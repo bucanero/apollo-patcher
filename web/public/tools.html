@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apollo Save Tools</title>
+<meta name="description" content="Decrypt and re-encrypt PlayStation save files in your browser. Files never leave your device.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>&#128273;</text></svg>">
+<link rel="stylesheet" href="./style.css">
+<link rel="stylesheet" href="./tools.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-row">
+    <h1>Apollo Save Tools</h1>
+    <a class="gh-button" href="https://github.com/bucanero/apollo-patcher"
+       target="_blank" rel="noopener">GitHub</a>
+  </div>
+  <p class="tagline">
+    Decrypt a PlayStation save, edit it however you like, then put it back.
+    Everything runs in this tab — your files are never uploaded.
+  </p>
+</header>
+
+<main class="tools-main">
+
+  <section class="filters" aria-label="Find a game">
+    <input id="search" type="search" placeholder="Search by game or title ID…"
+           autocomplete="off" spellcheck="false" aria-label="Search games">
+    <div id="platforms" class="chips" role="group" aria-label="Platform"></div>
+    <p id="count" class="count" aria-live="polite"></p>
+  </section>
+
+  <section id="grid" class="grid" aria-label="Games"></section>
+
+  <p id="empty" class="empty" hidden>
+    Nothing matches that. <button type="button" class="linkish" id="clear-filters">Clear filters</button>
+  </p>
+
+  <footer class="tools-foot">
+    <p>
+      These are the games whose patch has been run against a real save and
+      checked byte-for-byte against a reference decrypter. More exist —
+      <a href="./index.html">the full patcher</a> reaches every patch in the
+      database, with the code list exposed.
+    </p>
+  </footer>
+</main>
+
+<dialog id="tool" class="tool-dialog" aria-labelledby="tool-title">
+  <form method="dialog" class="tool-close-form">
+    <button class="tool-close" value="close" aria-label="Close">&times;</button>
+  </form>
+
+  <h2 id="tool-title"></h2>
+  <p id="tool-sub" class="tool-sub"></p>
+
+  <div id="drop" class="drop" tabindex="0" role="button"
+       aria-describedby="tool-sub">
+    <input id="file" type="file" hidden>
+    <p class="drop-main">Drop your save file here</p>
+    <p class="drop-sub">or click to choose &middot; nothing is uploaded</p>
+  </div>
+
+  <div id="loaded" class="loaded" hidden>
+    <p><strong id="loaded-name"></strong> <span id="loaded-size" class="dim"></span></p>
+    <button type="button" class="linkish" id="pick-again">Choose a different file</button>
+  </div>
+
+  <div id="actions" class="actions" hidden></div>
+
+  <p id="status" class="status" role="status" aria-live="polite"></p>
+
+  <details id="log-wrap" class="log-wrap" hidden>
+    <summary>Engine output</summary>
+    <pre id="log" class="log"></pre>
+  </details>
+</dialog>
+
+<script type="module" src="./tools.js"></script>
+</body>
+</html>

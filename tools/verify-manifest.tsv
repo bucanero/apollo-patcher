@@ -1,0 +1,90 @@
+# Patches the tool catalog is allowed to call VERIFIED, and the real save that
+# proves each one.
+#
+# verify-tools.mjs applies the patch's decrypt chain — exactly the codes the
+# page's Decrypt button runs, via toolkit.js splitChain() — to the encrypted
+# sample, and requires the result to equal the decrypted one byte for byte.
+# A patch that is not listed here, or that fails, is not marked verified.
+#
+# Samples come from bucanero/save-decrypters (not vendored; pass its path).
+# Paths are relative to that checkout.
+#
+# Not listed, deliberately:
+#   PS3/BLUS30554, PS4/CUSA09084  L.A. Noire — its required codes take an
+#       interactive {TAG} choice (the AES key IS the choice), which two
+#       buttons cannot make for the user.
+#   PS4/CUSA07713  Monster Hunter World — decrypts correctly but exhausts the
+#       MicroPython heap under wasm on its 8MB save (MemoryError, not
+#       corruption). Revisit when the heap story improves.
+#   PS3/BLES01894  Need For Speed: Rivals — the patch is fine; its SAMPLE is
+#       not. USR-DATA is 716800 bytes but only the first 358404 were ever
+#       encrypted, so no correct implementation can reproduce the .enc from
+#       the .dec. Re-list it when the pair is regenerated from a real save.
+#
+#
+# Waiting on a branch merge — the fixes exist, just not where the page reads
+# from. The site fetches patches from apollo-patches@main at run time, so what
+# matters here is main, not what is queued for the next console release:
+#
+#   PS3/NPUB30611, PS3/NPEB00686  MGS: Peace Walker — main still calls
+#       `DECRYPT mgs_pw` with no save-type argument, so it decrypts nothing.
+#       Fixed on branch mgs-pw-psp.
+#   PS3/BLES00450, PS3/BLUS30248  NFS: Undercover — main still decrypts
+#       `pointer+0x5B`, one block short of what apollo-lib has needed since
+#       63f334a. Fixed on branch nfs-undercover-range.
+#
+# Re-add these four rows when those branches reach main; they pass against the
+# branch content today (checked against each branch in a worktree).
+#
+# The mgs-pw-psp branch also adds PSP Peace Walker patches — ULUS10509 and
+# ULES01372 (mgs_pw(1)), NPJH50045 (mgs_pw(2)). They are correct, and this
+# harness still cannot list them, because "equal to the reference plaintext"
+# is the wrong test for them: libapollo deliberately leaves the 0x44-byte
+# header word-swapped on PSP, so a savepatch reads the header fields the same
+# way on PS3 and PSP. Measured against the shipped samples, the payload from
+# 0x44 on is byte-identical and the header is exactly the word-swapped
+# reference header — which is the documented convention, not a defect (see
+# apollo-lib tests/test_samples.c, known_answer_mgspw_psp).
+#
+# Listing them needs a per-row comparison mode ("payload from offset N"), not
+# a new sample. Worth doing when PSP coverage matters; not worth blocking the
+# first release on.
+#PS3	NPUB30611	mgs-pw-decrypter/samples/00000000.000	mgs-pw-decrypter/samples/00000000.000.dec	1
+#PS3	NPEB00686	mgs-pw-decrypter/samples/00000000.000	mgs-pw-decrypter/samples/00000000.000.dec	1
+#PS3	BLES00450	nfs-undercover-decrypter/samples/USR-DATA.enc	nfs-undercover-decrypter/samples/USR-DATA.dec	1
+#PS3	BLUS30248	nfs-undercover-decrypter/samples/USR-DATA.enc	nfs-undercover-decrypter/samples/USR-DATA.dec	1
+#
+# platform	title_id	encrypted sample	expected plaintext	big_endian
+PS3	BLUS30557	maxpayne3-decrypter/samples/RAGE.SAV.enc	maxpayne3-decrypter/samples/RAGE.SAV.dec	1
+PS3	BLUS31188	diablo3-decrypter/samples/ACCOUNT.DAT.enc	diablo3-decrypter/samples/ACCOUNT.DAT.dec	1
+PS3	BLJM61128	dw8xl-decrypter/samples/APP.BIN	dw8xl-decrypter/samples/APP.BIN.dec	1
+PS3	BLUS30810	silent-hill3-decrypter/samples/SAVEDATA.DAT.enc	silent-hill3-decrypter/samples/SAVEDATA.DAT.dec	1
+PS3	BLES01031	cod-blackops-decrypter/samples/GPAD0_CM.PRF.enc	cod-blackops-decrypter/samples/GPAD0_CM.PRF.dec	1
+PS3	BLES01698	dmc-decrypter/samples/PROFILE.enc	dmc-decrypter/samples/PROFILE.dec	1
+PS3	NPEB02226	re-remaster-decrypter/samples/DATA0.DAT.enc	re-remaster-decrypter/samples/DATA0.DAT.dec	1
+PS3	BLES01807	gta5-decrypter/samples/RAGE.SAV.enc	gta5-decrypter/samples/RAGE.SAV.dec	1
+PS3	BLES02040	re-revelations2-decrypter/samples/DATA0.DAT.enc	re-revelations2-decrypter/samples/DATA0.DAT.dec	1
+PS3	NPUB31594	mgs5-tpp-decrypter/samples/TPP_GAM0.enc	mgs5-tpp-decrypter/samples/TPP_GAM0.dec	1
+PS3	NPEB02140	mgs5-tpp-decrypter/samples/TPP_GAM0.NPEB.enc	mgs5-tpp-decrypter/samples/TPP_GAM0.NPEB.dec	1
+PS3	NPEB01889	mgs5-tpp-decrypter/samples/SAVE0.GZ.NPEB.enc	mgs5-tpp-decrypter/samples/SAVE0.GZ.NPEB.dec	1
+PS3	NPUB31318	mgs5-tpp-decrypter/samples/SAVE1.GZ.NPUB.enc	mgs5-tpp-decrypter/samples/SAVE1.GZ.NPUB.dec	1
+PS3	BLJS10330	berseria-decrypter/samples/SAVE.enc	berseria-decrypter/samples/SAVE.dec	1
+PS3	BLES01623	doa5-decrypter/samples/SAVE_SYS.DAT.PS3.enc	doa5-decrypter/samples/SAVE_SYS.DAT.PS3.dec	1
+PS4	CUSA07823	ps4-borderlands3-decrypter/samples/profile.enc	ps4-borderlands3-decrypter/samples/profile.dec	0
+PS4	CUSA42502	smt5-decrypter/samples/Megaten5.ps4.sav.enc	smt5-decrypter/samples/Megaten5.ps4.sav.dec	0
+PS4	CUSA32171	rgg-decrypter/samples/data.ps4.sav.enc	rgg-decrypter/samples/data.ps4.sav.dec	0
+PS4	CUSA08519	rdr2-decrypter/samples/SRDR30000.enc	rdr2-decrypter/samples/SRDR30000.dec	0
+PS4	CUSA00411	gta5-decrypter/samples/memory.dat.enc	gta5-decrypter/samples/memory.dat.dec	0
+PS4	CUSA08495	darksouls-remaster-decrypter/samples/userdata0000.enc	darksouls-remaster-decrypter/samples/userdata0000.dec	0
+PS4	CUSA00924	re-revelations2-decrypter/samples/data1.dat.enc	re-revelations2-decrypter/samples/data1.dat.dec	0
+PS4	CUSA09193	ps4-re4r-decrypter/samples/RE2R-data000.bin.enc	ps4-re4r-decrypter/samples/RE2R-data000.bin.dec	0
+PS4	CUSA33388	ps4-re4r-decrypter/samples/a.enc	ps4-re4r-decrypter/samples/a.dec	0
+PS4	CUSA01140	mgs5-tpp-decrypter/samples/TPP_GAME_DATA0.enc	mgs5-tpp-decrypter/samples/TPP_GAME_DATA0.dec	0
+PS4	CUSA05088	dbz-xenoverse2-decrypter/samples/SDATA000.DAT.enc	dbz-xenoverse2-decrypter/samples/SDATA000.DAT.dec	0
+PS4	CUSA05105	berseria-decrypter/samples/SAVEDATA0.DAT.enc	berseria-decrypter/samples/SAVEDATA0.DAT.dec	0
+PS4	CUSA31348	ff7cc-decrypter/samples/ue4savegame.ps4.sav.enc	ff7cc-decrypter/samples/ue4savegame.ps4.sav.dec	0
+PS4	CUSA15526	nioh2-decrypter/samples/APP.BIN.enc	nioh2-decrypter/samples/APP.BIN.dec	0
+PS4	CUSA46680	gs3-decrypter/samples/ue4savegame.ps4.sav.enc	gs3-decrypter/samples/ue4savegame.ps4.sav.dec	0
+PS4	CUSA33817	ff-pixel-decrypter/samples/slot1.sav.enc	ff-pixel-decrypter/samples/slot1.sav.dec	0
+PSP	UCES01421	patapon3-decrypter/samples/SECURE.BIN.ENC	patapon3-decrypter/samples/SECURE.BIN.DEC	0
+PSV	PCSE00235	doa5-decrypter/samples/SAVE_SYS.DAT.vita.enc	doa5-decrypter/samples/SAVE_SYS.DAT.vita.dec	0
