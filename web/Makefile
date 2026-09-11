@@ -65,6 +65,26 @@ STATIC      = $(wildcard public/*)
 
 CC          = emcc
 
+# Resolve `node` to a real executable rather than letting a recipe do a bare
+# PATH lookup. emsdk puts <emsdk> on PATH and <emsdk>/node is a DIRECTORY (the
+# bundled Node install); GNU make execs a simple recipe line itself rather than
+# through a shell, so its PATH search stops at that directory and fails with
+#
+#     make: node: Permission denied        (make then reports Error 127)
+#
+# A shell skips directories, which is why this bites only the one recipe that
+# runs node directly, and why it never reproduces on macOS — no such directory
+# is on PATH there. Same helper as apollo-lib's Makefile.wasm, which hit it
+# first with cmake.
+#
+# $(wildcard $(d)/$(1)/.) is non-empty only when $(d)/$(1) IS a directory, so
+# this takes the first PATH entry holding a $(1) that is not one, and falls
+# back to the bare name so a genuinely missing tool still reports itself.
+find_exe = $(firstword $(foreach d,$(subst :, ,$(PATH)), \
+			  $(if $(wildcard $(d)/$(1)/.),,$(wildcard $(d)/$(1)))) $(1))
+
+NODE       ?= $(call find_exe,node)
+
 # wasm-opt, for the --spill-pointers step below. emsdk puts it on PATH; a
 # Homebrew emscripten keeps it in libexec/binaryen/bin, reachable only after
 # resolving the emcc symlink. Override WASM_OPT if it lives anywhere else.
@@ -227,7 +247,7 @@ verify: $(INDEX) | $(DIST)
 	@cmp -s $(VERIFY_DIST)/apollo.wasm $(DIST)/apollo.wasm \
 		&& echo "verify module wasm == shipped wasm" \
 		|| echo "NOTE: verify wasm differs from dist/apollo.wasm (rebuild dist?)"
-	node ../tools/verify-tools.mjs $(APOLLO_PATCHES) $(SAMPLES) \
+	$(NODE) ../tools/verify-tools.mjs $(APOLLO_PATCHES) $(SAMPLES) \
 		--module $(VERIFY_MOD) --out $(VERIFIED)
 
 # Static assets are copied rather than referenced so that dist/ is a complete,
