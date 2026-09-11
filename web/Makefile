@@ -233,9 +233,15 @@ verify: $(INDEX) | $(DIST)
 # Static assets are copied rather than referenced so that dist/ is a complete,
 # self-contained site — the same tree the Pages workflow uploads.
 .PHONY: static
+# The patcher ships as BOTH index.html and patcher.html, so a deployment can
+# make either page the landing one without rewriting a single link. This site
+# keeps the patcher at /; the save-decrypters site copies tools.html over
+# index.html and gets the tools at / instead. tools.html links to
+# ./patcher.html, which is correct in both.
 static: | $(DIST)
 	@cp $(STATIC) $(DIST)/
-	@echo "copied $(words $(STATIC)) static files to $(DIST)/"
+	@cp $(DIST)/index.html $(DIST)/patcher.html
+	@echo "copied $(words $(STATIC)) static files to $(DIST)/ (+ patcher.html)"
 
 $(DIST):
 	@mkdir -p $@
