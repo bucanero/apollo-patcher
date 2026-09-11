@@ -11,15 +11,80 @@ Published to GitHub Pages from `main` (see `.github/workflows/pages.yml`).
 
 ```
 src/apollo_wasm.c    Emscripten binding over core/apollo_ctrl.[ch]
-../tools/            build-index.py generates the browsable patch index
-public/index.html    the page
+../tools/            build-index.py generates the browsable patch index and
+                     the tools catalog; verify-tools.mjs proves the latter
+public/index.html    the patcher page
 public/app.js        UI: state + DOM, no framework
+public/tools.html    the tools page — one decrypt/re-encrypt pair per game
+public/tools.js      its UI, on the same worker
+public/tools.css     its layout, on style.css's tokens
+public/toolkit.js    which codes each action runs; shared with verify-tools.mjs
 public/worker.js     owns the wasm module, runs every engine call
-public/cdn.js        where the database is fetched from, shared by both
+public/cdn.js        where the database is fetched from, shared by all
 public/hexedit.js    hex editor, vendored from bucanero/ps2vmc-tool
 public/style.css     light + dark
 dist/                build output — exactly what gets published
 ```
+
+## Two pages
+
+`index.html` is the patcher: every patch in the database, the whole code list,
+tick what you want. It assumes you know which codes you need.
+
+`tools.html` is narrower on purpose. Most people arrive wanting one of two
+things — open this save so an editor can read it, or put the edited one back —
+and the patcher makes them assemble that themselves from a list where getting
+the order wrong produces a save the game rejects. The tools page offers the two
+buttons instead, and `toolkit.js` decides which codes each runs:
+
+- **Decrypt** — the required codes up to the first checksum-or-encrypt step.
+- **Re-encrypt** (or **Fix checksum**, when the patch has no crypto) — the rest,
+  in file order. The order is load-bearing: Silent Hill 3 is decrypt, update
+  the DWADD checksum, encrypt, and skipping the middle gives a save the game
+  refuses. Crisis Core computes its checksum over the *ciphertext*, which is
+  why its checksum code sits after the encrypt.
+
+It lists only patches `make verify` has run against a real save — see below.
+Everything else about it is the patcher's machinery: same worker, same wasm,
+same CDN fetch.
+
+## Verifying the tools
+
+```bash
+make verify SAMPLES=/path/to/save-decrypters
+```
+
+For each row of `../tools/verify-manifest.tsv` this opens the shipped
+`.savepatch` in the real module, splits its codes with the same `toolkit.js`
+the page uses, applies the decrypt half to a real encrypted save, and requires
+the output to equal the reference plaintext byte for byte. The result is
+`../tools/verified.json` — a committed input, so a clean checkout builds the
+page without needing the saves — and `dist/tools.json` is generated from it
+with `--verified-only`.
+
+So the page does not promise anything that has not been run. 33 patches pass
+today; the catalog knows about 1148, and opening up the rest is a matter of
+dropping `--verified-only` once there is evidence for them.
+
+What it is really guarding is the seam between the engine and the patches,
+which has drifted before and gives no signal when it does. On its first run it
+refused four patches, all for that reason — `main` predates fixes that exist on
+branches held back for the next console release:
+
+- `PS3/BLES00450` + `PS3/BLUS30248` (Need for Speed: Undercover) decrypt with a
+  range one block short, `pointer+0x5B`, where apollo-lib has needed
+  `pointer+0x6B` since `63f334a`. Fixed on `nfs-undercover-range`.
+- `PS3/NPUB30611` + `PS3/NPEB00686` (MGS: Peace Walker) call `DECRYPT mgs_pw`
+  with no save-type argument, so they decrypt nothing. Fixed on `mgs-pw-psp`.
+
+Those four are parked in the manifest rather than listed, because this page
+fetches patches from `apollo-patches@main` at run time: what ships on a branch
+does not reach a visitor. They go back in when the branches land — they already
+pass against the branch content.
+
+The module is rebuilt for node to run this (the shipped one is
+`-sENVIRONMENT=worker`); only the JS bootstrap differs, and the target asserts
+the `.wasm` is byte-identical to the shipped one.
 
 ## Building
 
@@ -57,6 +122,27 @@ download reflects exactly the codes currently ticked, not an accumulation of
 previous runs.
 
 ### Things worth knowing about the build
+
+- **`--spill-pointers`, applied post-link** — not optional. MicroPython's GC
+  scans the C stack conservatively, and under wasm that finds almost nothing:
+  locals live in wasm locals rather than addressable memory, so a measured run
+  had **1276 bytes** of shadow stack for the entire live VM call chain. Live
+  objects went unseen, were swept, and the next free of one aborted the module
+  with `assert(!"bad free")`. Before this step, applying *any* Python patch
+  here failed outright — about 50 patches in the database contain Python codes.
+
+  It cannot be passed as `-sBINARYEN_EXTRA_PASSES=--spill-pointers`, because
+  that route is a catch-22: the pass locates the stack pointer **by name**, so
+  without the name section wasm-opt stops with `Fatal: getStackSpace: failed to
+  find the stack pointer` — and asking emcc for names with `-g` makes it report
+  `running limited binaryen optimizations because DWARF info requested` and
+  *silently drop* the extra passes. `--profiling-funcs` threads between the
+  two: it keeps the name section without DWARF, so the full `-O3` Binaryen
+  pipeline still runs, and `--strip-debug` removes the names again immediately
+  after spilling.
+
+  It costs real bytes: **920KB against 600KB, 317KB gzipped against 243KB.**
+  That is the price of a MicroPython that does not corrupt saves.
 
 - **`-sSTACK_SIZE=4MB`** — Emscripten's 64KB default is *below* MicroPython's
   own 40KB stack limit, so Python codes fail immediately without it.
@@ -218,6 +304,15 @@ directly. A file the user supplies has no directory, so the shared
 `apctl_is_big_endian_for()` falls back to matching known PS3 title-ID prefixes
 against the file name, then against the patch's own first lines for a file that
 has been renamed. It remains a checkbox either way.
+
+## Known limitation: the largest saves
+
+Spilling makes the conservative scan retain aggressively, so a Python patch
+working on a very large save can exhaust the MicroPython heap and raise
+`MemoryError`. Monster Hunter World's 8MB save does, at `PY_HEAP_SIZE` and at
+four times it; every other Python patch with a sample in
+[save-decrypters](https://github.com/bucanero/save-decrypters) applies
+correctly. It fails cleanly rather than producing a bad save.
 
 ## Scope
 
