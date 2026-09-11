@@ -58,6 +58,27 @@ previous runs.
 
 ### Things worth knowing about the build
 
+- **`--spill-pointers`, applied post-link** — not optional. MicroPython's GC
+  scans the C stack conservatively, and under wasm that finds almost nothing:
+  locals live in wasm locals rather than addressable memory, so a measured run
+  had **1276 bytes** of shadow stack for the entire live VM call chain. Live
+  objects went unseen, were swept, and the next free of one aborted the module
+  with `assert(!"bad free")`. Before this step, applying *any* Python patch
+  here failed outright — about 50 patches in the database contain Python codes.
+
+  It cannot be passed as `-sBINARYEN_EXTRA_PASSES=--spill-pointers`, because
+  that route is a catch-22: the pass locates the stack pointer **by name**, so
+  without the name section wasm-opt stops with `Fatal: getStackSpace: failed to
+  find the stack pointer` — and asking emcc for names with `-g` makes it report
+  `running limited binaryen optimizations because DWARF info requested` and
+  *silently drop* the extra passes. `--profiling-funcs` threads between the
+  two: it keeps the name section without DWARF, so the full `-O3` Binaryen
+  pipeline still runs, and `--strip-debug` removes the names again immediately
+  after spilling.
+
+  It costs real bytes: **920KB against 600KB, 317KB gzipped against 243KB.**
+  That is the price of a MicroPython that does not corrupt saves.
+
 - **`-sSTACK_SIZE=4MB`** — Emscripten's 64KB default is *below* MicroPython's
   own 40KB stack limit, so Python codes fail immediately without it.
 - **No `--embed-file`** — Python codes `import` helper modules (`rijndael`,
@@ -218,6 +239,15 @@ directly. A file the user supplies has no directory, so the shared
 `apctl_is_big_endian_for()` falls back to matching known PS3 title-ID prefixes
 against the file name, then against the patch's own first lines for a file that
 has been renamed. It remains a checkbox either way.
+
+## Known limitation: the largest saves
+
+Spilling makes the conservative scan retain aggressively, so a Python patch
+working on a very large save can exhaust the MicroPython heap and raise
+`MemoryError`. Monster Hunter World's 8MB save does, at `PY_HEAP_SIZE` and at
+four times it; every other Python patch with a sample in
+[save-decrypters](https://github.com/bucanero/save-decrypters) applies
+correctly. It fails cleanly rather than producing a bad save.
 
 ## Scope
 

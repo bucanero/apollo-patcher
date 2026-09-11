@@ -60,6 +60,28 @@ STATIC      = $(wildcard public/*)
 
 CC          = emcc
 
+# wasm-opt, for the --spill-pointers step below. emsdk puts it on PATH; a
+# Homebrew emscripten keeps it in libexec/binaryen/bin, reachable only after
+# resolving the emcc symlink. Override WASM_OPT if it lives anywhere else.
+#
+# Backticks rather than $(...) for the command substitution on purpose: inside
+# $(shell ...) make would read the closing paren as the end of its own call.
+EMCC_REAL  := $(shell readlink -f `command -v emcc` 2>/dev/null || command -v emcc 2>/dev/null)
+
+WASM_OPT   ?= $(firstword \
+			  $(shell command -v wasm-opt 2>/dev/null) \
+			  $(wildcard $(dir $(EMCC_REAL))../libexec/binaryen/bin/wasm-opt) \
+			  $(wildcard $(dir $(EMCC_REAL))../binaryen/bin/wasm-opt) \
+			  $(wildcard $(dir $(EMCC_REAL))../bin/wasm-opt) \
+			  $(wildcard $(dir $(EMCC_REAL))wasm-opt))
+
+# wasm-opt has to be told the same feature set the linker emitted or it refuses
+# the module.
+WASM_FEATURES = --enable-bulk-memory --enable-bulk-memory-opt \
+				--enable-call-indirect-overlong --enable-multivalue \
+				--enable-mutable-globals --enable-nontrapping-float-to-int \
+				--enable-reference-types --enable-sign-ext
+
 CFLAGS      = -O3 -Wall \
 			  -D_GNU_SOURCE -D_USE_MBEDTLS \
 			  -I$(APOLLO_LIB)/include \
@@ -75,12 +97,17 @@ CFLAGS      = -O3 -Wall \
 # -sENVIRONMENT=worker: this module only ever runs inside the Web Worker, so
 #   the browser/node bootstrap paths are dead weight.
 # -sINVOKE_RUN=0: there is no main(); we only call exported functions.
+# --profiling-funcs: keeps the wasm name section, which the --spill-pointers
+#   step below needs to locate __stack_pointer. It is NOT for profiling here and
+#   it is not -g: no DWARF, so emcc still runs the full -O3 binaryen pipeline.
+#   The names are stripped again right after spilling.
 #
 # Note there is no --embed-file: the worker writes the Python helper modules
 # into /python at run time (see public/worker.js). libapollo resolves imports
 # against "python" relative to the FS root when no host callback is set, and
 # MicroPython's import stat()s real paths, so files written after startup work.
 LDFLAGS     = -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=worker \
+			  --profiling-funcs \
 			  -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4MB -sINVOKE_RUN=0 \
 			  -sEXPORTED_RUNTIME_METHODS='["FS","UTF8ToString","stringToNewUTF8","HEAPU8"]' \
 			  -sEXPORTED_FUNCTIONS='["_malloc","_free","_apw_version","_apw_is_be","_apw_open","_apw_close","_apw_codes_json","_apw_code_text","_apw_set_code_text","_apw_code_is_edited","_apw_code_flags","_apw_set_code_type","_apw_code_type","_apw_export_patch","_apw_export_size","_apw_export_mismatches","_apw_revert_code","_apw_set_option","_apw_apply","_apw_reset_vars"]'
@@ -89,9 +116,35 @@ LDFLAGS     = -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=worker \
 
 all: $(MODULE) $(INDEX) $(MODLIST) static
 
+# The --spill-pointers step is not optional: without it the MicroPython path
+# corrupts memory in this module.
+#
+# MicroPython's GC scans the C stack conservatively (micropy_gc_collect() in
+# apollo-lib walks from &regs up to vm.stack_top). Under wasm that finds almost
+# nothing -- locals live in wasm locals, not addressable memory, so a measured
+# run had 1276 bytes of shadow stack for the whole live VM call chain. Live
+# objects go unseen, get swept, and the next free of one aborts the module with
+# `assert(!"bad free")`. Applying a Python patch here failed outright before
+# this step existed; ~50 patches in the database contain Python codes.
+#
+# It has to be a SEPARATE wasm-opt invocation rather than
+# -sBINARYEN_EXTRA_PASSES=--spill-pointers, because that route cannot work:
+# the pass finds the stack pointer by NAME, so without the name section it
+# stops with "Fatal: getStackSpace: failed to find the stack pointer" -- and
+# asking emcc for names with -g makes it report "running limited binaryen
+# optimizations because DWARF info requested" and silently drop the extra
+# passes. --profiling-funcs above threads between the two.
+#
+# Cost: the spilled module is ~920KB against ~600KB, 317KB gzipped against
+# 243KB. That is the price of a correct MicroPython.
 $(MODULE): $(SRCS) $(LIBAPOLLO) $(LIBMBED) Makefile | $(DIST)
 	$(CC) $(CFLAGS) $(SRCS) $(LIBAPOLLO) $(LIBMBED) $(LDFLAGS) -o $@
-	@echo "built $@"
+	@[ -x "$(WASM_OPT)" ] || { \
+		echo "wasm-opt not found — needed for the --spill-pointers step."; \
+		echo "set WASM_OPT=/path/to/wasm-opt"; exit 2; }
+	$(WASM_OPT) --spill-pointers --strip-debug \
+		$(DIST)/apollo.wasm -o $(DIST)/apollo.wasm $(WASM_FEATURES)
+	@echo "built $@ (--spill-pointers applied)"
 
 # The browsable index of the database. Reading ~2200 files is trivial here and
 # impossible from a browser, so the page fetches this instead of crawling.
