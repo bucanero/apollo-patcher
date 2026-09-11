@@ -59,7 +59,7 @@ python3 tools/build-index.py /path/to/apollo-patches tools.json --format=tools
 1148 of the 2240 patches qualify (540 distinct games): 906 can fix a checksum,
 242 can decrypt and re-encrypt, and 43 of those go through offzip. 15KB
 gzipped. `--verified=FILE` marks the ones `verify-tools.mjs` has proved against
-a real save — 33 today — and `--verified-only` emits nothing else, which is
+a real save — 107 today, across 51 tools — and `--verified-only` emits nothing else, which is
 what the web tools page ships, so it promises only what has been run. Each row is `[platform, title_id, name, kinds, files]`, where `kinds`
 holds `d` decrypt, `e` re-encrypt, `c` checksum, `z` offzip, and `files` names
 what the user should supply.

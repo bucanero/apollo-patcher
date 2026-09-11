@@ -25,8 +25,10 @@ unreasonable at run time, so the index is generated here.
                       "cde", "SAVEDATA.DAT"], ...]}
           The fourth field is what the patch can do — "d" decrypt, "e"
           re-encrypt, "c" checksum, "z" the patch uses offzip — the fifth is
-          the file name(s) the user should supply, and the sixth is 1 when
-          verify-tools.mjs has proved this patch against a real save.
+          the file name(s) the user should supply, the sixth is 1 when
+          verify-tools.mjs has proved this patch, and the seventh groups
+          patches whose applied chain is byte-identical — the page shows one
+          tool per group, listing every title ID in it.
 
           --verified=FILE  reads that proof (tools/verify-tools.mjs --out)
           --verified-only  emits only proven entries, for a release that
@@ -252,11 +254,15 @@ def main(argv):
     # in this script can know that — it reads text, it does not decrypt
     # anything — so the claim comes from tools/verify-tools.mjs, which drives
     # the real engine and compares bytes.
-    verified = set()
+    # (platform, title_id) -> chain group. Patches sharing a group carry a
+    # byte-identical applied chain, so the page can present them as one tool
+    # listing several title IDs. Grouping by game NAME would merge things that
+    # only look alike — Metal Gear Solid V keys per region.
+    verified = {}
     if verified_path:
         with open(verified_path, encoding="utf-8") as fh:
             for entry in json.load(fh)["verified"]:
-                verified.add((entry[0], entry[1]))
+                verified[(entry[0], entry[1])] = entry[3] if len(entry) > 3 else ""
     for platform in PLATFORMS:
         directory = os.path.join(root, platform)
         if not os.path.isdir(directory):
@@ -280,10 +286,12 @@ def main(argv):
             # get away with the second line, so do not read 2240 files twice.
             if fmt == "tools":
                 kinds, files = scan_tool_codes(os.path.join(directory, entry))
-                is_verified = (platform, title_id) in verified
+                group = verified.get((platform, title_id))
+                is_verified = group is not None
                 if kinds and (is_verified or not verified_only):
                     tools.append([platform, title_id, name, kinds,
-                                  ",".join(files), 1 if is_verified else 0])
+                                  ",".join(files), 1 if is_verified else 0,
+                                  group or ""])
                     tool_counts[platform] = tool_counts.get(platform, 0) + 1
 
         if found:

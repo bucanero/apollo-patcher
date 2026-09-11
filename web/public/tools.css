@@ -52,16 +52,48 @@
 
 .count { margin: 0 0 0 auto; color: var(--ink-dim); font-size: 13px; }
 
-.grid {
+/* #grid holds one <section> per console; the cards themselves are the nested
+   .cards grid. Keeping the card grid inside each section is what lets a
+   platform heading span its own block rather than floating over everything. */
+.grid { display: flex; flex-direction: column; gap: 26px; }
+
+.platform-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--line);
+}
+.platform-count {
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--ink-dim);
+    opacity: .75;
+}
+
+.cards {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 10px;
 }
 
 .card {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-areas:
+        "icon name"
+        "icon meta";
+    align-content: center;
+    column-gap: 12px;
+    row-gap: 4px;
     padding: 14px;
     text-align: left;
     font: inherit;
@@ -72,15 +104,40 @@
     cursor: pointer;
 }
 .card:hover { border-color: var(--accent); }
-.card-plat {
+/* Redundant now that cards sit under a platform heading — kept in the markup
+   for the dialog's aria description and for anyone reading the DOM. */
+.card-plat { display: none; }
+
+.card-plat-unused {
+    grid-area: plat;
     align-self: flex-start;
     font-size: 11px;
     letter-spacing: .04em;
     text-transform: uppercase;
     color: var(--ink-dim);
 }
-.card-name { font-weight: 600; line-height: 1.3; }
-.card-meta { font-size: 12px; color: var(--ink-dim); }
+.card-name { grid-area: name; font-weight: 600; line-height: 1.3; }
+.card-meta { grid-area: meta; font-size: 12px; color: var(--ink-dim); }
+
+/* Icons are optional — coverage is partial and tools.js removes the <img>
+   when nothing matches. The grid column collapses when it does, so a card
+   without art is a card without art rather than a card with a hole in it.
+
+   Sized by HEIGHT with the width left to follow, because the consoles do not
+   agree on a shape: PS3 art is 320x176, PS4 is 512x512, PS Vita is 250x320
+   (portrait), and PSP is both 144x80 and 80x80 depending on the title. Any
+   fixed box would crop or letterbox most of them. A common height instead
+   keeps the row of cards visually level while every icon keeps its own
+   proportions; max-width stops an unusually wide one from crowding the text.
+   object-fit is contain rather than cover so nothing is ever cropped. */
+.card-icon {
+    grid-area: icon;
+    height: 72px;
+    width: auto;
+    max-width: 132px;
+    border-radius: 6px;
+    object-fit: contain;
+}
 
 .empty { color: var(--ink-dim); }
 .linkish {
@@ -115,7 +172,51 @@
 }
 .tool-dialog::backdrop { background: rgba(0, 0, 0, .45); }
 .tool-dialog h2 { margin: 0 8px 2px 0; font-size: 19px; }
-.tool-sub { margin: 0 0 16px; color: var(--ink-dim); font-size: 13px; }
+.tool-sub { margin: 0; color: var(--ink-dim); font-size: 13px; }
+
+.tool-head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 16px;
+}
+/* Same height-driven sizing as the cards, for the same reason: the consoles
+   disagree about icon shape. */
+.tool-icon {
+    height: 64px;
+    width: auto;
+    max-width: 118px;
+    border-radius: 8px;
+    object-fit: contain;
+    flex: none;
+}
+
+.busy {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 20px 16px;
+    color: var(--ink-dim);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+}
+.spinner {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--line);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Someone who has asked for less motion still needs to know it is working, so
+   the ring stays and simply stops turning. */
+@media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; }
+}
 
 .tool-close-form { float: right; margin: -6px -6px 0 0; }
 .tool-close {

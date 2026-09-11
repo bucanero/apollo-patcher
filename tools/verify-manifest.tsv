@@ -88,3 +88,46 @@ PS4	CUSA46680	gs3-decrypter/samples/ue4savegame.ps4.sav.enc	gs3-decrypter/sample
 PS4	CUSA33817	ff-pixel-decrypter/samples/slot1.sav.enc	ff-pixel-decrypter/samples/slot1.sav.dec	0
 PSP	UCES01421	patapon3-decrypter/samples/SECURE.BIN.ENC	patapon3-decrypter/samples/SECURE.BIN.DEC	0
 PSV	PCSE00235	doa5-decrypter/samples/SAVE_SYS.DAT.vita.enc	doa5-decrypter/samples/SAVE_SYS.DAT.vita.dec	0
+
+# ---- checksum fixers ----
+#
+# These rows carry "-" as the expected file: the sample IS a valid save, and
+# the patch has to leave it byte-for-byte alone. That is a real check — the
+# sample holds the checksum the game itself wrote, so a wrong range, algorithm
+# or write offset lands somewhere else — and the harness additionally pokes a
+# byte and requires the checksum to move, so a code that quietly does nothing
+# cannot pass by standing still.
+#
+# Each sample is attributed to the patch's own game: either the filename names
+# the title ID, or the tool in save-decrypters covers exactly one game, or the
+# filename echoes the game name. Samples that cannot be attributed are not
+# used — several tools there cover a family of games that share one algorithm
+# (the RE Engine ones, the Trails ones), and "a Resident Evil save proves the
+# Monster Hunter Rise patch" is not a claim worth making. Patches left out
+# this way are mostly picked up anyway by the identical-chain expansion.
+PS3	BLES01401	dbz-checksum-fixer/samples/SYS-DATA	-	1
+PS3	BLES02152	toz-checksum-fixer/samples/SAVE.PS3	-	1
+PS3	BLUS30823	dbz-checksum-fixer/samples/SYS-DATA	-	1
+PS3	BLUS31441	digimon-checksum-fixer/samples/SAVEDATA	-	1
+PS3	BLUS31476	tears2-checksum-fixer/samples/GAMEDATA.DAT	-	1
+PS3	BLUS31533	toz-checksum-fixer/samples/SAVE.PS3	-	1
+PS3	NPEB02078	digimon-checksum-fixer/samples/SAVEDATA	-	1
+PS3	NPUB31126	ducktales-checksum-fixer/samples/SAVE.DAT	-	1
+PS3	NPUB31675	toz-checksum-fixer/samples/SAVE.PS3	-	1
+PS4	CUSA03617	mafia3-checksum-fixer/samples/HEAD	-	0
+PS4	CUSA03652	mafia3-checksum-fixer/samples/HEAD	-	0
+PS4	CUSA04437	re5-checksum-fixer/samples/savedata.bin	-	0
+PS4	CUSA04513	deadrising-checksum-fixer/samples/deadrising.PS4	-	0
+PS4	CUSA04671	deadrising-checksum-fixer/samples/deadrising.PS4	-	0
+PS4	CUSA04825	deadrising-checksum-fixer/samples/deadrising.PS4	-	0
+PS4	CUSA09152	sao-fb-checksum-fixer/samples/ue4savegame.ps4.sav	-	0
+PS4	CUSA11260	dstranding-checksum-fixer/samples/checkpoint.dat	-	0
+PS4	CUSA12025	kh3-checksum-fixer/samples/system.bin	-	0
+PS4	CUSA12031	kh3-checksum-fixer/samples/system.bin	-	0
+PS4	CUSA12605	dstranding-checksum-fixer/samples/checkpoint.dat	-	0
+PS4	CUSA27774	trails-checksum-fixer/samples/ThoughDaybreakCUSA27774.dat	-	0
+PS4	CUSA29214	tosr-checksum-fixer/samples/TOSSaveData0.dat	-	0
+PS4	CUSA51534	trails-checksum-fixer/samples/BeyondTheHorizonCUSA51534.dat	-	0
+PSP	UCES01241	invizimals-checksum-fixer/samples/GAMEDATA.UCES01241	-	0
+PSP	UCES01411	invizimals-checksum-fixer/samples/GAMEDATA.UCES01411	-	0
+PSP	UCES01581	invizimals-checksum-fixer/samples/GAMEDATA.UCES01581	-	0

@@ -53,8 +53,21 @@
     <button class="tool-close" value="close" aria-label="Close">&times;</button>
   </form>
 
-  <h2 id="tool-title"></h2>
-  <p id="tool-sub" class="tool-sub"></p>
+  <div class="tool-head">
+    <img id="tool-icon" class="tool-icon" alt="" hidden>
+    <div>
+      <h2 id="tool-title"></h2>
+      <p id="tool-sub" class="tool-sub"></p>
+    </div>
+  </div>
+
+  <!-- Shown while the patch is being fetched and parsed, and again while a
+       code runs: both take long enough (a Python patch on a multi-megabyte
+       save takes tens of seconds) that a still dialog reads as a hung one. -->
+  <div id="busy" class="busy" hidden>
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="busy-text">Loading the patch…</span>
+  </div>
 
   <div id="drop" class="drop" tabindex="0" role="button"
        aria-describedby="tool-sub">

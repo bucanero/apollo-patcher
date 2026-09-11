@@ -230,6 +230,10 @@ $(LIBAPOLLO) $(LIBMBED):
 #
 #   make verify SAMPLES=/path/to/save-decrypters
 #
+# The unfiltered catalog goes to the verify scratch dir (removed before the
+# site is published): the expansion pass needs to see every patch, not just
+# the ones already believed good.
+#
 # The module is rebuilt for node because the shipped one is -sENVIRONMENT=worker
 # and will not load outside one. Only the JS bootstrap differs; the .wasm is
 # byte-identical, so what this proves is what ships.
@@ -247,8 +251,11 @@ verify: $(INDEX) | $(DIST)
 	@cmp -s $(VERIFY_DIST)/apollo.wasm $(DIST)/apollo.wasm \
 		&& echo "verify module wasm == shipped wasm" \
 		|| echo "NOTE: verify wasm differs from dist/apollo.wasm (rebuild dist?)"
+	@python3 ../tools/build-index.py $(APOLLO_PATCHES) $(VERIFY_DIST)/all-tools.json \
+		--format=tools
 	$(NODE) ../tools/verify-tools.mjs $(APOLLO_PATCHES) $(SAMPLES) \
-		--module $(VERIFY_MOD) --out $(VERIFIED)
+		--module $(VERIFY_MOD) --catalog $(VERIFY_DIST)/all-tools.json \
+		--out $(VERIFIED)
 
 # Static assets are copied rather than referenced so that dist/ is a complete,
 # self-contained site — the same tree the Pages workflow uploads.
