@@ -1,5 +1,5 @@
 /*
- * Apollo Save Tools — one decrypt / re-encrypt pair per game.
+ * Apollo Save Decrypters & Fixers — one decrypt / re-encrypt pair per game.
  *
  * The patcher page next door exposes the whole code list and lets you pick.
  * This one answers the question most people actually arrive with: "how do I
@@ -219,6 +219,16 @@ function render() {
  * the dialog so somebody holding a JP copy can check before they start. */
 const idSummary = (r) => r.ids.length > 1 ? `${r.id} +${r.ids.length - 1} more` : r.id;
 
+/* In the dialog the IDs become links to the patch each one came from. Two
+ * questions get asked here and only the second needs the source: "is my
+ * region covered" and "what is this thing about to do to my save". Pointed at
+ * the repository rather than the CDN the page fetches from, so the link opens
+ * something readable, with a history and a blame, instead of a raw blob. */
+const PATCH_REPO = 'https://github.com/bucanero/apollo-patches/blob/main';
+const idLinks = (r) => r.ids.map((id) =>
+    `<a href="${PATCH_REPO}/${r.platform}/${encodeURIComponent(id)}.savepatch"`
+    + ` target="_blank" rel="noopener">${escapeHtml(id)}</a>`).join(', ');
+
 const cardHtml = (r) => `
   <button type="button" class="card" data-i="${catalog.indexOf(r)}" data-platform="${r.platform}">
     <img class="card-icon" alt="" loading="lazy" decoding="async"
@@ -248,10 +258,10 @@ $('grid').addEventListener('click', (ev) => {
 async function openTool(row, iconSrc) {
     active = null; save = null;
     $('tool-title').textContent = row.name;
-    $('tool-sub').textContent =
-        `${PLATFORM_LABEL[row.platform] || row.platform} · `
-        + (row.ids.length > 1 ? `covers ${row.ids.join(', ')}` : row.id)
-        + (row.files.length ? ` · expects ${row.files.join(' or ')}` : '');
+    $('tool-sub').innerHTML =
+        `${escapeHtml(PLATFORM_LABEL[row.platform] || row.platform)} · `
+        + (row.ids.length > 1 ? `covers ${idLinks(row)}` : idLinks(row))
+        + (row.files.length ? ` · expects ${escapeHtml(row.files.join(' or '))}` : '');
     const icon = $('tool-icon');
     if (iconSrc) { icon.src = iconSrc; icon.hidden = false; } else { icon.hidden = true; icon.removeAttribute('src'); }
 

@@ -1,4 +1,4 @@
-/* Apollo Save Tools — layout on top of style.css's tokens. */
+/* Apollo Save Decrypters & Fixers — layout on top of style.css's tokens. */
 
 .tagline {
     margin: 6px 0 0;
@@ -150,15 +150,16 @@
     text-decoration: underline;
 }
 
-.tools-foot {
-    margin-top: 34px;
-    padding-top: 16px;
-    border-top: 1px solid var(--line);
+/* The page's one footer carries both the "what does verified mean" note and
+   the credits. The note is the part people read, so it keeps the body size
+   while the credits below it stay at .credits' smaller 12px. */
+.credits .foot-lede {
     color: var(--ink-dim);
     font-size: 13px;
-    max-width: 70ch;
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
 }
-.tools-foot a { color: var(--accent); }
 
 /* ---- the per-game dialog ---- */
 
@@ -173,6 +174,11 @@
 .tool-dialog::backdrop { background: rgba(0, 0, 0, .45); }
 .tool-dialog h2 { margin: 0 8px 2px 0; font-size: 19px; }
 .tool-sub { margin: 0; color: var(--ink-dim); font-size: 13px; }
+/* The title IDs are links to the patch each one came from. Underlined only on
+   hover: a dialog subtitle that is mostly IDs turns into a wall of rules
+   otherwise. */
+.tool-sub a { color: var(--accent); text-decoration: none; }
+.tool-sub a:hover { text-decoration: underline; }
 
 .tool-head {
     display: flex;

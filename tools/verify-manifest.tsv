@@ -16,6 +16,16 @@
 #   PS4/CUSA07713  Monster Hunter World — decrypts correctly but exhausts the
 #       MicroPython heap under wasm on its 8MB save (MemoryError, not
 #       corruption). Revisit when the heap story improves.
+#   PSV/PCSE00608, PSV/PCSF00728, PSV/PCSG00594  Resident Evil: Revelations 2
+#       (Vita) — a different shape from the PS3/PS4 patches, which decrypt
+#       DATA0.DAT in place. The Vita save is a compressed container: the
+#       required chain decompresses `data/data0000.bin`, checksums a file at a
+#       SECOND target (`:~extracted\00000000.dat`) that the first step
+#       produced, then recompresses the container. The page hands the engine
+#       one buffer and applies codes to it by index, with no notion of the
+#       `:file` a code targets, so those middle codes would land on the
+#       container bytes. Needs multi-target support, not a sample — and there
+#       is no Vita sample in save-decrypters either.
 #   PS3/BLES01894  Need For Speed: Rivals — the patch is fine; its SAMPLE is
 #       not. USR-DATA is 716800 bytes but only the first 358404 were ever
 #       encrypted, so no correct implementation can reproduce the .enc from
@@ -131,3 +141,12 @@ PS4	CUSA51534	trails-checksum-fixer/samples/BeyondTheHorizonCUSA51534.dat	-	0
 PSP	UCES01241	invizimals-checksum-fixer/samples/GAMEDATA.UCES01241	-	0
 PSP	UCES01411	invizimals-checksum-fixer/samples/GAMEDATA.UCES01411	-	0
 PSP	UCES01581	invizimals-checksum-fixer/samples/GAMEDATA.UCES01581	-	0
+PSV	PCSE00896	trails-cs-unpacker/samples/vitacs2.save000.dat.pack	trails-cs-unpacker/samples/vitacs2.save000.dat.unpack	0
+# Monster Hunter on PSP. One sample per save file, not per region: all three
+# MHP2ndG releases share MHP2NDG.BIN and each patch is proved against it on
+# its own terms (its chain, byte-equality), so nothing is inferred across
+# regions here.
+PSP	ULUS10391	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0
+PSP	ULES01213	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0
+PSP	ULJM05500	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0
+PSP	ULJM05800	monsterhunter-psp-decrypter/samples/MHP3RD.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP3RD.BIN.DEC	0
