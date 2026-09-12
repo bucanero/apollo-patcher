@@ -49,9 +49,48 @@
 #   CUSA14168 needs no row at all. Its code is byte-identical to Monster
 #       Hunter Rise's (PS4/CUSA34119), so the expansion pass proves it the
 #       moment it lands, the same way Resident Evil Village did.
-#   CUSA05392, CUSA00053, CUSA04402 and CUSA03856 each have a checksum of
-#       their own, so each needs its parked row above. Un-comment all four
-#       once the patches are on main.
+#   CUSA05392, CUSA00053, CUSA04402, CUSA03856 and CUSA00057 each have a
+#       checksum of their own, so each needs its parked row above. Un-comment
+#       all five once the patches are on main.
+#
+#   CUSA00057 is the odd one there: the patch already EXISTS on main, it was
+#       simply wrong, so its row must stay parked until the fix is pushed or
+#       the gate goes red. Strider computes two CRC32 blocks — 0x04..0x77FF
+#       written at 0x00, and 0x7804..EOF written at 0x7800 — and both ranges
+#       and values were already right. Both were being written BYTE-REVERSED:
+#       the save holds 76d63a5c / fbd43983 and the patch produced 5c3ad676 /
+#       8339d4fb. Two missing `set [hash]:endian_swap` lines, the same pair
+#       Far Cry 5, RE7 and Digimon all carry. With them the valid save comes
+#       back untouched.
+#
+#       Fixed on the PS4 patches ONLY — CUSA00057 and CUSA00087. The sample is
+#       a PS4 save (the C tool says so itself) and a PS3 save stores this
+#       checksum the other way round, so the same edit on PS3/NPEB01297 and
+#       PS3/NPUB31139 would be a guess dressed up as a fix. They keep their
+#       original bodies, which also means they no longer share a chain with
+#       the PS4 pair and stay unlisted until a PS3 Strider save turns up.
+#
+#   NPUB31564 (SAMURAI WARRIORS 4) looked like the same defect and was NOT.
+#       Its patch is correct and untouched; the bug was in apollo-lib, and the
+#       tell was that no verified PS3 checksum patch in the database uses
+#       endian_swap — on PS3 the write is already big-endian, so needing one
+#       would have made SW4 the odd one out.
+#
+#       `sw4_checksum` stores its four words as a 16-byte BSD_VAR_MD5 blob,
+#       and the variable reader only converts host-to-big-endian for the
+#       INT16/32/64 lengths — a 16-byte blob takes the default branch and is
+#       passed through raw. So mid() sliced host-order bytes and the patch
+#       wrote 6e0bc26c where the save holds 6cc20b6e. Correct on the PS3
+#       itself, which is why it was never noticed; wrong on wasm and on PC.
+#       Fixed in source/patches.c by putting the words in big-endian order
+#       before storing them (BE32, a no-op on a big-endian host). The row is
+#       parked until that reaches apollo-lib main.
+#
+#       The sample is a US save — sw4-checksum-fixer picks its region by
+#       testing 0x58292, which is zero here while 0x58532 holds 13B2701A — so
+#       the JP patches (PS3/BLJM61144, PS3/NPJB00534) are not exercised by it.
+#       They need no edit either: the fix is in the engine, so they should
+#       simply work, but nothing here proves it without a JP save.
 #   CUSA14169 (Resident Evil Resistance) needs no row either — same Murmur3-32
 #       code as Monster Hunter Rise, so expansion carries it, and CUSA14168
 #       rides along with it.
@@ -116,6 +155,26 @@
 #   PS3/BLES01040 et al  Dead Space 2 — deadspace-checksum-fixer ships ONE
 #       HED-DATA/USR-DATA pair and it is a Dead Space 3 save: BLES01733 passes
 #       against it and BLES01040 does not. Needs its own pair.
+#   PS4/CUSA01609, PS4/CUSA03199  Shantae and the Pirate's Curse — a container
+#       patch, though nothing in it says so: its codes all target `:*` and
+#       there is no `:~extracted\...` section. The giveaway is the engine, not
+#       the patch — `decompress(offset, wbits)` stores what it extracts as a
+#       BSD variable and never writes the file (patches.c ~2811), so
+#       "Decompress Save" leaves the save byte-identical and only "Compress
+#       Save" puts anything back. `Decompress(*, -15)` is correct as written:
+#       `*` means scan the file for streams rather than take a fixed offset.
+#
+#       Its checksum half IS proven, in isolation: "Update JHash" over the
+#       PACKED file (range 0x0004..EOF, +0x4900DC7C, written at 0x0000 —
+#       exactly what shantae-pirates-curse-unpacker computes) leaves the
+#       sample unchanged and reacts to a changed byte. Only the
+#       compress/decompress pair is unverifiable, for the usual reason.
+#
+#       I had this filed under "sample and patch disagree" against
+#       PS4/CUSA01587. That was simply the wrong game: CUSA01587 and CUSA02811
+#       are Shantae: RISKY'S REVENGE, a plain fixed-range checksum
+#       (0x027C..0x048F written to 0x0278) with no sample in this repository
+#       at all. The unpacker's sample is Pirate's Curse.
 #   PS4/CUSA12555  Dying Light 2, and PSV/PCSE00608, PSV/PCSF00728,
 #       PSV/PCSG00594  Resident Evil: Revelations 2 (Vita) — CONTAINER
 #       patches, deliberately left out. Their middle codes target
@@ -134,13 +193,6 @@
 # the same bytes. Not a harness limit and not a page limit; somebody has to
 # work out which of the two is right. All measured as "changed a valid save":
 #
-#   PS3/NPUB31564, PS3/BLJM61144  Samurai Warriors 4 / Sengoku Musou 4 —
-#       sw4-checksum-fixer's DATA.BIN fails every SW4 patch, both endian modes.
-#   PS3/NPEB01297, PS4/CUSA00057  Strider — same, with
-#       strider-checksum-fixer's SaveData against `:SAVEGAME` and `:*`.
-#   PS4/CUSA01587  Shantae: Risky's Revenge — the patch updates a JHash over
-#       `:savedata.sav`; the unpacker's sample is a 152-byte `savegame`, and
-#       the code does not react to it at all.
 #   PS3/BLES01894  Need For Speed: Rivals — the patch is fine; its SAMPLE is
 #       not. USR-DATA is 716800 bytes but only the first 358404 were ever
 #       encrypted, so no correct implementation can reproduce the .enc from
@@ -192,6 +244,8 @@
 #PS4	CUSA00053	mearth-checksum-fixer/samples/SYSTEM.DAT.mordor	-	0
 #PS4	CUSA04402	mearth-checksum-fixer/samples/SYSTEM.DAT.war	-	0
 #PS4	CUSA03856	re6-checksum-fixer/samples/savedata.bin	-	0
+#PS4	CUSA00057	strider-checksum-fixer/samples/SaveData	-	0
+#PS3	NPUB31564	sw4-checksum-fixer/samples/DATA.BIN	-	1
 #
 # COMPARISON MODES, for the `expected plaintext` column.
 #
