@@ -123,14 +123,18 @@
   <div id="drop" class="drop" tabindex="0" role="button"
        aria-describedby="tool-sub">
     <input id="file" type="file" hidden>
-    <p class="drop-main">Drop your save file here</p>
-    <p class="drop-sub">or click to choose &middot; nothing is uploaded</p>
+    <p class="drop-main" id="drop-main">Drop your save file here</p>
+    <p class="drop-sub" id="drop-sub">or click to choose &middot; nothing is uploaded</p>
   </div>
 
-  <div id="loaded" class="loaded" hidden>
-    <p><strong id="loaded-name"></strong> <span id="loaded-size" class="dim"></span></p>
-    <button type="button" class="linkish" id="pick-again">Choose a different file</button>
-  </div>
+  <!-- One row per file the patch needs. Most tools want one and this looks
+       like the old "loaded" line; the handful whose required codes span two
+       targets (Dead Space, LUNAR, Kingdom Hearts 2.5) show a row each. -->
+  <ul id="slots" class="slots" hidden></ul>
+
+  <!-- Where a multi-file run puts its results: the engine can change more
+       than one file, and a page cannot start several downloads at once. -->
+  <div id="outputs" class="outputs" hidden></div>
 
   <div id="actions" class="actions" hidden></div>
 

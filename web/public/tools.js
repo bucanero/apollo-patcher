@@ -12,7 +12,7 @@
  * new is only which codes get applied, and that comes from toolkit.js.
  */
 import { CDN, SAVES_CDN, PSNDB, TMDB, TMDB_KEY } from './cdn.js';
-import { splitChain } from './toolkit.js';
+import { splitChain, chainTargets, targetLabels, routeChain, matchesTarget } from './toolkit.js';
 
 const PLATFORM_LABEL = { PS3: 'PS3', PS4: 'PS4', PSV: 'PS Vita', PSP: 'PSP', PS2: 'PS2' };
 
@@ -149,8 +149,8 @@ const call = (type, args = {}, transfer = []) =>
     });
 
 let catalog = [];
-let active = null;      /* { row, codes, chain, bigEndian } */
-let save = null;        /* { name, bytes } */
+let active = null;      /* { row, codes, chain, bigEndian, targets, labels } */
+let slots = [];         /* one per file the chain needs: { target, label, file } */
 
 /* ---- listing ---------------------------------------------------------- */
 
@@ -289,7 +289,7 @@ $('grid').addEventListener('click', (ev) => {
 /* ---- one game --------------------------------------------------------- */
 
 async function openTool(row, iconSrc) {
-    active = null; save = null;
+    active = null; slots = [];
     $('tool-title').textContent = row.name;
     $('tool-sub').innerHTML =
         `${escapeHtml(PLATFORM_LABEL[row.platform] || row.platform)} · `
@@ -303,7 +303,9 @@ async function openTool(row, iconSrc) {
     if (iconSrc) { icon.src = iconSrc; icon.hidden = false; } else { icon.hidden = true; icon.removeAttribute('src'); }
 
     $('drop').hidden = true;
-    $('loaded').hidden = true;
+    $('slots').hidden = true;
+    $('outputs').hidden = true;
+    $('outputs').innerHTML = '';
     $('actions').hidden = true;
     $('actions').innerHTML = '';
     $('log-wrap').hidden = true;
@@ -333,8 +335,18 @@ async function openTool(row, iconSrc) {
 
     const chain = splitChain(doc.codes || []);
     active = { row, codes: doc.codes, chain, bigEndian: doc.bigEndian };
-    $('drop').hidden = !!save;
-    $('loaded').hidden = !save;
+    /* Every file the required chain needs, in the order it wants them. One
+     * for almost every tool; two or three for the patches whose codes work
+     * across separate files. */
+    const all = [...chain.decrypt, ...chain.rest];
+    const targets = chainTargets(doc.codes || [], all);
+    const labels = targetLabels(targets);
+    active.targets = targets;
+    active.labels = labels;
+    slots = targets.length > 1
+        ? targets.map((target, i) => ({ target, label: labels[i], file: null }))
+        : [{ target: targets[0] || '', label: labels[0] || '', file: null }];
+    renderSlots();
     setStatus('');
     renderActions();
 }
@@ -365,7 +377,7 @@ function renderActions() {
 }
 
 function syncActionState() {
-    const on = !!save;
+    const on = slots.length > 0 && slots.every((s) => s.file);
     $('actions').querySelectorAll('.action').forEach((b) => { b.disabled = !on; });
 }
 
@@ -377,21 +389,32 @@ $('actions').addEventListener('click', (ev) => {
 });
 
 async function run(spec) {
-    if (!spec || !save || !active) return;
+    if (!spec || !active || !slots.length || slots.some((s) => !s.file)) return;
     setStatus('');
+    $('outputs').hidden = true;
+    $('outputs').innerHTML = '';
     setBusy(`${spec.label}…`);
     $('actions').querySelectorAll('.action').forEach((b) => { b.disabled = true; });
 
     /* Always start from the bytes the user loaded, so the actions are
      * idempotent: pressing Decrypt twice gives the same file, not a save
      * decrypted twice. */
-    const copy = save.bytes.slice().buffer;
+    const files = slots.map((s) => ({
+        name: s.file.name,
+        buffer: s.file.bytes.slice().buffer,
+    }));
+
+    /* Which file each code lands on. For a one-slot tool this is every code
+     * on the only file, which is what the front-end has always done. */
+    const assign = {};
+    slots.forEach((s, i) => { if (s.target) assign[s.target] = i; });
+
     const res = await call('apply', {
         indices: spec.indices,
-        save: copy,
-        saveName: save.name,
+        files,
+        routes: routeChain(active.codes, spec.indices, assign),
         bigEndian: active.bigEndian,
-    }, [copy]);
+    }, files.map((f) => f.buffer));
 
     setBusy(null);
     if (res.log?.length) {
@@ -408,9 +431,39 @@ async function run(spec) {
         return;
     }
 
-    download(res.patched, suggestName(save.name, spec.key));
-    setStatus(`${spec.label} done — ${res.patched.length.toLocaleString()} bytes downloaded.`, 'good');
+    /* The engine can touch more than one file, and a page cannot reliably
+     * start several downloads in a row — browsers block the second. So a
+     * single output downloads as it always did, and several are listed with a
+     * Save button each. Unchanged files are still offered, greyed: "this one
+     * did not need fixing" is useful to see. */
+    const out = res.files || [{ name: slots[0].file.name, bytes: res.patched, changed: true }];
+    if (out.length === 1) {
+        download(out[0].bytes, suggestName(slots[0].file.name, spec.key));
+        setStatus(`${spec.label} done — ${out[0].bytes.length.toLocaleString()} bytes downloaded.`, 'good');
+        return;
+    }
+
+    $('outputs').innerHTML = out.map((f, i) => `
+      <div class="output${f.changed ? '' : ' same'}">
+        <span class="output-name">${escapeHtml(active.labels[i] || f.name)}</span>
+        <span class="output-note">${f.changed
+            ? `${f.bytes.length.toLocaleString()} bytes · updated`
+            : 'unchanged — nothing to fix'}</span>
+        <button type="button" class="linkish output-save" data-i="${i}">Save</button>
+      </div>`).join('');
+    $('outputs').hidden = false;
+    lastOutputs = out.map((f, i) => ({ ...f, as: suggestName(slots[i].file.name, spec.key) }));
+    const n = out.filter((f) => f.changed).length;
+    setStatus(`${spec.label} done — ${n} of ${out.length} file(s) changed. Save each below.`, 'good');
 }
+
+let lastOutputs = [];
+$('outputs').addEventListener('click', (ev) => {
+    const btn = ev.target.closest('.output-save');
+    if (!btn) return;
+    const f = lastOutputs[Number(btn.dataset.i)];
+    if (f) download(f.bytes, f.as);
+});
 
 /* Decrypting SAVEDATA.DAT gives SAVEDATA.DAT.dec; re-encrypting that gives
  * SAVEDATA.DAT back, rather than piling suffixes up. */
@@ -443,27 +496,93 @@ function setStatus(text, tone) {
 
 /* ---- picking a file --------------------------------------------------- */
 
-async function loadFile(file) {
-    if (!file) return;
-    save = { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) };
-    $('loaded-name').textContent = file.name;
-    $('loaded-size').textContent = `${save.bytes.length.toLocaleString()} bytes`;
-    $('drop').hidden = true;
-    $('loaded').hidden = false;
-    setStatus('');
+/* The slot list doubles as the "what do I need" answer and the "what have I
+ * given it" answer, so it is rendered for every tool — it just has one row and
+ * no target name for the usual single-file case. */
+function renderSlots() {
+    const multi = slots.length > 1;
+    const filled = slots.filter((s) => s.file).length;
+
+    $('drop-main').textContent = multi
+        ? `Drop the ${slots.length} files here`
+        : 'Drop your save file here';
+    $('drop-sub').textContent = multi
+        ? `${active.labels.join(', ')} · matched by name, or choose each below · nothing is uploaded`
+        : 'or click to choose · nothing is uploaded';
+    $('file').multiple = multi;
+
+    /* Single-file keeps the old behaviour: the drop zone gives way once the
+     * save is in. Multi-file keeps it, because more files are still wanted. */
+    $('drop').hidden = !multi && filled === slots.length;
+    $('slots').hidden = !multi && !filled;
+
+    $('slots').innerHTML = slots.map((s, i) => `
+      <li class="slot${s.file ? ' filled' : ''}">
+        ${multi ? `<span class="slot-target">${escapeHtml(s.label)}</span>` : ''}
+        <span class="slot-file">${s.file
+            ? `<strong>${escapeHtml(s.file.name)}</strong> <span class="dim">${s.file.bytes.length.toLocaleString()} bytes</span>`
+            : '<span class="dim">no file yet</span>'}</span>
+        <button type="button" class="linkish slot-pick" data-i="${i}">${s.file ? 'change' : 'choose'}</button>
+      </li>`).join('');
+
     syncActionState();
 }
 
-$('drop').addEventListener('click', () => $('file').click());
-$('drop').addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); $('file').click(); }
+/* Which slot a dropped file belongs in. Its own name against the target it
+ * was written for first — that is what makes dropping HED-DATA and USR-DATA
+ * together just work — then the first empty slot, so a file the patch names
+ * differently than the user's console did still lands somewhere. */
+function slotFor(name, taken) {
+    const byName = slots.findIndex((s, i) =>
+        !taken.has(i) && s.target && matchesTarget(s.target, name));
+    if (byName >= 0) return byName;
+    return slots.findIndex((s, i) => !taken.has(i) && !s.file);
+}
+
+async function loadFiles(list, only) {
+    const files = [...(list || [])];
+    if (!files.length || !slots.length) return;
+
+    const taken = new Set();
+    for (const file of files) {
+        const at = only !== undefined ? only : slotFor(file.name, taken);
+        if (at < 0) continue;
+        taken.add(at);
+        slots[at].file = { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) };
+        if (only !== undefined) break;
+    }
+    setStatus('');
+    renderSlots();
+}
+
+/* Which slot the next pick goes into; undefined means "work it out from the
+ * file's own name". */
+let pickInto;
+
+/* The <input type=file> sits INSIDE the drop zone, so the synthetic click that
+ * opens it bubbles straight back here. Left unguarded that re-entered this
+ * handler, reset pickInto and threw away the slot the user had just chosen —
+ * which looked like "the second slot refuses files", because picking for slot
+ * 0 happened to be what the fallback did anyway. */
+$('drop').addEventListener('click', (ev) => {
+    if (ev.target === $('file')) return;
+    pickInto = undefined;
+    $('file').click();
 });
-$('file').addEventListener('change', (ev) => loadFile(ev.target.files[0]));
-$('pick-again').addEventListener('click', () => {
-    save = null;
-    $('drop').hidden = false;
-    $('loaded').hidden = true;
-    syncActionState();
+$('drop').addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pickInto = undefined; $('file').click(); }
+});
+$('slots').addEventListener('click', (ev) => {
+    const btn = ev.target.closest('.slot-pick');
+    if (!btn) return;
+    pickInto = Number(btn.dataset.i);
+    $('file').multiple = false;   /* one file, into the slot that was asked for */
+    $('file').click();
+});
+$('file').addEventListener('change', (ev) => {
+    loadFiles(ev.target.files, pickInto);
+    ev.target.value = '';
+    $('file').multiple = slots.length > 1;
 });
 for (const type of ['dragenter', 'dragover']) {
     $('drop').addEventListener(type, (ev) => { ev.preventDefault(); $('drop').classList.add('over'); });
@@ -471,8 +590,8 @@ for (const type of ['dragenter', 'dragover']) {
 for (const type of ['dragleave', 'drop']) {
     $('drop').addEventListener(type, (ev) => { ev.preventDefault(); $('drop').classList.remove('over'); });
 }
-$('drop').addEventListener('drop', (ev) => loadFile(ev.dataTransfer?.files?.[0]));
+$('drop').addEventListener('drop', (ev) => loadFiles(ev.dataTransfer?.files));
 
-$('tool').addEventListener('close', () => { active = null; save = null; });
+$('tool').addEventListener('close', () => { active = null; slots = []; });
 
 boot();

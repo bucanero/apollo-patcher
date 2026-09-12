@@ -164,8 +164,16 @@ def scan_tool_codes(path):
         kind = classify_code(title)
         if kind:
             kinds.add(kind)
+        # Test the WHOLE target, not the basename. "~extracted\\00000000.dat" is
+        # the engine's own scratch blob for a container patch — apollo_apply_code
+        # reads and writes a BSD variable for it and never touches a file — so
+        # it must not be listed as something the user has to supply. Splitting
+        # first turned it into "00000000.dat", which sailed past this guard and
+        # put a file nobody has on the card.
+        if target.lstrip().startswith("~"):
+            return
         name = re.split(r"[\\/]", target)[-1].strip()
-        if name and not name.lower().startswith("~extracted") and name not in files:
+        if name and name not in files:
             files.append(name)
 
     for line in text.splitlines():

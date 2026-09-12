@@ -24,6 +24,96 @@ const CHECKSUM =
 
 export const FLAG_REQUIRED = 4;
 
+/* ---- which FILE a code is for ----------------------------------------
+ *
+ * Every code carries the `:file` target it was written under, and the engine
+ * reports it verbatim — "HED-DATA", "card00LUNAR*\\GAME.BIN", "data/data0000.bin".
+ * For a long time the front-end ignored it and applied every code to the one
+ * file the user supplied, which apollo_apply_code lets you do: its `fpath`
+ * argument overrides the code's own target. That is right for the common case
+ * (one save, one target, whatever the user called it) and wrong for the
+ * patches whose required chain genuinely spans two files — Dead Space checksums
+ * USR-DATA and writes the result into HED-DATA, so overriding sends the write
+ * to the wrong file and quietly corrupts the save.
+ *
+ * Paths are Windows-flavoured and may name a directory that does not exist on
+ * the user's machine, so only the basename is meaningful here. */
+export const targetBase = (file) =>
+    String(file || '').split(/[\\/]/).filter(Boolean).pop() || '';
+
+/* `~extracted\00000000.dat` is not a file at all: apollo_apply_code reads and
+ * writes a BSD variable for those, the blob a preceding Decompress step put
+ * there. It never touches the path you pass, so it must never become a slot
+ * the user is asked to fill. */
+export const isDerived = (code) => String(code.file || '').startsWith('~');
+
+/* Only `*` appears as a wildcard in the database. A bare `*` means "whatever
+ * the user brought" and matches anything. */
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+export function matchesTarget(pattern, name) {
+    const p = targetBase(pattern);
+    if (!p || p === '*') return true;
+    return new RegExp(`^${p.split('*').map(escapeRe).join('.*')}$`, 'i').test(name);
+}
+
+/**
+ * The distinct targets a chain needs from the user, in the order it first
+ * wants them. Derived targets are skipped (the engine makes those itself) and
+ * so is a bare `*`, which names no particular file.
+ *
+ * Kept as the WHOLE target string, not the basename. LUNAR Remastered is the
+ * reason: its two required codes are `card00LUNAR*\\GAME.BIN` and
+ * `card*SAVEDATA\\GAME.BIN` — two different files that share a name and are
+ * told apart only by the folder they sit in. Collapsing to basenames would
+ * have made that one slot and silently checksummed the wrong save.
+ *
+ * Zero or one entry means the old behaviour is correct and the user brings a
+ * single save under any name. Two or more means the tool genuinely needs that
+ * many files.
+ */
+export function chainTargets(codes, indices) {
+    const out = [];
+    for (const index of indices) {
+        const code = codes[index];
+        if (!code || isDerived(code)) continue;
+        const file = String(code.file || '');
+        if (file && targetBase(file) !== '*' && !out.includes(file)) out.push(file);
+    }
+    return out;
+}
+
+/* What to call a target on screen. The basename is the useful part, except
+ * when two targets share one — then the folder is the whole point, so show
+ * the path as written. */
+export function targetLabels(targets) {
+    const bases = targets.map(targetBase);
+    return targets.map((t, i) =>
+        bases.filter((b) => b === bases[i]).length > 1 ? t : bases[i]);
+}
+
+/**
+ * Which of the user's files each code is applied to: code index -> the
+ * POSITION of that file in the input list.
+ *
+ * Position, not name, because two of a tool's files can share a name — LUNAR
+ * Remastered wants two different GAME.BINs — and keying on the name would
+ * silently collapse them into one.
+ *
+ * `assign` maps a target string (as chainTargets returned it) to that
+ * position. Anything not covered — a derived target, a bare `*`, a
+ * single-file tool — falls back to input 0, which is the override the
+ * front-end has always used and what every one-target tool wants.
+ */
+export function routeChain(codes, indices, assign) {
+    const routes = {};
+    for (const index of indices) {
+        const code = codes[index];
+        const at = code && !isDerived(code) ? assign[String(code.file || '')] : undefined;
+        routes[index] = at === undefined ? 0 : at;
+    }
+    return routes;
+}
+
 /** 'd' | 'e' | 'c' | '' */
 export function classifyCode(name) {
     const title = String(name || '').replace(MARKER, '').trim();

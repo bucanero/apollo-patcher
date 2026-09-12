@@ -59,34 +59,28 @@
 #       its sample) is MPDATA. So the sample cannot prove the patch. Needs a
 #       SAVEGAME.SVG sample, not a manifest row.
 #
-# MULTI-TARGET patches. The page hands the engine ONE buffer and applies codes
-# to it by index, with no notion of the `:file` a code targets. A patch whose
-# required chain spans two or more targets would therefore land its middle
-# codes on the wrong bytes. This is one feature, and it unblocks all of these
-# at once — they are not separate problems and none of them wants a sample:
+# MULTI-TARGET is supported (toolkit.js chainTargets/routeChain): a patch whose
+# required chain spans several ':file' targets gets one file slot per target,
+# and each code is applied to the file its own target names. Dead Space 3,
+# Prototype, Kingdom Hearts HD 2.5 ReMIX and LUNAR Remastered are listed below
+# and pass. Two rows in that class still cannot be listed, and neither wants
+# the feature:
 #
-#   PSV/PCSE00608, PSV/PCSF00728, PSV/PCSG00594  Resident Evil: Revelations 2
-#       (Vita) — decompress `data/data0000.bin`, checksum a file at a second
-#       target (`:~extracted\00000000.dat`) that the first step produced, then
-#       recompress. Unlike the PS3/PS4 patches, which decrypt DATA0.DAT in
-#       place. No Vita sample in save-decrypters either.
-#   PS4/CUSA12555  Dying Light 2 — the same container shape, via
-#       `:~extracted\00000000.dat`.
-#   PS3/BLES01040 et al  Dead Space 2, PS3/BLES01733 et al  Dead Space 3 —
-#       init SDBM on :HED-DATA, calculate over :USR-DATA, write back to
-#       :HED-DATA. Three required codes, two files. Samples for both files are
-#       in deadspace-checksum-fixer/samples.
-#   PS3/BLES00269 et al  Prototype 1 & 2 — the same three-step shape across
-#       :CRC.BIN and :USERDATA.BIN.
-#   PS3/BLUS31460, PS3/BLES02070, PS3/BLJM61220  Kingdom Hearts HD 2.5 ReMIX
-#       (and the BBS / Re:CoM titles inside it) — :USR-00 and :SAVEDATA.DAT
-#       each carry their own required checksum.
-#   PS4/CUSA48262  LUNAR Remastered Collection — one required code per game,
-#       on two different :card*\GAME.BIN targets.
-#
-# Alien: Isolation was in this list and is NOT any more: its two codes are
-# byte-identical apart from the heading, so applying both to one file is
-# idempotent and PS3/BLES01697 verifies. PS4/CUSA00362 has a single target.
+#   PS3/BLES01040 et al  Dead Space 2 — deadspace-checksum-fixer ships ONE
+#       HED-DATA/USR-DATA pair and it is a Dead Space 3 save: BLES01733 passes
+#       against it and BLES01040 does not. Needs its own pair.
+#   PS4/CUSA12555  Dying Light 2, and PSV/PCSE00608, PSV/PCSF00728,
+#       PSV/PCSG00594  Resident Evil: Revelations 2 (Vita) — CONTAINER
+#       patches, deliberately left out. Their middle codes target
+#       `~extracted\00000000.dat`, which apollo_apply_code reads and writes as
+#       a BSD variable rather than a file, so what a run produces is a
+#       recompressed container. That is not byte-comparable to the original —
+#       zlib is not obliged to reproduce the input stream and measurably does
+#       not (Revelations 2 Vita: 39,163 bytes in, 38,601 out; the reference C
+#       tool unpacks both to the same payload). Proving one would mean reading
+#       the payload back out of the engine's variable list, which is an
+#       apollo-lib API this project is not adding. Both tools DO have sample
+#       pairs (vita-re-rev2-unpacker, dl2-unpacker) if that ever changes.
 #
 #
 # SAMPLE AND PATCH DISAGREE — the C tool and the savepatch are not looking at
@@ -276,3 +270,7 @@ PS4	CUSA34119	re7-checksum-fixer/samples/data00-90.bin	-	0
 PS4	CUSA28934	trails-zero-checksum-fixer/samples/zeroSAVEDATA.DAT	-	0
 PS4	CUSA29189	trails-zero-checksum-fixer/samples/azureSAVEDATA.DAT	-	0
 PS4	CUSA00362	alien-checksum-fixer/samples/THEFILE	-	0
+PS3	BLES01733	deadspace-checksum-fixer/samples/HED-DATA,deadspace-checksum-fixer/samples/USR-DATA	-	1
+PS3	BLES00269	prototype-checksum-fixer/samples/ICON0.PNG,prototype-checksum-fixer/samples/USERDATA.BIN,prototype-checksum-fixer/samples/CRC.BIN	-	1
+PS3	BLUS31460	kh25-checksum-fixer/samples/USR-00.kh25r,kh25-checksum-fixer/samples/SAVEDATA.DAT.khbbs	-	1
+PS4	CUSA48262	lunar-checksum-fixer/samples/1/GAME.BIN,lunar-checksum-fixer/samples/2/GAME.BIN	-	0

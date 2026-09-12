@@ -112,10 +112,19 @@ function withBytes(bytes, fn) {
 
 /* MEMFS path for the save file. The name is only a label here, but keep it
  * recognisable in the log and strip anything that could escape WORKDIR. */
-function workPath(name) {
+function workPath(name, slot = 0) {
     const safe = (name || 'savedata').replace(/[^\w.\- ]+/g, '_');
-    return `${WORKDIR}/${safe}`;
+    if (!slot) return `${WORKDIR}/${safe}`;
+    /* A tool can want two files with the SAME name in different folders
+     * (LUNAR Remastered's two GAME.BINs), so give every input past the first
+     * its own directory rather than mangling the name the engine sees. */
+    const dir = `${WORKDIR}/${slot}`;
+    try { M.FS.mkdir(dir); } catch { /* already there */ }
+    return `${dir}/${safe}`;
 }
+
+const sameBytes = (a, b) =>
+    a.length === b.length && a.every((v, i) => v === b[i]);
 
 const TYPE_PYTHON = 3;    /* APOLLO_CODE_PYTHON */
 let codeTypes = [];       /* per-row type from the last open() */
@@ -273,7 +282,7 @@ const handlers = {
      * every time makes Apply idempotent: what you get always reflects exactly
      * the codes currently ticked.
      */
-    async apply({ indices, options, save, saveName, bigEndian }) {
+    async apply({ indices, options, save, saveName, bigEndian, files, routes }) {
         await ready();
 
         /* Only the codes actually being applied matter: a patch can hold a
@@ -292,26 +301,55 @@ const handlers = {
             }
         }
 
-        const path = workPath(saveName);
-        M.FS.writeFile(path, new Uint8Array(save));
+        /* One file or several. The single-file form is the old one and stays
+         * the default; `files` + `routes` is what the tools page sends for a
+         * patch whose required chain spans two targets (Dead Space writes the
+         * checksum of USR-DATA into HED-DATA). Routing is decided by the
+         * caller, in toolkit.js, so the page and the verifier agree. */
+        const inputs = files?.length
+            ? files.map((f) => ({ name: f.name, bytes: new Uint8Array(f.buffer) }))
+            : [{ name: saveName, bytes: new Uint8Array(save) }];
+
+        const paths = inputs.map((f, i) => {
+            const p = workPath(f.name, i);
+            M.FS.writeFile(p, f.bytes);
+            return p;
+        });
 
         for (const [index, groups] of Object.entries(options || {}))
             groups.forEach((value, group) => M._apw_set_option(Number(index), group, value));
 
-        const results = withCString(path, (p) =>
-            indices.map((index) => ({
+        /* Applied one at a time rather than under a single withCString,
+         * because each code can land on a different file. Variables are NOT
+         * reset between them — that is load-bearing: Dead Space accumulates
+         * its SDBM across three codes, and a decompressed blob lives in a
+         * variable until the code that recompresses it runs. */
+        const results = indices.map((index) => {
+            const target = paths[routes?.[index] ?? 0] ?? paths[0];
+            return {
                 index,
-                ok: !!M._apw_apply(index, p, bigEndian ? 1 : 0),
-            })),
-        );
+                ok: withCString(target, (p) => !!M._apw_apply(index, p, bigEndian ? 1 : 0)),
+            };
+        });
 
         /* Patch variables accumulate across applies; drop them after a batch,
          * exactly like the desktop GUI does. */
         M._apw_reset_vars();
 
-        const out = M.FS.readFile(path);
-        M.FS.unlink(path);
-        return { ok: true, results, patched: out };
+        const patchedFiles = inputs.map((f, i) => {
+            const bytes = M.FS.readFile(paths[i]);
+            M.FS.unlink(paths[i]);
+            return { name: f.name, bytes, changed: !sameBytes(bytes, f.bytes) };
+        });
+
+        return {
+            ok: true,
+            results,
+            /* Single-file callers (the patcher, and every one-target tool)
+             * keep reading `patched`; multi-file ones read `files`. */
+            patched: patchedFiles[0].bytes,
+            files: patchedFiles,
+        };
     },
 };
 
@@ -321,11 +359,16 @@ self.onmessage = async (ev) => {
         const result = (await handlers[type](args)) || {};
         const reply = { id, ok: result.ok !== false, ...result, log: drainLog() };
 
-        /* Hand any bytes over instead of copying them: the patched save, or
-         * the rebuilt patch file. Both are freshly allocated here. */
-        const owned = [result.patched, result.patch]
-            .filter(Boolean)
-            .map((b) => b.buffer);
+        /* Hand any bytes over instead of copying them: the patched save (or
+         * saves), and the rebuilt patch file. All freshly allocated here.
+         *
+         * Deduped by buffer, because `patched` IS `files[0].bytes` for the
+         * single-file callers that still read it, and postMessage throws if
+         * the same ArrayBuffer is listed twice. */
+        const owned = [...new Set(
+            [result.patched, result.patch, ...(result.files || []).map((f) => f.bytes)]
+                .filter(Boolean)
+                .map((b) => b.buffer))];
 
         self.postMessage(reply, owned);
     } catch (err) {

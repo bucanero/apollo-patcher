@@ -44,7 +44,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
-import { splitChain, needsOptions, isRequired } from '../web/public/toolkit.js';
+import { splitChain, needsOptions, isRequired, chainTargets, routeChain } from '../web/public/toolkit.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -143,16 +143,45 @@ for (const row of rows) {
         M._apw_close(); fail++; continue;
     }
 
-    const save = fs.readFileSync(path.join(samplesDir, row.enc));
-    const want = row.checksumOnly ? save : fs.readFileSync(path.join(samplesDir, row.dec));
-    M.FS.writeFile('/verify.bin', new Uint8Array(save));
+    /* One sample, or several. A comma-separated `enc` is a multi-target row:
+     * the samples are listed in the same order as chainTargets() wants them,
+     * because the targets that need telling apart (LUNAR's two GAME.BIN) are
+     * exactly the ones a filename cannot distinguish. */
+    const encs = row.enc.split(',').map((x) => x.trim()).filter(Boolean);
+    const targets = chainTargets(codes, steps);
+    if (encs.length > 1 && encs.length !== targets.length) {
+        console.log(`FAIL  ${label}  ${encs.length} samples for ${targets.length} target(s)`);
+        M._apw_close(); fail++; continue;
+    }
 
-    const applied = withCString('/verify.bin', (p) =>
-        steps.map((i) => !!M._apw_apply(i, p, row.bigEndian ? 1 : 0)));
-    M._apw_reset_vars();
+    const inputs = encs.map((rel, i) => ({
+        path: `/verify${i}.bin`,
+        bytes: fs.readFileSync(path.join(samplesDir, rel)),
+    }));
+    const assign = {};
+    if (encs.length > 1) targets.forEach((t, i) => { assign[t] = i; });
+    const routes = routeChain(codes, steps, assign);
 
-    const got = Buffer.from(M.FS.readFile('/verify.bin'));
-    M.FS.unlink('/verify.bin');
+    const runChain = (bufs) => {
+        inputs.forEach((f, i) => M.FS.writeFile(f.path, new Uint8Array(bufs[i])));
+        const ok = steps.map((i) =>
+            withCString(inputs[routes[i]].path, (p) => !!M._apw_apply(i, p, row.bigEndian ? 1 : 0)));
+        M._apw_reset_vars();
+        const out = inputs.map((f) => Buffer.from(M.FS.readFile(f.path)));
+        inputs.forEach((f) => M.FS.unlink(f.path));
+        return { ok, out };
+    };
+
+    const save = inputs[0].bytes;
+    const first = runChain(inputs.map((f) => f.bytes));
+    const applied = first.ok;
+    const got = first.out[0];
+    const wants = row.checksumOnly
+        ? inputs.map((f) => Buffer.from(f.bytes))
+        : [Buffer.from(fs.readFileSync(path.join(samplesDir, row.dec)))];
+    const want = wants[0];
+    /* Every file has to come back untouched, not just the first. */
+    const allHeld = !row.checksumOnly || first.out.every((b, i) => b.equals(wants[i]));
     const fingerprint = chainFingerprint(steps);
 
     /* Liveness, for checksum rows only.
@@ -173,27 +202,32 @@ for (const row of rows) {
      * of offsets instead and take the first one that moves it; only a code
      * that reacts NOWHERE is inert. */
     let live = true;
-    if (row.checksumOnly && applied.every(Boolean) && got.equals(want)) {
-        const n = save.length;
-        const spots = [...new Set([0x20, 0x40, n >> 5, n >> 4, n >> 3, n >> 2,
-                                   n >> 1, n - (n >> 3), n - 1])]
-            .filter((o) => o >= 0 && o < n);
-        for (const spot of spots) {
-            const poked = Buffer.from(save);
-            poked[spot] ^= 0xff;
-            M.FS.writeFile('/verify.bin', new Uint8Array(poked));
-            const ok2 = withCString('/verify.bin', (p) =>
-                steps.map((i) => !!M._apw_apply(i, p, row.bigEndian ? 1 : 0)));
-            M._apw_reset_vars();
-            const after = Buffer.from(M.FS.readFile('/verify.bin'));
-            M.FS.unlink('/verify.bin');
-            live = ok2.every(Boolean) && !after.equals(poked);
-            if (live) break;
+    if (row.checksumOnly && applied.every(Boolean) && allHeld) {
+        live = false;
+        /* Every input gets poked, not only the first: Dead Space computes over
+         * USR-DATA and writes the result into HED-DATA, so a change to the
+         * file that is never written to is the one that has to move the
+         * other. */
+        outer:
+        for (let f = 0; f < inputs.length; f++) {
+            const n = inputs[f].bytes.length;
+            const spots = [...new Set([0x20, 0x40, n >> 5, n >> 4, n >> 3, n >> 2,
+                                       n >> 1, n - (n >> 3), n - 1])]
+                .filter((o) => o >= 0 && o < n);
+            for (const spot of spots) {
+                const bufs = inputs.map((x) => Buffer.from(x.bytes));
+                bufs[f][spot] ^= 0xff;
+                const { ok: ok2, out } = runChain(bufs);
+                if (ok2.every(Boolean) && out.some((b, i) => !b.equals(bufs[i]))) {
+                    live = true;
+                    break outer;
+                }
+            }
         }
     }
     M._apw_close();
 
-    const ok = applied.every(Boolean) && got.equals(want) && live;
+    const ok = applied.every(Boolean) && got.equals(want) && allHeld && live;
     if (ok) {
         pass++;
         const group = chainGroup(fingerprint);
@@ -204,6 +238,7 @@ for (const row of rows) {
         fail++;
         let why = !applied.every(Boolean) ? 'a code failed to apply'
             : !live ? 'the checksum code is inert — it did not react to changed data'
+            : !allHeld ? 'a file other than the first came back changed'
             : row.checksumOnly ? 'the checksum code changed a valid save'
             : 'output differs';
         if (got.length !== want.length) why = `length ${got.length} != ${want.length}`;
