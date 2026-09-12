@@ -144,6 +144,10 @@
    the only game it handles. */
 .card-more { color: var(--ink-dim); font-weight: 400; font-size: 12px; }
 
+/* A patch that holds several tools asks which one first. */
+.variants { margin: 0 0 12px; }
+.variants .variant { font-size: 13px; }
+
 /* ---- the files a tool needs ---- */
 
 .slots { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }

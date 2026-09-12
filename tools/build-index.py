@@ -65,11 +65,13 @@ def read_game_name(path):
     """
     try:
         with open(path, "rb") as fh:
-            lines = fh.read(4096).split(b"\n")
+            blob = fh.read()
     except OSError:
         return None
+    lines = blob.split(b"\n")
     if len(lines) < 2:
         return None
+    groups = _group_text(blob)
 
     raw = lines[1]
     for encoding in ("utf-8", "cp1252"):
@@ -83,7 +85,63 @@ def read_game_name(path):
 
     name = text.strip().lstrip(";").strip()
     name = PLATFORM_TAG.sub("", name).strip()
-    return name or None
+    if not name:
+        return None
+
+    # Some patches cover several games and say so on the lines that follow:
+    # the Metal Gear Solid HD Collection declares "Metal Gear Solid 2 HD" and
+    # then "Metal Gear Solid 3 HD". Taking only the first line hid the second
+    # game completely — a search for it found nothing, even though the patch
+    # handles it. Keep the rest as alternative titles so the card is findable
+    # by any of them.
+    #
+    # Only the unbroken run of ';' lines right after the name counts, and
+    # credit lines are dropped: those are people, not games.
+    alt = []
+    for raw_line in lines[2:]:
+        for encoding in ("utf-8", "cp1252"):
+            try:
+                line = raw_line.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            break
+        line = line.strip()
+        if not line.startswith(";"):
+            break
+        extra = PLATFORM_TAG.sub("", line.lstrip(";").strip()).strip()
+        if not extra or extra == name or extra in alt:
+            continue
+        key = re.sub(r"[^a-z0-9]+", " ", extra).strip().lower()
+        if len(key) > 3 and key in groups:
+            alt.append(extra)
+
+    return name, alt
+
+
+# Most lines under the game name are credits or sources, not a second game —
+# "From Game Genie For PS3" alone sits under a third of the PS3 patches, and
+# plenty are a bare handle like "chaoszage" that no pattern can tell from a
+# title. Rather than guess, a line is kept only when the patch's OWN code
+# groups mention it: the Metal Gear Solid HD Collection names "Metal Gear
+# Solid 3 HD" on line 3 and again in "[Group:-- Metal Gear Solid 3 HD --]".
+# A credit never appears as a group heading, so this needs no blocklist.
+GROUP_HEADING = re.compile(r"^\s*\[group\s*:(.*?)\]\s*$", re.I | re.M)
+
+
+def _group_text(raw):
+    for encoding in ("utf-8", "cp1252"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        return ""
+    return " \x00 ".join(
+        re.sub(r"[^a-z0-9]+", " ", g).strip().lower()
+        for g in GROUP_HEADING.findall(text))
 
 
 # Classifying a required code by its TITLE, because the body cannot do it
@@ -281,12 +339,16 @@ def main(argv):
             if not entry.endswith(".savepatch"):
                 continue
             title_id = entry[: -len(".savepatch")]
-            name = read_game_name(os.path.join(directory, entry))
-            if not name:
+            named = read_game_name(os.path.join(directory, entry))
+            if not named:
                 # Keep it listed: the title ID alone is still enough to find
                 # and apply the patch.
-                name = title_id
+                name, alt = title_id, []
                 skipped += 1
+            else:
+                name, alt = named
+            # patches.json and the TSV keep their existing shape; the extra
+            # titles are only of use to the tools catalog.
             rows.append([platform, title_id, name])
             found += 1
 
@@ -299,7 +361,7 @@ def main(argv):
                 if kinds and (is_verified or not verified_only):
                     tools.append([platform, title_id, name, kinds,
                                   ",".join(files), 1 if is_verified else 0,
-                                  group or ""])
+                                  group or "", ";".join(alt)])
                     tool_counts[platform] = tool_counts.get(platform, 0) + 1
 
         if found:

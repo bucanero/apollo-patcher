@@ -57,6 +57,71 @@ export function matchesTarget(pattern, name) {
 }
 
 /**
+ * Split a chain into contiguous per-target blocks: [{ target, indices }].
+ */
+export function chainBlocks(codes, indices) {
+    const blocks = [];
+    for (const index of indices) {
+        const target = String(codes[index]?.file || '');
+        const last = blocks[blocks.length - 1];
+        if (last && last.target === target) last.indices.push(index);
+        else blocks.push({ target, indices: [index] });
+    }
+    return blocks;
+}
+
+/**
+ * Split a required chain into VARIANTS — independent tools that happen to
+ * share one patch file.
+ *
+ * The signal is the chain restarting: a decrypt-kind code that comes after an
+ * encrypt or checksum one. Nothing legitimate unwraps again after it has
+ * rewrapped, so that is where one tool ends and the next begins.
+ *
+ *   Black Ops    d e | d e      decrypt+encrypt for GPAD0_CM.PRF, then the
+ *                               same pair for GPAD0_SP.PRF
+ *   MGS HD       d d c e e | d d e e   the whole Metal Gear Solid 2 chain,
+ *                               then the whole Metal Gear Solid 3 one
+ *
+ * Everything else in the database comes back as a single variant, including
+ * the shapes that legitimately span files (Dead Space's c,c,c across HED-DATA
+ * and USR-DATA) and the ones that rewrap in an unusual order (Crisis Core's
+ * d,e,c). Getting this wrong is not cosmetic: before it existed, "Re-encrypt"
+ * on a Metal Gear Solid 2 save ran Metal Gear Solid 3's chain straight after
+ * it.
+ */
+export function chainVariants(codes, indices) {
+    const variants = [];
+    let current = null;
+    let closed = false;          /* has this variant rewrapped yet? */
+
+    for (const index of indices) {
+        const kind = classifyCode(codes[index]?.name);
+        if (!current || (closed && kind === 'd')) {
+            current = { indices: [], label: variantLabel(codes, index) };
+            variants.push(current);
+            closed = false;
+        }
+        if (kind === 'e' || kind === 'c') closed = true;
+        current.indices.push(index);
+    }
+    return variants;
+}
+
+/* What to call a variant. Patch authors put the games in [Group:...] headings,
+ * which the engine reports as non-required rows with parent=1 immediately
+ * before the codes; the outermost of that run is the game name. Patches with
+ * no headings (Black Ops) fall back to the file the variant works on. */
+function variantLabel(codes, index) {
+    let at = index - 1;
+    while (at >= 0 && codes[at] && !isRequired(codes[at]) && codes[at].parent) at--;
+    const heading = codes[at + 1];
+    const name = heading && heading !== codes[index] ? String(heading.name || '').trim() : '';
+    const cleaned = name.replace(/^[-\s]+|[-\s]+$/g, '');
+    return cleaned || targetBase(codes[index]?.file) || '';
+}
+
+/**
  * The distinct targets a chain needs from the user, in the order it first
  * wants them. Derived targets are skipped (the engine makes those itself) and
  * so is a bare `*`, which names no particular file.
@@ -72,12 +137,34 @@ export function matchesTarget(pattern, name) {
  * many files.
  */
 export function chainTargets(codes, indices) {
-    const out = [];
+    const seen = [];
     for (const index of indices) {
         const code = codes[index];
         if (!code || isDerived(code)) continue;
         const file = String(code.file || '');
-        if (file && targetBase(file) !== '*' && !out.includes(file)) out.push(file);
+        if (file && targetBase(file) !== '*' && !seen.includes(file)) seen.push(file);
+    }
+
+    /* Two targets sharing a basename are usually ONE file written two ways:
+     * Silent Hill 3 scopes some codes under `BLUS30810_SH3*\\SAVEDATA.DAT` and
+     * the rest under a bare `SAVEDATA.DAT`. Keeping both asked for the same
+     * save twice. A bare name is a generic reference, so its presence collapses
+     * the group.
+     *
+     * LUNAR Remastered is the case that must NOT collapse: `card00LUNAR*\\
+     * GAME.BIN` and `card*SAVEDATA\\GAME.BIN` are two different saves, and
+     * every member there carries a folder. So the rule is on qualification,
+     * not on the name. */
+    const out = [];
+    for (const file of seen) {
+        const base = targetBase(file);
+        const group = seen.filter((f) => targetBase(f) === base);
+        if (group.length > 1 && group.some((f) => !/[\\/]/.test(f))) {
+            const bare = group.find((f) => !/[\\/]/.test(f));
+            if (!out.includes(bare)) out.push(bare);
+        } else if (!out.includes(file)) {
+            out.push(file);
+        }
     }
     return out;
 }
@@ -105,10 +192,22 @@ export function targetLabels(targets) {
  * front-end has always used and what every one-target tool wants.
  */
 export function routeChain(codes, indices, assign) {
+    const keys = Object.keys(assign || {});
     const routes = {};
     for (const index of indices) {
         const code = codes[index];
-        const at = code && !isDerived(code) ? assign[String(code.file || '')] : undefined;
+        let at;
+        if (code && !isDerived(code)) {
+            const file = String(code.file || '');
+            at = assign[file];
+            /* chainTargets collapses a qualified target onto the bare one when
+             * they name the same file, so a code may carry the spelling that
+             * did not become the key. Fall back to the basename. */
+            if (at === undefined) {
+                const hit = keys.find((k) => targetBase(k) === targetBase(file));
+                if (hit !== undefined) at = assign[hit];
+            }
+        }
         routes[index] = at === undefined ? 0 : at;
     }
     return routes;
@@ -152,17 +251,23 @@ export function isRequired(code) {
  */
 export function splitChain(codes) {
     const required = [];
-    codes.forEach((code, index) => {
-        if (isRequired(code)) required.push({ index, kind: classifyCode(code.name) });
-    });
+    codes.forEach((code, index) => { if (isRequired(code)) required.push(index); });
+    return splitIndices(codes, required);
+}
 
-    let split = required.findIndex((c) => c.kind === 'c' || c.kind === 'e');
-    if (split < 0) split = required.length;
+/**
+ * The same split, over an arbitrary list of code indices — one variant's
+ * codes, say. splitChain is this applied to every required code.
+ */
+export function splitIndices(codes, indices) {
+    const kinds = indices.map((i) => classifyCode(codes[i]?.name));
+    let split = kinds.findIndex((k) => k === 'c' || k === 'e');
+    if (split < 0) split = indices.length;
 
     return {
-        decrypt: required.slice(0, split).map((c) => c.index),
-        rest: required.slice(split).map((c) => c.index),
-        kinds: [...new Set(required.map((c) => c.kind).filter(Boolean))].sort().join(''),
+        decrypt: indices.slice(0, split),
+        rest: indices.slice(split),
+        kinds: [...new Set(kinds.filter(Boolean))].sort().join(''),
     };
 }
 

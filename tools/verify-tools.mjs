@@ -44,7 +44,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
-import { splitChain, needsOptions, isRequired, chainTargets, routeChain } from '../web/public/toolkit.js';
+import { splitChain, needsOptions, isRequired, chainTargets, routeChain,
+         chainVariants, splitIndices } from '../web/public/toolkit.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -68,8 +69,12 @@ const rows = fs.readFileSync(path.join(HERE, 'verify-manifest.tsv'), 'utf8')
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#'))
     .map((l) => {
-        const [platform, titleId, enc, dec, be] = l.split('\t');
+        const [platform, titleId, enc, dec, be, variant] = l.split('\t');
         return { platform, titleId, enc, dec, bigEndian: be === '1',
+                 /* Optional 6th field: which of a multi-tool patch's variants
+                  * this row is about. MGS HD holds Metal Gear Solid 2's whole
+                  * chain and then Metal Gear Solid 3's. */
+                 variant: Number(variant || 0),
                  /* "-" means: this is a checksum fixer, expect no change. */
                  checksumOnly: dec === '-' };
     });
@@ -136,7 +141,13 @@ for (const row of rows) {
         M._apw_close(); fail++; continue;
     }
 
-    const chain = splitChain(codes);
+    const whole = splitChain(codes);
+    const variants = chainVariants(codes, [...whole.decrypt, ...whole.rest]);
+    if (!variants[row.variant]) {
+        console.log(`FAIL  ${label}  no variant ${row.variant} (patch has ${variants.length})`);
+        M._apw_close(); fail++; continue;
+    }
+    const chain = splitIndices(codes, variants[row.variant].indices);
     const steps = row.checksumOnly ? chain.rest : chain.decrypt;
     if (!steps.length) {
         console.log(`FAIL  ${label}  no ${row.checksumOnly ? 'checksum' : 'decrypt'} step`);
@@ -176,12 +187,41 @@ for (const row of rows) {
     const first = runChain(inputs.map((f) => f.bytes));
     const applied = first.ok;
     const got = first.out[0];
+    /* `dec` may list one plaintext per input, in the same order as `enc`. */
+    /* What each output is checked against.
+     *
+     * `exact` is the bar and the default: the engine's output equals the
+     * reference decrypter's, byte for byte. `prefix:` is a deliberate,
+     * per-file opt-out for one situation — the reference tool TRIMS the file
+     * and the engine does not. Metal Gear Solid HD's MASTER.BIN is the case:
+     * `DECRYPT mgs_base64` decodes over `range 0x0000,eof+1` and leaves the
+     * buffer its original length, so 32 bytes come back holding the right 21
+     * bytes of payload followed by 11 the reference drops. The payload still
+     * has to match exactly and in full — this only tolerates bytes PAST it,
+     * and only where a row asks for it in writing. */
     const wants = row.checksumOnly
-        ? inputs.map((f) => Buffer.from(f.bytes))
-        : [Buffer.from(fs.readFileSync(path.join(samplesDir, row.dec)))];
+        ? inputs.map((f) => ({ mode: 'exact', buf: Buffer.from(f.bytes) }))
+        : row.dec.split(',').map((rel) => {
+            const spec = rel.trim();
+            const prefix = spec.startsWith('prefix:');
+            return {
+                mode: prefix ? 'prefix' : 'exact',
+                buf: Buffer.from(fs.readFileSync(
+                    path.join(samplesDir, prefix ? spec.slice(7) : spec))),
+            };
+        });
     const want = wants[0];
-    /* Every file has to come back untouched, not just the first. */
-    const allHeld = !row.checksumOnly || first.out.every((b, i) => b.equals(wants[i]));
+
+    const holds = (out, w) => w.mode === 'prefix'
+        ? out.length >= w.buf.length && out.subarray(0, w.buf.length).equals(w.buf)
+        : out.equals(w.buf);
+
+    /* Every output has to match, not just the first — for a checksum row that
+     * means unchanged, for a decrypt row it means equal to its plaintext. */
+    const bad = first.out
+        .map((b, i) => (i < wants.length && !holds(b, wants[i])) ? i : -1)
+        .filter((i) => i >= 0);
+    const allHeld = bad.length === 0;
     const fingerprint = chainFingerprint(steps);
 
     /* Liveness, for checksum rows only.
@@ -227,21 +267,32 @@ for (const row of rows) {
     }
     M._apw_close();
 
-    const ok = applied.every(Boolean) && got.equals(want) && allHeld && live;
+    const ok = applied.every(Boolean) && allHeld && live;
     if (ok) {
         pass++;
         const group = chainGroup(fingerprint);
         results.push([row.platform, row.titleId, chain.kinds, group]);
         proven.set(fingerprint, { label, kinds: chain.kinds, group });
-        console.log(`ok    ${label}  ${doc.game || ''} (${steps.length} ${row.checksumOnly ? 'checksum' : 'decrypt'} code(s), ${got.length} bytes)`);
+        const slack = wants.reduce((n, w, i) => n +
+            (w.mode === 'prefix' ? (first.out[i]?.length || 0) - w.buf.length : 0), 0);
+        /* Every file's size, not just the first — a two-file row that reported
+         * only "16 bytes" was naming Final Fantasy XIII-2's KEY.DAT and hiding
+         * the 560KB save the row is really about. */
+        const sizes = first.out.map((b) => b.length).join(' + ');
+        console.log(`ok    ${label}  ${doc.game || ''} (${steps.length} ${row.checksumOnly ? 'checksum' : 'decrypt'} code(s), ${sizes} bytes${
+            slack ? `, payload matched with ${slack} trailing byte(s) ignored` : ''})`);
     } else {
         fail++;
         let why = !applied.every(Boolean) ? 'a code failed to apply'
             : !live ? 'the checksum code is inert — it did not react to changed data'
-            : !allHeld ? 'a file other than the first came back changed'
-            : row.checksumOnly ? 'the checksum code changed a valid save'
+            : !allHeld ? (row.checksumOnly
+                ? `changed a valid save (${bad.map((i) => encs[i]).join(', ')})`
+                : `does not match the plaintext (${bad.map((i) => encs[i]).join(', ')})`)
             : 'output differs';
-        if (got.length !== want.length) why = `length ${got.length} != ${want.length}`;
+        if (want.mode !== 'prefix' && got.length !== want.buf.length)
+            why = `length ${got.length} != ${want.buf.length}`;
+        else if (want.mode === 'prefix' && got.length < want.buf.length)
+            why = `output is ${got.length} bytes, shorter than the ${want.buf.length}-byte payload`;
         console.log(`FAIL  ${label}  ${why}`);
     }
 }

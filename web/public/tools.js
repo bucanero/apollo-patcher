@@ -12,7 +12,8 @@
  * new is only which codes get applied, and that comes from toolkit.js.
  */
 import { CDN, SAVES_CDN, PSNDB, TMDB, TMDB_KEY } from './cdn.js';
-import { splitChain, chainTargets, targetLabels, routeChain, matchesTarget } from './toolkit.js';
+import { splitChain, chainTargets, targetLabels, routeChain, matchesTarget,
+         chainVariants, splitIndices } from './toolkit.js';
 
 const PLATFORM_LABEL = { PS3: 'PS3', PS4: 'PS4', PSV: 'PS Vita', PSP: 'PSP', PS2: 'PS2' };
 
@@ -174,7 +175,12 @@ async function boot() {
      * MGS V still splits by region on top of that, because it keys per region
      * and lands in different chain groups to begin with. */
     const byGroup = new Map();
-    for (const [platform, id, name, kinds, files, verified, group] of (await res.json()).tools) {
+    for (const [platform, id, name, kinds, files, verified, group, alt] of (await res.json()).tools) {
+        /* A patch can cover more than one game and say so under its title —
+         * the Metal Gear Solid HD Collection handles both MGS2 and MGS3. The
+         * card is named for the first; keep the rest searchable so the second
+         * game is not invisible. */
+        const titles = [name, ...(alt ? alt.split(';') : [])].filter(Boolean);
         const key = `${platform}/${group || id}/${nameKey(name)}`;
         const entry = byGroup.get(key);
         if (entry) {
@@ -183,13 +189,13 @@ async function boot() {
              * Biohazard Zero" and "... / Zero", "The Last of Us Part II" and
              * "The Last of Us: Part II". nameKey() folds those onto one card;
              * keep the raw titles so a search for either spelling finds it. */
-            if (!entry.names.includes(name)) entry.names.push(name);
+            for (const t of titles) if (!entry.names.includes(t)) entry.names.push(t);
             continue;
         }
         byGroup.set(key, {
             platform, id, name, kinds, verified,
             ids: [id],
-            names: [name],
+            names: titles,
             files: files ? files.split(',') : [],
         });
     }
@@ -339,17 +345,59 @@ async function openTool(row, iconSrc) {
      * for almost every tool; two or three for the patches whose codes work
      * across separate files. */
     const all = [...chain.decrypt, ...chain.rest];
-    const targets = chainTargets(doc.codes || [], all);
+
+    /* Some patches hold several independent tools: Black Ops a decrypt+encrypt
+     * pair per profile file, MGS HD the whole Metal Gear Solid 2 chain and
+     * then the whole Metal Gear Solid 3 one. Only one of them ever applies to
+     * the save in front of you. */
+    active.variants = chainVariants(doc.codes || [], all);
+    selectVariant(0);
+    setStatus('');
+    renderActions();
+}
+
+/* Choose which of the patch's tools to drive, and rebuild everything that
+ * depends on it: the files it wants, and the buttons it offers. */
+function selectVariant(at) {
+    active.at = at;
+    const indices = active.variants[at].indices;
+    active.chain = splitIndices(active.codes, indices);
+
+    const targets = chainTargets(active.codes, indices);
     const labels = targetLabels(targets);
     active.targets = targets;
     active.labels = labels;
     slots = targets.length > 1
         ? targets.map((target, i) => ({ target, label: labels[i], file: null }))
-        : [{ target: targets[0] || '', label: labels[0] || '', file: null }];
+        : [{ target: targets.length === 1 && active.variants.length > 1 ? '' : (targets[0] || ''),
+             label: labels[0] || '', file: null }];
+
+    renderVariants();
     renderSlots();
-    setStatus('');
     renderActions();
 }
+
+/* Only shown when there is a choice to make. Black Ops labels its tools by the
+ * profile file; MGS HD by the game, read off the patch's own [Group:] heading. */
+function renderVariants() {
+    const many = active.variants.length > 1;
+    $('variants').hidden = !many;
+    if (!many) return;
+    $('variants').innerHTML = active.variants.map((v, i) => `
+      <button type="button" class="chip variant${i === active.at ? ' on' : ''}" data-i="${i}">
+        ${escapeHtml(v.label || `Tool ${i + 1}`)}
+      </button>`).join('');
+}
+
+$('variants').addEventListener('click', (ev) => {
+    const chip = ev.target.closest('.variant');
+    if (!chip || !active) return;
+    const keep = slots[0]?.file;
+    selectVariant(Number(chip.dataset.i));
+    /* Keep the file they already chose, if the new tool wants just the one. */
+    if (keep && slots.length === 1) { slots[0].file = keep; renderSlots(); }
+    setStatus('');
+});
 
 function renderActions() {
     const { chain } = active;
@@ -390,6 +438,8 @@ $('actions').addEventListener('click', (ev) => {
 
 async function run(spec) {
     if (!spec || !active || !slots.length || slots.some((s) => !s.file)) return;
+
+
     setStatus('');
     $('outputs').hidden = true;
     $('outputs').innerHTML = '';
@@ -448,7 +498,7 @@ async function run(spec) {
         <span class="output-name">${escapeHtml(active.labels[i] || f.name)}</span>
         <span class="output-note">${f.changed
             ? `${f.bytes.length.toLocaleString()} bytes · updated`
-            : 'unchanged — nothing to fix'}</span>
+            : 'unchanged'}</span>
         <button type="button" class="linkish output-save" data-i="${i}">Save</button>
       </div>`).join('');
     $('outputs').hidden = false;
@@ -536,12 +586,26 @@ function slotFor(name, taken) {
     const byName = slots.findIndex((s, i) =>
         !taken.has(i) && s.target && matchesTarget(s.target, name));
     if (byName >= 0) return byName;
-    return slots.findIndex((s, i) => !taken.has(i) && !s.file);
+    const empty = slots.findIndex((s, i) => !taken.has(i) && !s.file);
+    if (empty >= 0) return empty;
+    /* Every slot is full: this is somebody swapping the file they already
+     * chose. Overwrite rather than drop it on the floor, which is what
+     * happened when a one-slot tool was handed a second file. */
+    return slots.findIndex((s, i) => !taken.has(i));
 }
 
 async function loadFiles(list, only) {
     const files = [...(list || [])];
     if (!files.length || !slots.length) return;
+
+    /* When the tools differ only by which file they are for — Black Ops'
+     * two profiles — the file the user brought says which one they meant, so
+     * pick it for them rather than making them read the chips. */
+    if (active?.variants?.length > 1 && slots.length === 1 && only === undefined) {
+        const at = active.variants.findIndex((v) =>
+            v.indices.some((i) => matchesTarget(active.codes[i]?.file, files[0].name)));
+        if (at >= 0 && at !== active.at) selectVariant(at);
+    }
 
     const taken = new Set();
     for (const file of files) {

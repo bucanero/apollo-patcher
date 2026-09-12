@@ -10,19 +10,66 @@
 # Paths are relative to that checkout.
 #
 # NO PATCH IN apollo-patches. These C tools have nothing to drive, so the page
-# cannot list them however good the sample is: MGS3 HD - Snake Eater,
-# CoD Black Ops (PS4), Dead Island 2, MC4 Cheat Decrypter, No Man's Sky,
-# Uncharted: The Nathan Drake Collection, Terraria, Middle-Earth: Shadow of
-# Mordor and Shadow of War, Resident Evil 3 Remake, Resident Evil Resistance,
-# Resident Evil 6 (PS4), PS2 APA Header Checksum. Two more look like a patch
-# exists but do not: "Digimon World Next Order" resolves only to Digimon
-# Story: Cyber Sleuth, and "Tomb Raider VI: Angel of Darkness Remaster" only
-# to Tomb Raider: Definitive Edition. Different games.
+# cannot list them however good the sample is: MGS3 HD - Snake Eater, MC4
+# Cheat Decrypter, No Man's Sky, Terraria, PS2 APA Header Checksum. One more
+# looks like a patch exists but does not: "Tomb Raider VI: Angel of Darkness
+# Remaster" resolves only to Tomb Raider: Definitive Edition. A different game.
 #
-# NOT YET LISTED, nothing known against them — the samples do not look like
-# save pairs, which is why they were not tried: ff13-decrypter (ff13-1/2/3 are
-# 128/160/192 bytes) and mgs-hd-decrypter (mgs2, mgs3, 256 bytes each) read as
-# key or test vectors rather than saves. Both have patches on main.
+# Uncharted: The Nathan Drake Collection (PS4/CUSA02826) has left that list.
+# It is the naughtydog-decrypter's type-C format, the same one Drake's Fortune
+# Remastered uses, so the patch is CUSA02320's byte for byte and the expansion
+# pass proves it from there — no row of its own.
+#
+# Dead Island 2 (PS4/CUSA27043) stays out on two counts. Its title ID is not
+# in psndb or apollo-saves, so nothing here can confirm it; and di2-unpacker is
+# a chunked CONTAINER unpacker — start/end marker scan, reverse find, a loop
+# over compressed chunks — which is the same class as Dying Light 2 and
+# Revelations 2 Vita above. Those are deliberately unlisted: proving one means
+# reading the payload back out of the engine's variable list, and that
+# apollo-lib API is not being added.
+#
+# Call of Duty: Black Ops II on PS4 (CUSA57548) is a special case and is NOT
+# written. The cipher would be a straight copy of the PS3 patch — 3DES-CBC
+# with a hardcoded key over the whole file, byte-oriented, so endianness does
+# not enter into it and cod-blackops-decrypter has a single code path for both
+# consoles. What is missing is not the algorithm but the save: there is no PS4
+# sample, only the PS3 GPAD0_CM.PRF pair that already proves BLES01031, and
+# without one there is no way to confirm the PS4 profile's ':file' names. A
+# PS4 Black Ops II save settles it.
+#
+# Resident Evil 3 Remake (PS4/CUSA14168) and Digimon World: Next Order
+# (PS4/CUSA05392) WERE in that list. Patches now exist for both, verified
+# against their samples. Title IDs came from the apollo-saves database (each
+# title's README carries the official name), not from guesswork — a savepatch
+# filed under a made-up ID would never match a real save and nothing would say
+# so.
+#
+# Neither is active here yet, because the gate reads apollo-patches@MAIN and
+# both patches are new:
+#   CUSA14168 needs no row at all. Its code is byte-identical to Monster
+#       Hunter Rise's (PS4/CUSA34119), so the expansion pass proves it the
+#       moment it lands, the same way Resident Evil Village did.
+#   CUSA05392, CUSA00053, CUSA04402 and CUSA03856 each have a checksum of
+#       their own, so each needs its parked row above. Un-comment all four
+#       once the patches are on main.
+#   CUSA14169 (Resident Evil Resistance) needs no row either — same Murmur3-32
+#       code as Monster Hunter Rise, so expansion carries it, and CUSA14168
+#       rides along with it.
+#
+# Middle-earth: Shadow of Mordor (PS4/CUSA00053) and Shadow of War
+# (PS4/CUSA04402) are written too, once their title IDs were supplied and
+# confirmed against Sony's metadata. mearth-checksum-fixer dispatches on a
+# "SAVE" magic to tell the two apart; a savepatch is per game, so each simply
+# hardcodes its own layout. Mordor: length at 0x14, byte-sum from 0x18, stored
+# little-endian at BOTH 0x04 and 0x10. War: length at 0x10, sum from 0x14,
+# stored at 0x08.
+#
+# The double write is why Mordor was checked past the usual bar: "valid save
+# unchanged" plus liveness would still pass if only ONE of its two offsets were
+# being written, since both already hold the right value. Measured directly —
+# poke a byte inside the summed region and both 0x04 and 0x10 move, agree with
+# each other, and match an independent recompute.
+#
 #
 # Not listed, deliberately:
 #   PS3/BLUS30554, PS4/CUSA09084  L.A. Noire — its required codes take an
@@ -141,8 +188,37 @@
 #PS3	NPEB00686	mgs-pw-decrypter/samples/00000000.000	mgs-pw-decrypter/samples/00000000.000.dec	1
 #PS3	BLES00450	nfs-undercover-decrypter/samples/USR-DATA.enc	nfs-undercover-decrypter/samples/USR-DATA.dec	1
 #PS3	BLUS30248	nfs-undercover-decrypter/samples/USR-DATA.enc	nfs-undercover-decrypter/samples/USR-DATA.dec	1
+#PS4	CUSA05392	ps4-digimon-checksum-fixer/samples/DIGIMON_WORLD_GAMEDATA	-	0
+#PS4	CUSA00053	mearth-checksum-fixer/samples/SYSTEM.DAT.mordor	-	0
+#PS4	CUSA04402	mearth-checksum-fixer/samples/SYSTEM.DAT.war	-	0
+#PS4	CUSA03856	re6-checksum-fixer/samples/savedata.bin	-	0
 #
-# platform	title_id	encrypted sample	expected plaintext	big_endian
+# COMPARISON MODES, for the `expected plaintext` column.
+#
+# Default is byte equality with what the reference decrypter produces, and
+# that is the bar. One opt-out exists, written per file:
+#
+#   prefix:PATH   the output must START with this plaintext. For the one case
+#                 where the reference tool TRIMS the file and the engine does
+#                 not — Metal Gear Solid HD's MASTER.BIN, where
+#                 `DECRYPT mgs_base64` decodes over `range 0x0000,eof+1` and
+#                 leaves the buffer 32 bytes long holding the right 21 bytes
+#                 of payload. The payload must still match exactly and in
+#                 full; only bytes PAST it are tolerated, the pass line says
+#                 how many were ignored, and a run that comes back shorter
+#                 than the payload fails. Harmless here because the pair
+#                 round-trips: decrypt then re-encrypt restores both
+#                 MASTER.BIN and DATA.BIN byte for byte (measured).
+#
+# It does NOT help the PSP Peace Walker rows further up. There the difference
+# is at the START — libapollo deliberately leaves the 0x44-byte header
+# word-swapped — so those still want a "payload from offset N" mode, which is
+# a different relaxation and is not implemented.
+#
+# An optional 6th column picks a variant for patches holding several tools
+# (Metal Gear Solid HD: 0 = Metal Gear Solid 2, 1 = Metal Gear Solid 3).
+#
+# platform	title_id	encrypted sample	expected plaintext	big_endian	[variant]
 PS3	BLUS30557	maxpayne3-decrypter/samples/RAGE.SAV.enc	maxpayne3-decrypter/samples/RAGE.SAV.dec	1
 PS3	BLUS31188	diablo3-decrypter/samples/ACCOUNT.DAT.enc	diablo3-decrypter/samples/ACCOUNT.DAT.dec	1
 PS3	BLJM61128	dw8xl-decrypter/samples/APP.BIN	dw8xl-decrypter/samples/APP.BIN.dec	1
@@ -274,3 +350,15 @@ PS3	BLES01733	deadspace-checksum-fixer/samples/HED-DATA,deadspace-checksum-fixer
 PS3	BLES00269	prototype-checksum-fixer/samples/ICON0.PNG,prototype-checksum-fixer/samples/USERDATA.BIN,prototype-checksum-fixer/samples/CRC.BIN	-	1
 PS3	BLUS31460	kh25-checksum-fixer/samples/USR-00.kh25r,kh25-checksum-fixer/samples/SAVEDATA.DAT.khbbs	-	1
 PS4	CUSA48262	lunar-checksum-fixer/samples/1/GAME.BIN,lunar-checksum-fixer/samples/2/GAME.BIN	-	0
+PS3	BLUS30847	mgs-hd-decrypter/samples/mgs2/MASTER.BIN,mgs-hd-decrypter/samples/mgs2/DATA.BIN	prefix:mgs-hd-decrypter/samples/mgs2/MASTER.BIN.dec,mgs-hd-decrypter/samples/mgs2/DATA.BIN.dec	1	0
+PS3	BLES01419	mgs-hd-decrypter/samples/mgs3/MASTER.BIN,mgs-hd-decrypter/samples/mgs3/DATA.BIN	prefix:mgs-hd-decrypter/samples/mgs3/MASTER.BIN.dec,mgs-hd-decrypter/samples/mgs3/DATA.BIN.dec	1	1
+# Final Fantasy XIII, XIII-2 and Lightning Returns. XIII-2 and Lightning
+# Returns read an encryption key out of a SECOND file before touching the save
+# ("Read Encryption KEY.DAT", which classifies as neither decrypt nor checksum
+# and so rides along at the head of the decrypt chain), hence two samples per
+# row. KEY.DAT is listed as its own expected output, which is the assertion
+# that the chain only READS it — if a code ever wrote to the key file, these
+# rows would fail.
+PS3	BLUS30416	ff13-decrypter/samples/ff13-1/APP.DAT.enc	ff13-decrypter/samples/ff13-1/APP.DAT.dec	1
+PS3	BLES01269	ff13-decrypter/samples/ff13-2/KEY.DAT,ff13-decrypter/samples/ff13-2/APP.DAT.enc	ff13-decrypter/samples/ff13-2/KEY.DAT,ff13-decrypter/samples/ff13-2/APP.DAT.dec	1
+PS3	BLJM60558	ff13-decrypter/samples/ff13-3/KEY.DAT,ff13-decrypter/samples/ff13-3/APP.DAT.enc	ff13-decrypter/samples/ff13-3/KEY.DAT,ff13-decrypter/samples/ff13-3/APP.DAT.dec	1
