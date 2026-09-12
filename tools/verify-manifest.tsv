@@ -342,22 +342,33 @@
 # use EOF-0x1F, so "same game type" is NOT a safe basis for copying an offset
 # here. That is why each row below is paired with a sample of its own game.
 #
-# TYPE C FIX. The four type C patches wrote their HMAC at EOF-0x23. The
-# reference README documents EOF-0x1F for type C, and the Collection sample
-# carries a valid HMAC there over 0x0C..EOF-0x20; overriding just that pointer
-# made the checksum code leave a valid save untouched AND the round trip restore
-# the original .enc. Changed to EOF-0x1F in apollo-patches:
+# TYPE C, and why the fix is ONE patch and not four.
 #
-#   CUSA02826  Uncharted: The Nathan Drake Collection     <- proven, row above
-#   CUSA02320  Uncharted: Drake's Fortune Remastered      inherits (identical)
-#   CUSA03281  Uncharted 2: Among Thieves Remastered      inherits (identical)
-#   CUSA03282  Uncharted 3: Drake's Deception Remastered  inherits (identical)
+# The four type C patches all wrote their HMAC at EOF-0x23. The Collection
+# sample carries a valid HMAC at EOF-0x1F over 0x0C..EOF-0x20, the reference
+# README documents EOF-0x1F for type C, and overriding just that pointer made
+# the checksum code leave a valid save untouched AND the round trip restore the
+# original .enc. So EOF-0x1F is right for the Collection, and CUSA02826 now
+# says so.
 #
-# The three standalone remasters carry byte-identical checksum code, so they get
-# the same edit and are covered by the expansion pass rather than by rows of
-# their own -- listing them against a Collection save would repeat exactly the
-# mis-pairing described above. A sample from any of the three would upgrade them
-# from inherited to proven.
+# It is tempting to push that to the other three, since their checksum code was
+# byte-identical. The git history argues against it. The offset has never been
+# EDITED in this repository -- every file has carried one value since its HMAC
+# code was introduced -- and commit 22ff434 (2024-03-19) added, in ONE commit:
+#
+#   EOF-0x1F  Uncharted 4, Uncharted: The Lost Legacy
+#   EOF-0x23  Uncharted: Drake's Fortune Remastered
+#
+# That is a deliberate distinction by the author, not a copy-paste slip, and
+# this family demonstrably does vary: TLoU Remastered needs EOF-0x23 where the
+# PS3 TLoU patches need EOF-0x1F. A compilation release writing a different
+# trailer from the standalone remasters is entirely plausible.
+#
+# So only the Collection is changed. CUSA02320, CUSA03281 and CUSA03282 keep
+# the author's EOF-0x23 and are listed on their DECRYPT proof alone, which
+# transfers honestly -- that half is byte-identical to the Collection's. Their
+# re-encrypt half is unproven either way and needs a save from each game.
+# Do not "fix" them from this row.
 #
 # NO SAMPLE, parked (2). CUSA00341 (Uncharted 4) and CUSA07875 (Uncharted: The
 # Lost Legacy) are type A with EOF-0x1F. Their DECRYPT is proven above -- type A
