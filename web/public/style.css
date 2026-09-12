@@ -648,6 +648,23 @@ footer {
 
 .gh-button:hover { border-color: var(--accent); color: var(--accent); }
 
+.topbar-links { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* Filled rather than outlined, so it reads as the one thing on the page asking
+   for something instead of a second GitHub link. Keeps the accent colour on
+   hover by darkening rather than swapping, since :hover on .gh-button sets a
+   text colour that would vanish against this background. */
+.support-button {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--accent-ink);
+}
+.support-button:hover {
+    border-color: var(--accent);
+    color: var(--accent-ink);
+    filter: brightness(1.08);
+}
+
 footer { display: block; }
 
 .credits {

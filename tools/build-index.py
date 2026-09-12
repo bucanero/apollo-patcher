@@ -25,8 +25,10 @@ unreasonable at run time, so the index is generated here.
                       "cde", "SAVEDATA.DAT"], ...]}
           The fourth field is what the patch can do — "d" decrypt, "e"
           re-encrypt, "c" checksum, "z" the patch uses offzip — the fifth is
-          the file name(s) the user should supply, and the sixth is 1 when
-          verify-tools.mjs has proved this patch against a real save.
+          the file name(s) the user should supply, the sixth is 1 when
+          verify-tools.mjs has proved this patch, and the seventh groups
+          patches whose applied chain is byte-identical — the page shows one
+          tool per group, listing every title ID in it.
 
           --verified=FILE  reads that proof (tools/verify-tools.mjs --out)
           --verified-only  emits only proven entries, for a release that
@@ -63,11 +65,13 @@ def read_game_name(path):
     """
     try:
         with open(path, "rb") as fh:
-            lines = fh.read(4096).split(b"\n")
+            blob = fh.read()
     except OSError:
         return None
+    lines = blob.split(b"\n")
     if len(lines) < 2:
         return None
+    groups = _group_text(blob)
 
     raw = lines[1]
     for encoding in ("utf-8", "cp1252"):
@@ -81,7 +85,63 @@ def read_game_name(path):
 
     name = text.strip().lstrip(";").strip()
     name = PLATFORM_TAG.sub("", name).strip()
-    return name or None
+    if not name:
+        return None
+
+    # Some patches cover several games and say so on the lines that follow:
+    # the Metal Gear Solid HD Collection declares "Metal Gear Solid 2 HD" and
+    # then "Metal Gear Solid 3 HD". Taking only the first line hid the second
+    # game completely — a search for it found nothing, even though the patch
+    # handles it. Keep the rest as alternative titles so the card is findable
+    # by any of them.
+    #
+    # Only the unbroken run of ';' lines right after the name counts, and
+    # credit lines are dropped: those are people, not games.
+    alt = []
+    for raw_line in lines[2:]:
+        for encoding in ("utf-8", "cp1252"):
+            try:
+                line = raw_line.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            break
+        line = line.strip()
+        if not line.startswith(";"):
+            break
+        extra = PLATFORM_TAG.sub("", line.lstrip(";").strip()).strip()
+        if not extra or extra == name or extra in alt:
+            continue
+        key = re.sub(r"[^a-z0-9]+", " ", extra).strip().lower()
+        if len(key) > 3 and key in groups:
+            alt.append(extra)
+
+    return name, alt
+
+
+# Most lines under the game name are credits or sources, not a second game —
+# "From Game Genie For PS3" alone sits under a third of the PS3 patches, and
+# plenty are a bare handle like "chaoszage" that no pattern can tell from a
+# title. Rather than guess, a line is kept only when the patch's OWN code
+# groups mention it: the Metal Gear Solid HD Collection names "Metal Gear
+# Solid 3 HD" on line 3 and again in "[Group:-- Metal Gear Solid 3 HD --]".
+# A credit never appears as a group heading, so this needs no blocklist.
+GROUP_HEADING = re.compile(r"^\s*\[group\s*:(.*?)\]\s*$", re.I | re.M)
+
+
+def _group_text(raw):
+    for encoding in ("utf-8", "cp1252"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        return ""
+    return " \x00 ".join(
+        re.sub(r"[^a-z0-9]+", " ", g).strip().lower()
+        for g in GROUP_HEADING.findall(text))
 
 
 # Classifying a required code by its TITLE, because the body cannot do it
@@ -162,8 +222,16 @@ def scan_tool_codes(path):
         kind = classify_code(title)
         if kind:
             kinds.add(kind)
+        # Test the WHOLE target, not the basename. "~extracted\\00000000.dat" is
+        # the engine's own scratch blob for a container patch — apollo_apply_code
+        # reads and writes a BSD variable for it and never touches a file — so
+        # it must not be listed as something the user has to supply. Splitting
+        # first turned it into "00000000.dat", which sailed past this guard and
+        # put a file nobody has on the card.
+        if target.lstrip().startswith("~"):
+            return
         name = re.split(r"[\\/]", target)[-1].strip()
-        if name and not name.lower().startswith("~extracted") and name not in files:
+        if name and name not in files:
             files.append(name)
 
     for line in text.splitlines():
@@ -252,11 +320,15 @@ def main(argv):
     # in this script can know that — it reads text, it does not decrypt
     # anything — so the claim comes from tools/verify-tools.mjs, which drives
     # the real engine and compares bytes.
-    verified = set()
+    # (platform, title_id) -> chain group. Patches sharing a group carry a
+    # byte-identical applied chain, so the page can present them as one tool
+    # listing several title IDs. Grouping by game NAME would merge things that
+    # only look alike — Metal Gear Solid V keys per region.
+    verified = {}
     if verified_path:
         with open(verified_path, encoding="utf-8") as fh:
             for entry in json.load(fh)["verified"]:
-                verified.add((entry[0], entry[1]))
+                verified[(entry[0], entry[1])] = entry[3] if len(entry) > 3 else ""
     for platform in PLATFORMS:
         directory = os.path.join(root, platform)
         if not os.path.isdir(directory):
@@ -267,12 +339,16 @@ def main(argv):
             if not entry.endswith(".savepatch"):
                 continue
             title_id = entry[: -len(".savepatch")]
-            name = read_game_name(os.path.join(directory, entry))
-            if not name:
+            named = read_game_name(os.path.join(directory, entry))
+            if not named:
                 # Keep it listed: the title ID alone is still enough to find
                 # and apply the patch.
-                name = title_id
+                name, alt = title_id, []
                 skipped += 1
+            else:
+                name, alt = named
+            # patches.json and the TSV keep their existing shape; the extra
+            # titles are only of use to the tools catalog.
             rows.append([platform, title_id, name])
             found += 1
 
@@ -280,10 +356,12 @@ def main(argv):
             # get away with the second line, so do not read 2240 files twice.
             if fmt == "tools":
                 kinds, files = scan_tool_codes(os.path.join(directory, entry))
-                is_verified = (platform, title_id) in verified
+                group = verified.get((platform, title_id))
+                is_verified = group is not None
                 if kinds and (is_verified or not verified_only):
                     tools.append([platform, title_id, name, kinds,
-                                  ",".join(files), 1 if is_verified else 0])
+                                  ",".join(files), 1 if is_verified else 0,
+                                  group or "", ";".join(alt)])
                     tool_counts[platform] = tool_counts.get(platform, 0) + 1
 
         if found:

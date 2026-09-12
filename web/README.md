@@ -44,9 +44,22 @@ buttons instead, and `toolkit.js` decides which codes each runs:
   refuses. Crisis Core computes its checksum over the *ciphertext*, which is
   why its checksum code sits after the encrypt.
 
-It lists only patches `make verify` has run against a real save — see below.
-Everything else about it is the patcher's machinery: same worker, same wasm,
-same CDN fetch.
+It lists only patches `make verify` has vouched for — see below. Everything
+else about it is the patcher's machinery: same worker, same wasm, same CDN
+fetch.
+
+One card is one TOOL, not one patch. A game ships a patch per region and they
+normally carry identical codes, so listing them separately buried the same tool
+five times and left people unsure whether their region was covered. Patches are
+folded by the chain group the verifier assigns — identical codes, so any member
+can be the one the card loads — and the dialog names every title ID in the
+group. Deliberately not folded by game name: Metal Gear Solid V keys per
+region, so its PS3 releases are different tools and keep separate cards.
+
+Card art comes from [apollo-saves](https://github.com/bucanero/apollo-saves) at
+run time, by title ID. Coverage is partial, so the image removes itself when it
+404s and the layout closes up; a group whose first region has no art is retried
+against the others before giving up.
 
 ## Verifying the tools
 
@@ -62,8 +75,9 @@ the output to equal the reference plaintext byte for byte. The result is
 page without needing the saves — and `dist/tools.json` is generated from it
 with `--verified-only`.
 
-So the page does not promise anything that has not been run. 33 patches pass
-today; the catalog knows about 1148, and opening up the rest is a matter of
+So the page does not promise anything that has not been run. 107 patches pass
+today — 59 driven directly against a sample, 48 more inheriting that proof by
+carrying a byte-identical chain — and they collapse to 51 cards; the catalog knows about 1148, and opening up the rest is a matter of
 dropping `--verified-only` once there is evidence for them.
 
 What it is really guarding is the seam between the engine and the patches,

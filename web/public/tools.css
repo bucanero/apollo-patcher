@@ -1,4 +1,4 @@
-/* Apollo Save Tools — layout on top of style.css's tokens. */
+/* Apollo Save Decrypters & Fixers — layout on top of style.css's tokens. */
 
 .tagline {
     margin: 6px 0 0;
@@ -52,16 +52,48 @@
 
 .count { margin: 0 0 0 auto; color: var(--ink-dim); font-size: 13px; }
 
-.grid {
+/* #grid holds one <section> per console; the cards themselves are the nested
+   .cards grid. Keeping the card grid inside each section is what lets a
+   platform heading span its own block rather than floating over everything. */
+.grid { display: flex; flex-direction: column; gap: 26px; }
+
+.platform-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--line);
+}
+.platform-count {
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--ink-dim);
+    opacity: .75;
+}
+
+.cards {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 10px;
 }
 
 .card {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-areas:
+        "icon name"
+        "icon meta";
+    align-content: center;
+    column-gap: 12px;
+    row-gap: 4px;
     padding: 14px;
     text-align: left;
     font: inherit;
@@ -72,15 +104,133 @@
     cursor: pointer;
 }
 .card:hover { border-color: var(--accent); }
-.card-plat {
+/* Redundant now that cards sit under a platform heading — kept in the markup
+   for the dialog's aria description and for anyone reading the DOM. */
+.card-plat { display: none; }
+
+.card-plat-unused {
+    grid-area: plat;
     align-self: flex-start;
     font-size: 11px;
     letter-spacing: .04em;
     text-transform: uppercase;
     color: var(--ink-dim);
 }
-.card-name { font-weight: 600; line-height: 1.3; }
-.card-meta { font-size: 12px; color: var(--ink-dim); }
+.card-name { grid-area: name; font-weight: 600; line-height: 1.3; }
+.card-meta { grid-area: meta; font-size: 12px; color: var(--ink-dim); }
+
+/* Icons are optional — coverage is partial and tools.js removes the <img>
+   when nothing matches. The grid column collapses when it does, so a card
+   without art is a card without art rather than a card with a hole in it.
+
+   Sized by HEIGHT with the width left to follow, because the consoles do not
+   agree on a shape: PS3 art is 320x176, PS4 is 512x512, PS Vita is 250x320
+   (portrait), and PSP is both 144x80 and 80x80 depending on the title. Any
+   fixed box would crop or letterbox most of them. A common height instead
+   keeps the row of cards visually level while every icon keeps its own
+   proportions; max-width stops an unusually wide one from crowding the text.
+   object-fit is contain rather than cover so nothing is ever cropped. */
+.card-icon {
+    grid-area: icon;
+    height: 72px;
+    width: auto;
+    max-width: 132px;
+    border-radius: 6px;
+    object-fit: contain;
+}
+
+/* A group whose patches carry different game names — the LEGO checksum covers
+   four titles — says so on the card, so the one name it shows does not read as
+   the only game it handles. */
+.card-more { color: var(--ink-dim); font-weight: 400; font-size: 12px; }
+
+/* A patch that holds several tools asks which one first. */
+.variants { margin: 0 0 12px; }
+.variants .variant { font-size: 13px; }
+
+/* ---- a {TAG} choice the patch leaves to the user ---- */
+
+.options { display: grid; gap: 10px; margin: 0 0 12px; }
+.option-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin: 0 0 6px;
+    font-size: 13px;
+}
+.option-label { font-weight: 600; }
+/* The raw {TAG}. Useful for matching what you see against the .savepatch, and
+   one of them is 34 characters long, so it is capped rather than trusted. */
+.option-tag {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: var(--ink-dim);
+    max-width: 14em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.option-pick {
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 10px;
+    width: 100%;
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+}
+/* Until it is answered this is the one thing standing between the user and
+   the buttons, so it gets the accent outline rather than sitting quiet. */
+.options.unset .option-pick { border-color: var(--accent); }
+.option-why { margin: 6px 0 0; font-size: 12px; color: var(--ink-dim); }
+
+/* ---- the files a tool needs ---- */
+
+.slots { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+.slot {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 9px 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel-2);
+    font-size: 13px;
+}
+.slot.filled { border-color: var(--good); }
+.slot-target {
+    flex: none;
+    min-width: 8.5em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: var(--ink-dim);
+    overflow-wrap: anywhere;
+}
+.slot-file { flex: 1; overflow-wrap: anywhere; }
+.slot-pick { flex: none; }
+
+/* ---- what a multi-file run produced ---- */
+
+.outputs { display: grid; gap: 8px; margin-top: 12px; }
+.output {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 9px 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 13px;
+}
+.output-name {
+    flex: none;
+    min-width: 8.5em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+.output-note { flex: 1; color: var(--ink-dim); }
+.output.same { opacity: .62; }
 
 .empty { color: var(--ink-dim); }
 .linkish {
@@ -93,15 +243,16 @@
     text-decoration: underline;
 }
 
-.tools-foot {
-    margin-top: 34px;
-    padding-top: 16px;
-    border-top: 1px solid var(--line);
+/* The page's one footer carries both the "what does verified mean" note and
+   the credits. The note is the part people read, so it keeps the body size
+   while the credits below it stay at .credits' smaller 12px. */
+.credits .foot-lede {
     color: var(--ink-dim);
     font-size: 13px;
-    max-width: 70ch;
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
 }
-.tools-foot a { color: var(--accent); }
 
 /* ---- the per-game dialog ---- */
 
@@ -115,7 +266,57 @@
 }
 .tool-dialog::backdrop { background: rgba(0, 0, 0, .45); }
 .tool-dialog h2 { margin: 0 8px 2px 0; font-size: 19px; }
-.tool-sub { margin: 0 0 16px; color: var(--ink-dim); font-size: 13px; }
+.tool-sub { margin: 0; color: var(--ink-dim); font-size: 13px; }
+/* The title IDs are links to the patch each one came from. Underlined only on
+   hover: a dialog subtitle that is mostly IDs turns into a wall of rules
+   otherwise. */
+.tool-also { margin: 4px 0 0; color: var(--ink-dim); font-size: 12px; }
+.tool-sub a { color: var(--accent); text-decoration: none; }
+.tool-sub a:hover { text-decoration: underline; }
+
+.tool-head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 16px;
+}
+/* Same height-driven sizing as the cards, for the same reason: the consoles
+   disagree about icon shape. */
+.tool-icon {
+    height: 64px;
+    width: auto;
+    max-width: 118px;
+    border-radius: 8px;
+    object-fit: contain;
+    flex: none;
+}
+
+.busy {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 20px 16px;
+    color: var(--ink-dim);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+}
+.spinner {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--line);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Someone who has asked for less motion still needs to know it is working, so
+   the ring stays and simply stops turning. */
+@media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; }
+}
 
 .tool-close-form { float: right; margin: -6px -6px 0 0; }
 .tool-close {
