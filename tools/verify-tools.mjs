@@ -78,7 +78,12 @@ const rows = fs.readFileSync(path.join(HERE, 'verify-manifest.tsv'), 'utf8')
                  variant: Number(variant || 0),
                  /* Optional 7th field: the answers to the patch's {TAG}
                   * questions, `;`-separated, each `Value` or `TAG=Value`. */
-                 options: (options || '').split(';').map((s) => s.trim()).filter(Boolean),
+                 options: (options || '').split(';').map((s) => s.trim())
+                     .filter((s) => s && s.toLowerCase() !== 'noroundtrip'),
+                 /* Opt out of the round trip, for a chain that genuinely cannot
+                  * reproduce its own input. Written in the row so the exception
+                  * is visible next to the evidence, never inferred. */
+                 noRoundTrip: /(^|;)\s*noroundtrip\s*(;|$)/i.test(options || ''),
                  /* "-" means: this is a checksum fixer, expect no change. */
                  checksumOnly: dec === '-' };
     });
@@ -191,7 +196,7 @@ for (const row of rows) {
 
     const codes = doc.codes || [];
     const whole = splitChain(codes);
-    const variants = chainVariants(codes, [...whole.decrypt, ...whole.rest]);
+    const variants = chainVariants(codes, whole.indices);
     if (!variants[row.variant]) {
         console.log(`FAIL  ${label}  no variant ${row.variant} (patch has ${variants.length})`);
         M._apw_close(); fail++; continue;
@@ -206,8 +211,13 @@ for (const row of rows) {
     /* Any {TAG} question this chain asks, answered from the row's 7th column.
      * The engine starts every group at "nothing chosen" and refuses the apply,
      * so an unanswered one fails here rather than looking like a broken patch
-     * further down. */
-    const groups = chainOptions(codes, steps);
+     * further down.
+     *
+     * Scoped to the WHOLE variant, not just the half being compared: the round
+     * trip below drives the other half too, and L.A. Noire asks its question
+     * from both its decrypt and its encrypt code. Resolving only the decrypt
+     * side left the encrypt code unset and the engine refused it. */
+    const groups = chainOptions(codes, variants[row.variant].indices);
     const picked = resolveOptions(groups, row.options);
     if (picked.error) {
         console.log(`FAIL  ${label}  ${picked.error}`);
@@ -237,15 +247,19 @@ for (const row of rows) {
     if (encs.length > 1) targets.forEach((t, i) => { assign[t] = i; });
     const routes = routeChain(codes, steps, assign);
 
-    const runChain = (bufs) => {
+    /* Run an arbitrary step list over an arbitrary set of buffers. Parameterised
+     * rather than closed over `steps` because the round trip below drives the
+     * OTHER half of the chain through exactly the same path. */
+    const runSteps = (stepList, stepRoutes, bufs) => {
         inputs.forEach((f, i) => M.FS.writeFile(f.path, new Uint8Array(bufs[i])));
-        const ok = steps.map((i) =>
-            withCString(inputs[routes[i]].path, (p) => !!M._apw_apply(i, p, row.bigEndian ? 1 : 0)));
+        const ok = stepList.map((i) =>
+            withCString(inputs[stepRoutes[i]].path, (p) => !!M._apw_apply(i, p, row.bigEndian ? 1 : 0)));
         M._apw_reset_vars();
         const out = inputs.map((f) => Buffer.from(M.FS.readFile(f.path)));
         inputs.forEach((f) => M.FS.unlink(f.path));
         return { ok, out };
     };
+    const runChain = (bufs) => runSteps(steps, routes, bufs);
 
     const save = inputs[0].bytes;
     const first = runChain(inputs.map((f) => f.bytes));
@@ -287,6 +301,41 @@ for (const row of rows) {
         .filter((i) => i >= 0);
     const allHeld = bad.length === 0;
     const fingerprint = chainFingerprint(steps, codes);
+
+    /*
+     * ROUND TRIP -- re-encrypt what the decrypt just produced and require the
+     * original encrypted sample back, byte for byte.
+     *
+     * Without this the whole re-encrypt half of the database is unproven. A
+     * sweep of every BSD opcode in apollo-patches against what the suite
+     * actually exercises found that of 107 applied codes, exactly TWO contained
+     * an `encrypt` line -- and both were Resident Evil Remake DECRYPT codes that
+     * run `encrypt blowfish_cbc` over a header while unwrapping it. So
+     * `encrypt ffxiii`, `encrypt mgs`, `encrypt mgs_base64`,
+     * `encrypt monster_hunter` and `encrypt diablo3` were all shipping behind a
+     * Re-encrypt button that nothing had ever checked. The forward run proves
+     * the key and the algorithm; this proves the way back.
+     *
+     * Fed from the ENGINE's own decrypt output rather than from the .dec file
+     * on disk. That is the property a user depends on -- press Decrypt, edit,
+     * press Re-encrypt, get a save the game accepts -- and it is the only form
+     * that works for a reference tool that TRIMS: Metal Gear Solid HD's
+     * MASTER.BIN comes back 32 bytes holding the 21 the reference writes, so
+     * re-encrypting the 21-byte file would be encrypting something the engine
+     * never produced.
+     *
+     * Rows that legitimately cannot round-trip say so in writing, with the
+     * `noroundtrip` token in the options column; there is no silent skip.
+     */
+    let trip = null;
+    if (!row.checksumOnly && chain.rest.length && applied.every(Boolean) && allHeld
+        && !row.noRoundTrip) {
+        const back = runSteps(chain.rest, routeChain(codes, chain.rest, assign), first.out);
+        const wrong = back.out
+            .map((b, i) => (i < inputs.length && !b.equals(Buffer.from(inputs[i].bytes))) ? i : -1)
+            .filter((i) => i >= 0);
+        trip = { applied: back.ok.every(Boolean), wrong };
+    }
 
     /* Liveness, for checksum rows only.
      *
@@ -331,7 +380,8 @@ for (const row of rows) {
     }
     M._apw_close();
 
-    const ok = applied.every(Boolean) && allHeld && live;
+    const tripOk = !trip || (trip.applied && !trip.wrong.length);
+    const ok = applied.every(Boolean) && allHeld && live && tripOk;
     if (ok) {
         pass++;
         const group = chainGroup(fingerprint);
@@ -348,10 +398,16 @@ for (const row of rows) {
          * the 560KB save the row is really about. */
         const sizes = first.out.map((b) => b.length).join(' + ');
         console.log(`ok    ${label}  ${doc.game || ''} (${steps.length} ${row.checksumOnly ? 'checksum' : 'decrypt'} code(s), ${sizes} bytes${
-            slack ? `, payload matched with ${slack} trailing byte(s) ignored` : ''})`);
+            slack ? `, payload matched with ${slack} trailing byte(s) ignored` : ''}${
+            trip ? ` + ${chain.rest.length}-code round trip` : ''})`);
     } else {
         fail++;
-        let why = !applied.every(Boolean) ? 'a code failed to apply'
+        let why = !tripOk
+            ? (!trip.applied
+                ? 'the re-encrypt chain failed to apply'
+                : `re-encrypting the decrypt output did not restore the original (${
+                    trip.wrong.map((i) => encs[i]).join(', ')})`)
+            : !applied.every(Boolean) ? 'a code failed to apply'
             : !live ? 'the checksum code is inert — it did not react to changed data'
             : !allHeld ? (row.checksumOnly
                 ? `changed a valid save (${bad.map((i) => encs[i]).join(', ')})`

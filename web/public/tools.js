@@ -351,7 +351,7 @@ async function openTool(row, iconSrc) {
     /* Every file the required chain needs, in the order it wants them. One
      * for almost every tool; two or three for the patches whose codes work
      * across separate files. */
-    const all = [...chain.decrypt, ...chain.rest];
+    const all = chain.indices;
 
     /* Some patches hold several independent tools: Black Ops a decrypt+encrypt
      * pair per profile file, MGS HD the whole Metal Gear Solid 2 chain and

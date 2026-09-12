@@ -264,9 +264,41 @@ export function splitIndices(codes, indices) {
     let split = kinds.findIndex((k) => k === 'c' || k === 'e');
     if (split < 0) split = indices.length;
 
+    /*
+     * Leading UNLABELLED codes are setup, not decryption, and both halves need
+     * them.
+     *
+     * Final Fantasy XIII-2 opens with "Read Encryption KEY.DAT", which is
+     * `set [key]:read(0x0,0x10)` against a second file. It classifies as
+     * neither decrypt nor checksum, so it rides at the head of the decrypt
+     * chain -- and its whole job is to put [key] where the REST of the chain
+     * can find it: `ENCRYPT FFXIII(2, [key])`. Giving it to the decrypt half
+     * alone meant Re-encrypt ran with [key] unset and the engine refused the
+     * code, which looked like a broken patch rather than a broken split.
+     *
+     * Re-running it is safe by construction: a prelude reads, it does not
+     * write. Five patches in the database have one (the Final Fantasy XIII-2 /
+     * Lightning Returns family) and all five reference its variable from the
+     * re-encrypt half, so there is no case where this adds a step nobody wants.
+     *
+     * Bounded by the first DECRYPT code, not by the split point, so a patch
+     * whose required codes are all unlabelled keeps the old shape -- one
+     * action, not two identical ones.
+     */
+    const firstDecrypt = kinds.findIndex((k) => k === 'd');
+    let prelude = 0;
+    if (firstDecrypt > 0 && split > 0)
+        while (prelude < firstDecrypt && kinds[prelude] === '') prelude++;
+
     return {
+        /* NOTE these two now OVERLAP by the prelude, so they are no longer a
+         * partition and `[...decrypt, ...rest]` is not the chain -- it repeats
+         * the prelude, which silently corrupted variant splitting and chain
+         * fingerprints the first time round. `indices` is the whole list, in
+         * order, for callers that want it. */
+        indices,
         decrypt: indices.slice(0, split),
-        rest: indices.slice(split),
+        rest: [...indices.slice(0, prelude), ...indices.slice(split)],
         kinds: [...new Set(kinds.filter(Boolean))].sort().join(''),
     };
 }

@@ -265,6 +265,131 @@
 # only gets it once that branch reaches main.
 #PS3	NPUB31564	sw4-checksum-fixer/samples/DATA.BIN	-	1
 #
+# ROUND TRIP. Every decrypt row also re-encrypts what the decrypt produced and
+# requires the original encrypted sample back, byte for byte. Without it the
+# whole re-encrypt half of the database was unproven: a sweep of every BSD
+# opcode in apollo-patches against what this suite actually exercises found
+# that of 107 applied codes, exactly TWO contained an `encrypt` line -- and
+# both were Resident Evil Remake DECRYPT codes that run `encrypt blowfish_cbc`
+# over a header while unwrapping it. `encrypt ffxiii`, `encrypt mgs`,
+# `encrypt mgs_base64`, `encrypt monster_hunter` and `encrypt diablo3` were all
+# shipping behind a Re-encrypt button nothing had ever checked.
+#
+# It is fed from the ENGINE's own decrypt output, not from the .dec on disk.
+# That is the property a user depends on (press Decrypt, edit, press
+# Re-encrypt) and the only form that works where the reference tool TRIMS --
+# Metal Gear Solid HD's MASTER.BIN comes back 32 bytes holding the 21 the
+# reference writes.
+#
+# It found two real bugs on its first run:
+#
+#   * Final Fantasy XIII-2 / Lightning Returns re-encrypted with no key. Their
+#     "Read Encryption KEY.DAT" code sets [key] from a second file and
+#     classifies as neither decrypt nor checksum, so it sat at the head of the
+#     DECRYPT chain only -- and `ENCRYPT FFXIII(2, [key])` needs it. toolkit.js
+#     splitIndices() now gives a leading unlabelled code to both halves. Five
+#     patches in the database have such a prelude and all five reference its
+#     variable from the re-encrypt half.
+#
+#   * The Naughty Dog family writes an HMAC-SHA1 the game will reject; see the
+#     parked rows below.
+#
+# SEVEN rows opt out with `noroundtrip` in the options column, in three classes.
+# There is no silent skip -- a row either round-trips or says here why not.
+#
+# COMPRESSION (4). Re-deflating does not reproduce the original stream and is
+# not obliged to. Max Payne 3 (BLUS30557, 17202 bytes out of 32174 in, against
+# a differently-sized original), Goat Simulator 3 (CUSA46680, 4960 vs 5168),
+# Final Fantasy Pixel Remaster (CUSA33817, 85344 vs 85312) and Trails of Cold
+# Steel II (PCSE00896). Same reason the container patches are excluded.
+#
+# NAUGHTY DOG -- read this before believing a round-trip failure here.
+#
+# I first read these as five broken patches. That was wrong, and the mistake is
+# worth recording: `set range:S,pointer` looks inclusive, but
+# range_end = _parse_int_value(line, pointer - eof, dsize) + 1 -- when the
+# pointer came from EOF the `eof` flag makes the end EXCLUSIVE. So
+# `set pointer:EOF-0x1F` + `set range:0x08,pointer` covers 0x08..EOF-0x20 and
+# writes at EOF-0x1F, which is exactly right. Deriving offsets from the source
+# rather than from a sample would have caught it.
+#
+# WHICH SAMPLE IS WHICH. Getting this wrong is the other half of the story, so
+# it is written down: three of the four samples embed their game name, and the
+# C one was identified by Damian as a Nathan Drake Collection save (nothing in
+# it carries a title ID -- the Collection contains Drake's Fortune Remastered,
+# so its saves name that game).
+#
+#   A/USR-DATA.PS3   The Last of Us (PS3)
+#   A/USR-DATA.PS4   The Last of Us: Remastered      NOT Uncharted 4
+#   B/USR-DATA       The Last of Us Part II
+#   C/USR-DATA       Uncharted: The Nathan Drake Collection
+#
+# What that plus naughtydog-decrypter/README.md establishes:
+#
+#   PS3 type A (7 patches)              EOF-0x1F, start 0x08   correct
+#   PS4 type A, TLoU Remastered         EOF-0x23, start 0x08   correct
+#     (CUSA00552, CUSA00556)
+#   PS4 type B, TLoU Part II            EOF-0x1F, start 0x10   correct
+#     (CUSA07820, CUSA17962)
+#   PS4 type C, Nathan Drake Collection EOF-0x1F, start 0x0C   FIXED, see below
+#     (CUSA02826, and the three standalone remasters below)
+#
+# Every one of them is now listed above and round-trips byte for byte. The PS3
+# patches had never been listed at all -- they were not "passing", they were
+# untested, and they turn out to be fine.
+#
+# Note TLoU Remastered legitimately uses EOF-0x23 where the PS3 type A patches
+# use EOF-0x1F, so "same game type" is NOT a safe basis for copying an offset
+# here. That is why each row below is paired with a sample of its own game.
+#
+# TYPE C FIX. The four type C patches wrote their HMAC at EOF-0x23. The
+# reference README documents EOF-0x1F for type C, and the Collection sample
+# carries a valid HMAC there over 0x0C..EOF-0x20; overriding just that pointer
+# made the checksum code leave a valid save untouched AND the round trip restore
+# the original .enc. Changed to EOF-0x1F in apollo-patches:
+#
+#   CUSA02826  Uncharted: The Nathan Drake Collection     <- proven, row above
+#   CUSA02320  Uncharted: Drake's Fortune Remastered      inherits (identical)
+#   CUSA03281  Uncharted 2: Among Thieves Remastered      inherits (identical)
+#   CUSA03282  Uncharted 3: Drake's Deception Remastered  inherits (identical)
+#
+# The three standalone remasters carry byte-identical checksum code, so they get
+# the same edit and are covered by the expansion pass rather than by rows of
+# their own -- listing them against a Collection save would repeat exactly the
+# mis-pairing described above. A sample from any of the three would upgrade them
+# from inherited to proven.
+#
+# NO SAMPLE, parked (2). CUSA00341 (Uncharted 4) and CUSA07875 (Uncharted: The
+# Lost Legacy) are type A with EOF-0x1F. Their DECRYPT is proven above -- type A
+# shares one cipher, so the TLoU Remastered sample exercises it -- but that
+# sample is a different game and carries the EOF-0x23 layout, so it cannot
+# judge their HMAC. Needs an Uncharted 4 or Lost Legacy save. Note this is why
+# the mis-pairing survived so long: a decrypt-only test cannot tell the two
+# type-A layouts apart.
+#
+# WRONG REGION, parked (1). Monster Hunter Portable 2nd G (ULJM05500) is the
+# JAPANESE release; MHP2NDG.BIN is a NORTH AMERICAN save, despite the JP-style
+# filename. MHP2G shares its substitution table and XOR cipher across regions
+# and differs only in the SHA1 salt, so the decrypt passes either way and a
+# decrypt-only test cannot tell the two apart -- the same trap as Naughty Dog
+# type A above.
+#
+# I first called this a stale sample, on the strength of a search that came back
+# empty. The search was wrong, not the save: Bucanero ran the reference tool
+# (`monsterhunter-psp-decrypter -e 1`, where type 1 selects MHP2G_NA_HASH_SALT)
+# and it reproduced the stored hash exactly. Recomputing by hand settles it --
+# the construction is the patch's, only the salt differs:
+#
+#   salt at size-36, SHA1 over the first size-16 bytes, written at size-24
+#     NA "3Nc94Hq1zOLh8d62Sb69" -> 62faf95a...  == what the save carries
+#     JP "S)R?Bf8xW3#5h9lGU8wR" -> 8e6c1cb4...  == what ULJM05500 computes
+#
+# So the engine is right, ULJM05500 is right for its own region, and the NA
+# rows (ULUS10391, ULES01213) above already prove that sample end to end,
+# round trip included. This row keeps its decrypt proof -- the cipher is shared
+# and does reproduce the plaintext -- and opts out of the round trip until a
+# Japanese MHP2G save exists. It is unproven, not broken.
+#
 # COMPARISON MODES, for the `expected plaintext` column.
 #
 # Default is byte equality with what the reference decrypter produces, and
@@ -298,7 +423,7 @@
 # question unanswered fails too, since the engine would refuse the apply.
 #
 # platform	title_id	encrypted sample	expected plaintext	big_endian	[variant]	[options]
-PS3	BLUS30557	maxpayne3-decrypter/samples/RAGE.SAV.enc	maxpayne3-decrypter/samples/RAGE.SAV.dec	1
+PS3	BLUS30557	maxpayne3-decrypter/samples/RAGE.SAV.enc	maxpayne3-decrypter/samples/RAGE.SAV.dec	1	0	noroundtrip
 PS3	BLUS31188	diablo3-decrypter/samples/ACCOUNT.DAT.enc	diablo3-decrypter/samples/ACCOUNT.DAT.dec	1
 PS3	BLJM61128	dw8xl-decrypter/samples/APP.BIN	dw8xl-decrypter/samples/APP.BIN.dec	1
 PS3	BLUS30810	silent-hill3-decrypter/samples/SAVEDATA.DAT.enc	silent-hill3-decrypter/samples/SAVEDATA.DAT.dec	1
@@ -327,8 +452,8 @@ PS4	CUSA05088	dbz-xenoverse2-decrypter/samples/SDATA000.DAT.enc	dbz-xenoverse2-d
 PS4	CUSA05105	berseria-decrypter/samples/SAVEDATA0.DAT.enc	berseria-decrypter/samples/SAVEDATA0.DAT.dec	0
 PS4	CUSA31348	ff7cc-decrypter/samples/ue4savegame.ps4.sav.enc	ff7cc-decrypter/samples/ue4savegame.ps4.sav.dec	0
 PS4	CUSA15526	nioh2-decrypter/samples/APP.BIN.enc	nioh2-decrypter/samples/APP.BIN.dec	0
-PS4	CUSA46680	gs3-decrypter/samples/ue4savegame.ps4.sav.enc	gs3-decrypter/samples/ue4savegame.ps4.sav.dec	0
-PS4	CUSA33817	ff-pixel-decrypter/samples/slot1.sav.enc	ff-pixel-decrypter/samples/slot1.sav.dec	0
+PS4	CUSA46680	gs3-decrypter/samples/ue4savegame.ps4.sav.enc	gs3-decrypter/samples/ue4savegame.ps4.sav.dec	0	0	noroundtrip
+PS4	CUSA33817	ff-pixel-decrypter/samples/slot1.sav.enc	ff-pixel-decrypter/samples/slot1.sav.dec	0	0	noroundtrip
 PSP	UCES01421	patapon3-decrypter/samples/SECURE.BIN.ENC	patapon3-decrypter/samples/SECURE.BIN.DEC	0
 PSV	PCSE00235	doa5-decrypter/samples/SAVE_SYS.DAT.vita.enc	doa5-decrypter/samples/SAVE_SYS.DAT.vita.dec	0
 
@@ -379,14 +504,14 @@ PS4	CUSA00057	strider-checksum-fixer/samples/SaveData	-	0
 PSP	UCES01241	invizimals-checksum-fixer/samples/GAMEDATA.UCES01241	-	0
 PSP	UCES01411	invizimals-checksum-fixer/samples/GAMEDATA.UCES01411	-	0
 PSP	UCES01581	invizimals-checksum-fixer/samples/GAMEDATA.UCES01581	-	0
-PSV	PCSE00896	trails-cs-unpacker/samples/vitacs2.save000.dat.pack	trails-cs-unpacker/samples/vitacs2.save000.dat.unpack	0
+PSV	PCSE00896	trails-cs-unpacker/samples/vitacs2.save000.dat.pack	trails-cs-unpacker/samples/vitacs2.save000.dat.unpack	0	0	noroundtrip
 # Monster Hunter on PSP. One sample per save file, not per region: all three
 # MHP2ndG releases share MHP2NDG.BIN and each patch is proved against it on
 # its own terms (its chain, byte-equality), so nothing is inferred across
 # regions here.
 PSP	ULUS10391	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0
 PSP	ULES01213	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0
-PSP	ULJM05500	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0
+PSP	ULJM05500	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0	0	noroundtrip
 PSP	ULJM05800	monsterhunter-psp-decrypter/samples/MHP3RD.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP3RD.BIN.DEC	0
 # PS3 checksum fixers whose sample is named for the game rather than a title
 # ID. Each is a single-game (or single-file) tool, so which patch the sample
@@ -415,13 +540,18 @@ PS3	BCES00509	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypt
 PS3	BCUS98123	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
 PS3	BCES01176	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
 PS3	BCUS98233	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
+PS4	CUSA07820	naughtydog-decrypter/samples/B/USR-DATA.enc	naughtydog-decrypter/samples/B/USR-DATA.dec	0
+PS4	CUSA17962	naughtydog-decrypter/samples/B/USR-DATA.enc	naughtydog-decrypter/samples/B/USR-DATA.dec	0
+PS3	BCUS98174	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
+PS3	BCES01585	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
+PS3	BCAS20270	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
 PS4	CUSA00552	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0
 PS4	CUSA00556	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0
-PS4	CUSA00341	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0
-PS4	CUSA07875	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0
-PS4	CUSA03281	naughtydog-decrypter/samples/C/USR-DATA.enc	naughtydog-decrypter/samples/C/USR-DATA.dec	0
-PS4	CUSA03282	naughtydog-decrypter/samples/C/USR-DATA.enc	naughtydog-decrypter/samples/C/USR-DATA.dec	0
-PS4	CUSA02320	naughtydog-decrypter/samples/C/USR-DATA.enc	naughtydog-decrypter/samples/C/USR-DATA.dec	0
+PS4	CUSA00552	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0
+PS4	CUSA00556	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0
+PS4	CUSA00341	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0	0	noroundtrip
+PS4	CUSA07875	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0	0	noroundtrip
+PS4	CUSA02826	naughtydog-decrypter/samples/C/USR-DATA.enc	naughtydog-decrypter/samples/C/USR-DATA.dec	0
 PS4	CUSA07820	naughtydog-decrypter/samples/B/USR-DATA.enc	naughtydog-decrypter/samples/B/USR-DATA.dec	0
 PS4	CUSA17962	naughtydog-decrypter/samples/B/USR-DATA.enc	naughtydog-decrypter/samples/B/USR-DATA.dec	0
 PS4	CUSA03842	re7-checksum-fixer/samples/data00-92.bin	-	0
