@@ -9,23 +9,97 @@
 # Samples come from bucanero/save-decrypters (not vendored; pass its path).
 # Paths are relative to that checkout.
 #
+# NO PATCH IN apollo-patches. These C tools have nothing to drive, so the page
+# cannot list them however good the sample is: MGS3 HD - Snake Eater,
+# CoD Black Ops (PS4), Dead Island 2, MC4 Cheat Decrypter, No Man's Sky,
+# Uncharted: The Nathan Drake Collection, Terraria, Middle-Earth: Shadow of
+# Mordor and Shadow of War, Resident Evil 3 Remake, Resident Evil Resistance,
+# Resident Evil 6 (PS4), PS2 APA Header Checksum. Two more look like a patch
+# exists but do not: "Digimon World Next Order" resolves only to Digimon
+# Story: Cyber Sleuth, and "Tomb Raider VI: Angel of Darkness Remaster" only
+# to Tomb Raider: Definitive Edition. Different games.
+#
+# NOT YET LISTED, nothing known against them — the samples do not look like
+# save pairs, which is why they were not tried: ff13-decrypter (ff13-1/2/3 are
+# 128/160/192 bytes) and mgs-hd-decrypter (mgs2, mgs3, 256 bytes each) read as
+# key or test vectors rather than saves. Both have patches on main.
+#
 # Not listed, deliberately:
 #   PS3/BLUS30554, PS4/CUSA09084  L.A. Noire — its required codes take an
-#       interactive {TAG} choice (the AES key IS the choice), which two
-#       buttons cannot make for the user.
+#       interactive {TAG} choice, `{ST}0001=Game Savedata;0002=User Profile`,
+#       and the two branches are genuinely different saves, so nothing but the
+#       user can pick. Note this is a PAGE gap, not a sample gap: the samples
+#       for BOTH branches are already in save-decrypters (SAVEDATA.enc/.dec
+#       and SAVEDATA.profile.enc/.dec, plus the PS4 pair). The day the tools
+#       page can offer a patch's {TAG} options, four rows go straight in.
 #   PS4/CUSA07713  Monster Hunter World — decrypts correctly but exhausts the
 #       MicroPython heap under wasm on its 8MB save (MemoryError, not
 #       corruption). Revisit when the heap story improves.
+#   PS3/BLES00485, PS3/BLUS30270  Resident Evil 5 (PS3) and
+#   PS3/BLES01465 et al  Resident Evil 6 — both C tools ship a PS4-shaped
+#       sample, not a PS3 one: re5-checksum-fixer's savedata.bin is the very
+#       file that proves PS4/CUSA04437, and re6's has the byte-identical
+#       16-byte header, with 0x00000008 at offset 0x8 where the PS3 patch
+#       writes its DWADD. So the PS3 patches cannot be proved by it (measured:
+#       "changed a valid save"). RE5 PS4 is already listed; RE6 has no PS4
+#       patch in the database at all, so its sample proves nothing today.
+#       Needs a PS3 DATA0.DAT sample for each.
+#   PS3/BLES01880, PS3/BLUS31211, PS3/BLJM61093  Final Fantasy X / X-2 HD —
+#       two REQUIRED codes that are alternatives, not a sequence: "Update
+#       Checksums Final Fantasy X" (writes 0x64F4, range 0x40..0x64F7) and
+#       "...Final Fantasy X-2" (writes 0x16268, range 0x40..0x1626B). Both
+#       also write the shared header hash at 0x1A, so running the pair over an
+#       X save leaves the X-2 hash there and the save is rejected — measured,
+#       the harness reports "changed a valid save". Nothing here can pick for
+#       the user: it is the SAVE that decides which applies. Needs the two to
+#       become a {TAG} choice, or separate :file targets, upstream.
+#   PS3/BLES01945, PS3/BLUS31270  Call of Duty: Ghosts — patch and C tool
+#       cover DIFFERENT files. The savepatch fixes Adler32 over SAVEGAME.SVG
+#       and is the only code in it; save-decrypters' cod-checksum-fixer (and
+#       its sample) is MPDATA. So the sample cannot prove the patch. Needs a
+#       SAVEGAME.SVG sample, not a manifest row.
+#
+# MULTI-TARGET patches. The page hands the engine ONE buffer and applies codes
+# to it by index, with no notion of the `:file` a code targets. A patch whose
+# required chain spans two or more targets would therefore land its middle
+# codes on the wrong bytes. This is one feature, and it unblocks all of these
+# at once — they are not separate problems and none of them wants a sample:
+#
 #   PSV/PCSE00608, PSV/PCSF00728, PSV/PCSG00594  Resident Evil: Revelations 2
-#       (Vita) — a different shape from the PS3/PS4 patches, which decrypt
-#       DATA0.DAT in place. The Vita save is a compressed container: the
-#       required chain decompresses `data/data0000.bin`, checksums a file at a
-#       SECOND target (`:~extracted\00000000.dat`) that the first step
-#       produced, then recompresses the container. The page hands the engine
-#       one buffer and applies codes to it by index, with no notion of the
-#       `:file` a code targets, so those middle codes would land on the
-#       container bytes. Needs multi-target support, not a sample — and there
-#       is no Vita sample in save-decrypters either.
+#       (Vita) — decompress `data/data0000.bin`, checksum a file at a second
+#       target (`:~extracted\00000000.dat`) that the first step produced, then
+#       recompress. Unlike the PS3/PS4 patches, which decrypt DATA0.DAT in
+#       place. No Vita sample in save-decrypters either.
+#   PS4/CUSA12555  Dying Light 2 — the same container shape, via
+#       `:~extracted\00000000.dat`.
+#   PS3/BLES01040 et al  Dead Space 2, PS3/BLES01733 et al  Dead Space 3 —
+#       init SDBM on :HED-DATA, calculate over :USR-DATA, write back to
+#       :HED-DATA. Three required codes, two files. Samples for both files are
+#       in deadspace-checksum-fixer/samples.
+#   PS3/BLES00269 et al  Prototype 1 & 2 — the same three-step shape across
+#       :CRC.BIN and :USERDATA.BIN.
+#   PS3/BLUS31460, PS3/BLES02070, PS3/BLJM61220  Kingdom Hearts HD 2.5 ReMIX
+#       (and the BBS / Re:CoM titles inside it) — :USR-00 and :SAVEDATA.DAT
+#       each carry their own required checksum.
+#   PS4/CUSA48262  LUNAR Remastered Collection — one required code per game,
+#       on two different :card*\GAME.BIN targets.
+#
+# Alien: Isolation was in this list and is NOT any more: its two codes are
+# byte-identical apart from the heading, so applying both to one file is
+# idempotent and PS3/BLES01697 verifies. PS4/CUSA00362 has a single target.
+#
+#
+# SAMPLE AND PATCH DISAGREE — the C tool and the savepatch are not looking at
+# the same bytes. Not a harness limit and not a page limit; somebody has to
+# work out which of the two is right. All measured as "changed a valid save":
+#
+#   PS3/NPUB31564, PS3/BLJM61144  Samurai Warriors 4 / Sengoku Musou 4 —
+#       sw4-checksum-fixer's DATA.BIN fails every SW4 patch, both endian modes.
+#   PS3/NPEB01297, PS4/CUSA00057  Strider — same, with
+#       strider-checksum-fixer's SaveData against `:SAVEGAME` and `:*`.
+#   PS4/CUSA01587  Shantae: Risky's Revenge — the patch updates a JHash over
+#       `:savedata.sav`; the unpacker's sample is a 152-byte `savegame`, and
+#       the code does not react to it at all.
 #   PS3/BLES01894  Need For Speed: Rivals — the patch is fine; its SAMPLE is
 #       not. USR-DATA is 716800 bytes but only the first 358404 were ever
 #       encrypted, so no correct implementation can reproduce the .enc from
@@ -45,6 +119,16 @@
 #
 # Re-add these four rows when those branches reach main; they pass against the
 # branch content today (checked against each branch in a worktree).
+#
+# PS4/CUSA18008  Resident Evil Village needs NO row of its own. The patch had
+# 11 cheat codes and no checksum code, so there was no step to run; it now
+# carries the same "[Update Murmur3-32 checksum (Required)]" as RE7's
+# CUSA03842 — which is exactly what save-decrypters' re7-checksum-fixer does
+# for Village (murmur3_32 over len-4, seed 0xFFFFFFFF, into the trailing u32).
+# Byte-identical code means the expansion pass below proves it from RE7 for
+# free, the moment the patch reaches apollo-patches main. Listed here anyway
+# because it was also checked directly against village-data001Slot.bin: valid
+# save unchanged, and it reacts to a changed byte.
 #
 # The mgs-pw-psp branch also adds PSP Peace Walker patches — ULUS10509 and
 # ULES01372 (mgs_pw(1)), NPJH50045 (mgs_pw(2)). They are correct, and this
@@ -150,3 +234,45 @@ PSP	ULUS10391	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-
 PSP	ULES01213	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0
 PSP	ULJM05500	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0
 PSP	ULJM05800	monsterhunter-psp-decrypter/samples/MHP3RD.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP3RD.BIN.DEC	0
+# PS3 checksum fixers whose sample is named for the game rather than a title
+# ID. Each is a single-game (or single-file) tool, so which patch the sample
+# belongs to is not in doubt; the proof is still per-patch.
+PS3	BLES01047	castlevania-checksum-fixer/samples/DATA.DAT.LOS1	-	1
+PS3	BLES01644	castlevania-checksum-fixer/samples/DATA.DAT.LOS2	-	1
+PS4	CUSA05904	far-cry-5-checksum-fixer/samples/memory.dat	-	0
+PS3	BLES01697	alien-checksum-fixer/samples/STHEFILE	-	1
+# LEGO: one GAME1 sample, four patches. Ambiguous by filename — but all four
+# carry the same "Update Checksum for GAME1" code, each is proved against the
+# sample on its own, and they fold into one chain group regardless. Listing
+# them individually is what makes that a measurement rather than a guess.
+PS3	BLES01516	lego-checksum-fixer/samples/GAME1	-	1
+PS3	BLES01613	lego-checksum-fixer/samples/GAME1	-	1
+PS3	BLES01348	lego-checksum-fixer/samples/GAME1	-	1
+PS3	BLES01239	lego-checksum-fixer/samples/GAME1	-	1
+# Naughty Dog, one engine across two consoles and three save layouts. The
+# tool's own -A/-B/-C game types are exactly the sample directories, and which
+# patch belongs to which is a measurement, not a guess: Uncharted 2 and 3
+# Remastered failed against the type-A PS4 sample and passed against type C,
+# which is where the Nathan Drake Collection actually lives.
+PS3	BCES01585	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
+PS3	BCUS98174	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
+PS3	BCAS20270	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
+PS3	BCES00509	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
+PS3	BCUS98123	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
+PS3	BCES01176	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
+PS3	BCUS98233	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
+PS4	CUSA00552	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0
+PS4	CUSA00556	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0
+PS4	CUSA00341	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0
+PS4	CUSA07875	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0
+PS4	CUSA03281	naughtydog-decrypter/samples/C/USR-DATA.enc	naughtydog-decrypter/samples/C/USR-DATA.dec	0
+PS4	CUSA03282	naughtydog-decrypter/samples/C/USR-DATA.enc	naughtydog-decrypter/samples/C/USR-DATA.dec	0
+PS4	CUSA02320	naughtydog-decrypter/samples/C/USR-DATA.enc	naughtydog-decrypter/samples/C/USR-DATA.dec	0
+PS4	CUSA07820	naughtydog-decrypter/samples/B/USR-DATA.enc	naughtydog-decrypter/samples/B/USR-DATA.dec	0
+PS4	CUSA17962	naughtydog-decrypter/samples/B/USR-DATA.enc	naughtydog-decrypter/samples/B/USR-DATA.dec	0
+PS4	CUSA03842	re7-checksum-fixer/samples/data00-92.bin	-	0
+PS4	CUSA03962	re7-checksum-fixer/samples/data00-92.bin	-	0
+PS4	CUSA34119	re7-checksum-fixer/samples/data00-90.bin	-	0
+PS4	CUSA28934	trails-zero-checksum-fixer/samples/zeroSAVEDATA.DAT	-	0
+PS4	CUSA29189	trails-zero-checksum-fixer/samples/azureSAVEDATA.DAT	-	0
+PS4	CUSA00362	alien-checksum-fixer/samples/THEFILE	-	0

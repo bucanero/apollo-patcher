@@ -160,20 +160,36 @@ for (const row of rows) {
      * "Applying the fixer left this valid save untouched" is only evidence if
      * the fixer actually wrote something. A code whose range falls outside the
      * file, or that the engine declines for any other reason, also leaves the
-     * bytes alone — and would sail through as a pass. So flip one byte in the
-     * middle of the data and require the output to differ from that flipped
-     * input: the checksum has to move when the data under it moves. */
+     * bytes alone — and would sail through as a pass. So flip a byte and
+     * require the output to differ from that flipped input: the checksum has
+     * to move when the data under it moves.
+     *
+     * WHERE the byte is flipped matters, and one fixed position is not enough.
+     * Plenty of checksums guard a header-sized prefix of a much larger file —
+     * Far Cry 5 covers 0x10..0x892A3 of a 2MB memory.dat, Alien: Isolation
+     * 0x20..0x86F of a 10KB STHEFILE — so a poke at the midpoint lands outside
+     * the covered range and the checksum correctly does not move. Read as
+     * "inert", that failed two patches that are in fact fine. Sweep a spread
+     * of offsets instead and take the first one that moves it; only a code
+     * that reacts NOWHERE is inert. */
     let live = true;
     if (row.checksumOnly && applied.every(Boolean) && got.equals(want)) {
-        const poked = Buffer.from(save);
-        poked[Math.floor(poked.length / 2)] ^= 0xff;
-        M.FS.writeFile('/verify.bin', new Uint8Array(poked));
-        const ok2 = withCString('/verify.bin', (p) =>
-            steps.map((i) => !!M._apw_apply(i, p, row.bigEndian ? 1 : 0)));
-        M._apw_reset_vars();
-        const after = Buffer.from(M.FS.readFile('/verify.bin'));
-        M.FS.unlink('/verify.bin');
-        live = ok2.every(Boolean) && !after.equals(poked);
+        const n = save.length;
+        const spots = [...new Set([0x20, 0x40, n >> 5, n >> 4, n >> 3, n >> 2,
+                                   n >> 1, n - (n >> 3), n - 1])]
+            .filter((o) => o >= 0 && o < n);
+        for (const spot of spots) {
+            const poked = Buffer.from(save);
+            poked[spot] ^= 0xff;
+            M.FS.writeFile('/verify.bin', new Uint8Array(poked));
+            const ok2 = withCString('/verify.bin', (p) =>
+                steps.map((i) => !!M._apw_apply(i, p, row.bigEndian ? 1 : 0)));
+            M._apw_reset_vars();
+            const after = Buffer.from(M.FS.readFile('/verify.bin'));
+            M.FS.unlink('/verify.bin');
+            live = ok2.every(Boolean) && !after.equals(poked);
+            if (live) break;
+        }
     }
     M._apw_close();
 

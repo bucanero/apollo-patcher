@@ -16,6 +16,23 @@ import { splitChain } from './toolkit.js';
 
 const PLATFORM_LABEL = { PS3: 'PS3', PS4: 'PS4', PSV: 'PS Vita', PSP: 'PSP', PS2: 'PS2' };
 
+/* Is this the same GAME, spelled differently? Patch titles are written by
+ * hand, so the regions of one game disagree about trademark glyphs, case,
+ * punctuation, a "PS4 " prefix, and whether to append the Japanese title after
+ * a slash, and whether to tag the PSN re-release. Normalising those away keeps
+ * a game on one card; anything this does
+ * NOT collapse is treated as a different game and gets its own card, which is
+ * the safe direction to err — a spurious second card is findable, a game
+ * hidden under a sibling's name is not. */
+const nameKey = (s) => String(s || '')
+    .toLowerCase()
+    .replace(/[\u2122\u00ae\u00a9]/g, '')
+    .replace(/^ps[1-5]\s+/, '')
+    .split('/')[0]
+    .replace(/\s*\([^)]*\)/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+
 /* Card art lives in apollo-saves as <PLATFORM>/<TITLEID>/<icon>, and the file
  * name's CASE depends on the console: PS3 and PSP store ICON0.PNG, while PS4,
  * PS Vita, PS2 and PS1 store icon0.png. jsDelivr is case-sensitive, so asking
@@ -140,23 +157,39 @@ let save = null;        /* { name, bytes } */
 async function boot() {
     const res = await fetch('./tools.json');
     if (!res.ok) { $('count').textContent = 'Could not load the tool list.'; return; }
-    /* One card per TOOL, not per patch. A game ships a patch per region and
-     * they usually carry the same codes, so listing them separately buried
-     * the same tool five times over and left people wondering whether their
-     * region was covered. Patches are folded together by the chain group the
-     * verifier assigns: same group means byte-identical codes, so one card can
-     * stand for all of them and any member can be the one it loads.
+    /* One card per GAME, folded across the regions of that game.
      *
-     * Not folded by game name — Metal Gear Solid V keys per region, so its
-     * PS3 releases are genuinely different tools and stay on separate cards. */
+     * Two things have to be true at once. A game ships a patch per region and
+     * they usually carry the same codes, so listing those separately buried
+     * the same tool five times over and left people wondering whether their
+     * region was covered — hence the chain group, which the verifier assigns
+     * and which means byte-identical codes. But a chain group is a TOOL, and
+     * one tool often spans several games: the LEGO checksum covers four of
+     * them, RE7's covers Village, the Naughty Dog decrypt covers Uncharted and
+     * The Last of Us together. Folding those into one card hid real games
+     * behind a sibling's name, which is the harder problem — people look for
+     * their game by name and by box art, not by algorithm.
+     *
+     * So the key is chain group AND game, and it is the game that wins ties.
+     * MGS V still splits by region on top of that, because it keys per region
+     * and lands in different chain groups to begin with. */
     const byGroup = new Map();
     for (const [platform, id, name, kinds, files, verified, group] of (await res.json()).tools) {
-        const key = `${platform}/${group || id}`;
+        const key = `${platform}/${group || id}/${nameKey(name)}`;
         const entry = byGroup.get(key);
-        if (entry) { entry.ids.push(id); continue; }
+        if (entry) {
+            entry.ids.push(id);
+            /* Same game, different spelling on the box: "RESIDENT EVIL 0 HD /
+             * Biohazard Zero" and "... / Zero", "The Last of Us Part II" and
+             * "The Last of Us: Part II". nameKey() folds those onto one card;
+             * keep the raw titles so a search for either spelling finds it. */
+            if (!entry.names.includes(name)) entry.names.push(name);
+            continue;
+        }
         byGroup.set(key, {
             platform, id, name, kinds, verified,
             ids: [id],
+            names: [name],
             files: files ? files.split(',') : [],
         });
     }
@@ -184,7 +217,7 @@ function visible() {
     const chosen = [...document.querySelectorAll('.chip.on')].map((c) => c.dataset.platform);
     return catalog.filter((r) =>
         (!chosen.length || chosen.includes(r.platform)) &&
-        (!q || r.name.toLowerCase().includes(q) ||
+        (!q || r.names.some((n) => n.toLowerCase().includes(q)) ||
                r.ids.some((id) => id.toLowerCase().includes(q))));
 }
 
@@ -262,6 +295,10 @@ async function openTool(row, iconSrc) {
         `${escapeHtml(PLATFORM_LABEL[row.platform] || row.platform)} · `
         + (row.ids.length > 1 ? `covers ${idLinks(row)}` : idLinks(row))
         + (row.files.length ? ` · expects ${escapeHtml(row.files.join(' or '))}` : '');
+    $('tool-also').textContent = row.names.length > 1
+        ? `Also listed as: ${row.names.slice(1).join(' · ')}`
+        : '';
+    $('tool-also').hidden = row.names.length < 2;
     const icon = $('tool-icon');
     if (iconSrc) { icon.src = iconSrc; icon.hidden = false; } else { icon.hidden = true; icon.removeAttribute('src'); }
 
