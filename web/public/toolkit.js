@@ -271,10 +271,96 @@ export function splitIndices(codes, indices) {
     };
 }
 
-/* A patch whose required codes need an interactive {TAG} choice cannot be
- * driven by two buttons — the engine leaves the option unset and the apply is
- * refused. Both L.A. Noire patches are in this position (the key IS the
- * choice). They are excluded rather than guessed at. */
+/* ---- interactive {TAG} choices ---------------------------------------
+ *
+ * A handful of patches put a `{TAG}value=Label;...{/TAG}` block at file scope
+ * and reference {TAG} from inside a REQUIRED code. The engine substitutes the
+ * chosen value textually before running the code, and starts with nothing
+ * chosen (sel = -1), so an apply with the choice unmade is refused.
+ *
+ * L.A. Noire is the case that matters: the {TAG} IS the AES key, and its two
+ * values are two genuinely different saves — `Game Savedata` and
+ * `User Profile`. Nothing but the person holding the file can say which one it
+ * is, so the page has to ask. It used to duck the question by refusing to list
+ * such patches at all.
+ *
+ * Keyed by tag AND by the value list, so one choice drives every code that
+ * mentions it — L.A. Noire names {ST} in both its decrypt and its encrypt code
+ * and must not ask twice — while a tag that somehow carried different values
+ * in different codes would still be asked separately rather than silently
+ * conflated.
+ */
+export function chainOptions(codes, indices) {
+    const groups = [];
+    const seen = new Map();
+
+    for (const index of indices) {
+        (codes[index]?.options || []).forEach((opt, group) => {
+            const tag = String(opt.tag || '');
+            const values = (opt.values || []).map(String);
+            const key = `${tag} ${values.join(' ')}`;
+
+            let g = seen.get(key);
+            if (!g) {
+                g = { key, tag, values, label: optionLabel(values), at: [] };
+                seen.set(key, g);
+                groups.push(g);
+            }
+            g.at.push({ index, group });
+        });
+    }
+    return groups;
+}
+
+/* What to call the choice on screen.
+ *
+ * The tag is the patch author's identifier and ranges from cryptic to unusable
+ * ({ST}, {SF}, {LA_NOIRE_AES_CBC256_KEY_OPTION}), so it is not a label. The
+ * VALUES are written for humans, and when they share an opening they name the
+ * thing being chosen for free: "Save Slot 1".."Save Slot 10" gives "Save
+ * slot", "User Profile #1".."#8" gives "User profile". When they share
+ * nothing they are each self-describing already (L.A. Noire's "Game Savedata"
+ * / "User Profile"), and a generic heading over them reads better than a
+ * specific one this code would have to invent. */
+function optionLabel(values) {
+    if (values.length < 2) return 'Option';
+
+    let prefix = values[0];
+    for (const v of values.slice(1)) {
+        let i = 0;
+        while (i < prefix.length && i < v.length && prefix[i] === v[i]) i++;
+        prefix = prefix.slice(0, i);
+    }
+    /* Cut back to a word boundary, so "Save Slot 1" / "Save Slot 10" does not
+     * yield "Save Slot 1", then drop what a numbered list leaves hanging. */
+    prefix = prefix.replace(/\S*$/, '').replace(/[\s#:_-]+$/, '').trim();
+
+    return prefix.length >= 3
+        ? prefix.charAt(0) + prefix.slice(1).toLowerCase()
+        : 'Option';
+}
+
+/* True once every group chainOptions returned has a value picked. `chosen`
+ * maps a group key to an index into that group's values. */
+export function optionsReady(groups, chosen) {
+    return groups.every((g) => Number.isInteger(chosen?.[g.key]) && chosen[g.key] >= 0);
+}
+
+/* The worker's `options` payload: code index -> the value for each of that
+ * code's option groups, in group order, which is what
+ * apw_set_option(index, group, value) wants. */
+export function optionAssignments(groups, chosen) {
+    const out = {};
+    for (const g of groups) {
+        const value = chosen?.[g.key];
+        if (!Number.isInteger(value) || value < 0) continue;
+        for (const { index, group } of g.at) (out[index] ||= [])[group] = value;
+    }
+    return out;
+}
+
+/* Does this patch's required chain ask anything at all? For callers that only
+ * want the yes/no; chainOptions is the one that answers "what". */
 export function needsOptions(codes) {
     return codes.some((code) => isRequired(code) && (code.options || []).length > 0);
 }

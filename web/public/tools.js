@@ -13,7 +13,8 @@
  */
 import { CDN, SAVES_CDN, PSNDB, TMDB, TMDB_KEY } from './cdn.js';
 import { splitChain, chainTargets, targetLabels, routeChain, matchesTarget,
-         chainVariants, splitIndices } from './toolkit.js';
+         chainVariants, splitIndices, chainOptions, optionsReady,
+         optionAssignments } from './toolkit.js';
 
 const PLATFORM_LABEL = { PS3: 'PS3', PS4: 'PS4', PSV: 'PS Vita', PSP: 'PSP', PS2: 'PS2' };
 
@@ -310,6 +311,8 @@ async function openTool(row, iconSrc) {
 
     $('drop').hidden = true;
     $('slots').hidden = true;
+    $('options').hidden = true;
+    $('options').innerHTML = '';
     $('outputs').hidden = true;
     $('outputs').innerHTML = '';
     $('actions').hidden = true;
@@ -340,7 +343,11 @@ async function openTool(row, iconSrc) {
     if (!doc.ok) { setStatus(doc.error || 'Could not read this patch.', 'bad'); return; }
 
     const chain = splitChain(doc.codes || []);
-    active = { row, codes: doc.codes, chain, bigEndian: doc.bigEndian };
+    /* `chosen` is this session's answers to the patch's {TAG} questions, keyed
+     * by option group. It survives switching variants, since the tag block is
+     * file-scoped and the question does not change. */
+    active = { row, codes: doc.codes, chain, bigEndian: doc.bigEndian,
+               options: [], chosen: {} };
     /* Every file the required chain needs, in the order it wants them. One
      * for almost every tool; two or three for the patches whose codes work
      * across separate files. */
@@ -372,10 +379,62 @@ function selectVariant(at) {
         : [{ target: targets.length === 1 && active.variants.length > 1 ? '' : (targets[0] || ''),
              label: labels[0] || '', file: null }];
 
+    /* What this variant's codes still want answered. Asked per variant rather
+     * than per patch because a variant the user is not running must not block
+     * the buttons with a question about the other one. */
+    active.options = chainOptions(active.codes, indices);
+
     renderVariants();
+    renderOptions();
     renderSlots();
     renderActions();
 }
+
+/* The {TAG} questions, as one <select> each.
+ *
+ * Deliberately left unanswered: the engine starts at sel = -1 and so does
+ * this. Defaulting to the first value would be a guess about which save the
+ * user is holding, and for L.A. Noire a wrong guess decrypts with the wrong
+ * AES key and hands back garbage that looks like output. A <select> rather
+ * than the chips used for variants, because these lists run to ten entries. */
+function renderOptions() {
+    const groups = active.options;
+    $('options').hidden = !groups.length;
+    if (!groups.length) return;
+
+    $('options').classList.toggle('unset', !optionsReady(groups, active.chosen));
+    $('options').innerHTML = groups.map((g) => {
+        const sel = active.chosen[g.key];
+        const opts = g.values.map((v, i) =>
+            `<option value="${i}"${i === sel ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('');
+        return `
+      <div class="option">
+        <p class="option-head">
+          <span class="option-label">${escapeHtml(g.label)}</span>
+          <span class="option-tag" title="${escapeHtml(g.tag)}">${escapeHtml(g.tag)}</span>
+        </p>
+        <select class="option-pick" data-key="${escapeHtml(g.key)}"
+                aria-label="${escapeHtml(g.label)}">
+          <option value=""${Number.isInteger(sel) ? '' : ' selected'}>Choose…</option>
+          ${opts}
+        </select>
+      </div>`;
+    }).join('')
+      + '<p class="option-why">This patch needs the answer before it can run — '
+      + 'it decides what the codes actually do.</p>';
+}
+
+$('options').addEventListener('change', (ev) => {
+    const pick = ev.target.closest('.option-pick');
+    if (!pick || !active) return;
+    const at = Number(pick.value);
+    if (pick.value === '' || !Number.isInteger(at)) delete active.chosen[pick.dataset.key];
+    else active.chosen[pick.dataset.key] = at;
+
+    $('options').classList.toggle('unset', !optionsReady(active.options, active.chosen));
+    setStatus('');
+    syncActionState();
+});
 
 /* Only shown when there is a choice to make. Black Ops labels its tools by the
  * profile file; MGS HD by the game, read off the patch's own [Group:] heading. */
@@ -425,7 +484,8 @@ function renderActions() {
 }
 
 function syncActionState() {
-    const on = slots.length > 0 && slots.every((s) => s.file);
+    const on = slots.length > 0 && slots.every((s) => s.file)
+        && optionsReady(active?.options || [], active?.chosen);
     $('actions').querySelectorAll('.action').forEach((b) => { b.disabled = !on; });
 }
 
@@ -438,6 +498,7 @@ $('actions').addEventListener('click', (ev) => {
 
 async function run(spec) {
     if (!spec || !active || !slots.length || slots.some((s) => !s.file)) return;
+    if (!optionsReady(active.options, active.chosen)) return;
 
 
     setStatus('');
@@ -463,6 +524,10 @@ async function run(spec) {
         indices: spec.indices,
         files,
         routes: routeChain(active.codes, spec.indices, assign),
+        /* The {TAG} answers, spread back over every code that mentions them —
+         * L.A. Noire asks once and both its decrypt and encrypt code need
+         * setting. */
+        options: optionAssignments(active.options, active.chosen),
         bigEndian: active.bigEndian,
     }, files.map((f) => f.buffer));
 

@@ -44,8 +44,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
-import { splitChain, needsOptions, isRequired, chainTargets, routeChain,
-         chainVariants, splitIndices } from '../web/public/toolkit.js';
+import { splitChain, isRequired, chainTargets, routeChain,
+         chainVariants, splitIndices, chainOptions, optionsReady,
+         optionAssignments } from '../web/public/toolkit.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -69,12 +70,15 @@ const rows = fs.readFileSync(path.join(HERE, 'verify-manifest.tsv'), 'utf8')
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#'))
     .map((l) => {
-        const [platform, titleId, enc, dec, be, variant] = l.split('\t');
+        const [platform, titleId, enc, dec, be, variant, options] = l.split('\t');
         return { platform, titleId, enc, dec, bigEndian: be === '1',
                  /* Optional 6th field: which of a multi-tool patch's variants
                   * this row is about. MGS HD holds Metal Gear Solid 2's whole
                   * chain and then Metal Gear Solid 3's. */
                  variant: Number(variant || 0),
+                 /* Optional 7th field: the answers to the patch's {TAG}
+                  * questions, `;`-separated, each `Value` or `TAG=Value`. */
+                 options: (options || '').split(';').map((s) => s.trim()).filter(Boolean),
                  /* "-" means: this is a checksum fixer, expect no change. */
                  checksumOnly: dec === '-' };
     });
@@ -106,13 +110,63 @@ function chainGroup(fingerprint) {
     return crypto.createHash('sha256').update(fingerprint).digest('hex').slice(0, 8);
 }
 
-function chainFingerprint(indices) {
-    return indices
+function chainFingerprint(indices, codes) {
+    const text = indices
         .map((i) => M.UTF8ToString(M._apw_code_text(i))
             .replace(/\r\n?/g, '\n')
             .split('\n').map((l) => l.replace(/\s+$/, '')).join('\n')
             .trim())
         .join('\n--\n');
+
+    /* A code that references {TAG} does not carry the tag's VALUES: the
+     * `{TAG}a=One;b=Two{/TAG}` block lives at file scope, outside every code.
+     * So two patches could hold identical code text and still behave
+     * differently, and evidence must not transfer between them. Fold the
+     * groups in — but only when there are any, so the fingerprints (and the
+     * group ids in verified.json) of the other 99% stay exactly as they were. */
+    const groups = chainOptions(codes || [], indices);
+    if (!groups.length) return text;
+
+    return `${text}\n--options--\n`
+         + groups.map((g) => `${g.tag}=${g.values.join('|')}`).join('\n');
+}
+
+/*
+ * Turn a row's 7th column into a selection chainOptions can drive.
+ *
+ * Matched on the value's NAME, not its position, so a patch that gains or
+ * reorders its values fails this row loudly instead of quietly verifying a
+ * different branch than the one the row is about. The tag may be left off when
+ * the chain asks exactly one question, which is every case in the database —
+ * writing `LA_NOIRE_AES_CBC256_KEY_OPTION=` out in full buys nothing.
+ */
+function resolveOptions(groups, wanted) {
+    const bare = (t) => String(t).replace(/^\{|\}$/g, '');
+    const chosen = {};
+
+    for (const spec of wanted) {
+        const eq = spec.indexOf('=');
+        const tag = eq >= 0 ? spec.slice(0, eq).trim() : '';
+        const want = (eq >= 0 ? spec.slice(eq + 1) : spec).trim();
+
+        const hits = tag ? groups.filter((g) => bare(g.tag) === bare(tag)) : groups;
+        if (hits.length !== 1)
+            return { error: `option "${spec}" matches ${hits.length} of the chain's `
+                          + `${groups.length} question(s)` };
+
+        const at = hits[0].values.indexOf(want);
+        if (at < 0)
+            return { error: `"${want}" is not one of ${hits[0].tag}'s values `
+                          + `(${hits[0].values.join(', ')})` };
+
+        chosen[hits[0].key] = at;
+    }
+
+    if (!optionsReady(groups, chosen))
+        return { error: `the chain asks ${groups.length} interactive question(s) and `
+                      + `this row answers ${Object.keys(chosen).length}` };
+
+    return { chosen };
 }
 
 function openPatch(file) {
@@ -136,11 +190,6 @@ for (const row of rows) {
     if (!doc) { console.log(`FAIL  ${label}  patch would not parse`); fail++; continue; }
 
     const codes = doc.codes || [];
-    if (needsOptions(codes)) {
-        console.log(`FAIL  ${label}  required codes need an interactive option`);
-        M._apw_close(); fail++; continue;
-    }
-
     const whole = splitChain(codes);
     const variants = chainVariants(codes, [...whole.decrypt, ...whole.rest]);
     if (!variants[row.variant]) {
@@ -153,6 +202,21 @@ for (const row of rows) {
         console.log(`FAIL  ${label}  no ${row.checksumOnly ? 'checksum' : 'decrypt'} step`);
         M._apw_close(); fail++; continue;
     }
+
+    /* Any {TAG} question this chain asks, answered from the row's 7th column.
+     * The engine starts every group at "nothing chosen" and refuses the apply,
+     * so an unanswered one fails here rather than looking like a broken patch
+     * further down. */
+    const groups = chainOptions(codes, steps);
+    const picked = resolveOptions(groups, row.options);
+    if (picked.error) {
+        console.log(`FAIL  ${label}  ${picked.error}`);
+        M._apw_close(); fail++; continue;
+    }
+    /* Selections live on the code and survive apw_reset_vars, so setting them
+     * once here covers the liveness re-runs too. */
+    for (const [index, sel] of Object.entries(optionAssignments(groups, picked.chosen)))
+        sel.forEach((value, group) => M._apw_set_option(Number(index), group, value));
 
     /* One sample, or several. A comma-separated `enc` is a multi-target row:
      * the samples are listed in the same order as chainTargets() wants them,
@@ -222,7 +286,7 @@ for (const row of rows) {
         .map((b, i) => (i < wants.length && !holds(b, wants[i])) ? i : -1)
         .filter((i) => i >= 0);
     const allHeld = bad.length === 0;
-    const fingerprint = chainFingerprint(steps);
+    const fingerprint = chainFingerprint(steps, codes);
 
     /* Liveness, for checksum rows only.
      *
@@ -271,7 +335,11 @@ for (const row of rows) {
     if (ok) {
         pass++;
         const group = chainGroup(fingerprint);
-        results.push([row.platform, row.titleId, chain.kinds, group]);
+        /* A patch can hold more than one row: L.A. Noire is proved twice over,
+         * once per {TAG} branch, against a different pair of samples each
+         * time. The catalog wants the title listed once. */
+        if (!results.some((r) => r[0] === row.platform && r[1] === row.titleId))
+            results.push([row.platform, row.titleId, chain.kinds, group]);
         proven.set(fingerprint, { label, kinds: chain.kinds, group });
         const slack = wants.reduce((n, w, i) => n +
             (w.mode === 'prefix' ? (first.out[i]?.length || 0) - w.buf.length : 0), 0);
@@ -313,12 +381,10 @@ if (catalogPath && !fail) {
         const doc = openPatch(file);
         if (!doc) continue;
         const codes = doc.codes || [];
-        if (needsOptions(codes)) { M._apw_close(); continue; }
-
         const chain = splitChain(codes);
         for (const steps of [chain.decrypt, chain.rest]) {
             if (!steps.length) continue;
-            const fp = chainFingerprint(steps);
+            const fp = chainFingerprint(steps, codes);
             const hit = proven.get(fp);
             if (!hit) continue;
             results.push([platform, titleId, chain.kinds, hit.group]);

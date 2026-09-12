@@ -148,6 +148,43 @@
 .variants { margin: 0 0 12px; }
 .variants .variant { font-size: 13px; }
 
+/* ---- a {TAG} choice the patch leaves to the user ---- */
+
+.options { display: grid; gap: 10px; margin: 0 0 12px; }
+.option-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin: 0 0 6px;
+    font-size: 13px;
+}
+.option-label { font-weight: 600; }
+/* The raw {TAG}. Useful for matching what you see against the .savepatch, and
+   one of them is 34 characters long, so it is capped rather than trusted. */
+.option-tag {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: var(--ink-dim);
+    max-width: 14em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.option-pick {
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 10px;
+    width: 100%;
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+}
+/* Until it is answered this is the one thing standing between the user and
+   the buttons, so it gets the accent outline rather than sitting quiet. */
+.options.unset .option-pick { border-color: var(--accent); }
+.option-why { margin: 6px 0 0; font-size: 12px; color: var(--ink-dim); }
+
 /* ---- the files a tool needs ---- */
 
 .slots { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }

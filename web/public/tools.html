@@ -131,6 +131,12 @@
        profile files, MGS HD's two games. -->
   <div id="variants" class="chips variants" role="group" aria-label="Which tool" hidden></div>
 
+  <!-- Shown only when a required code references a {TAG} block. L.A. Noire
+       asks whether this is a game save or a user profile, because the answer
+       IS the AES key. Nothing is guessed: the action buttons stay disabled
+       until every choice here has been made. -->
+  <div id="options" class="options" hidden></div>
+
   <!-- One row per file the patch needs. Most tools want one and this looks
        like the old "loaded" line; the handful whose required codes span two
        targets (Dead Space, LUNAR, Kingdom Hearts 2.5) show a row each. -->
