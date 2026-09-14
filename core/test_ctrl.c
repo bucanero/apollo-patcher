@@ -39,6 +39,22 @@ static int run_db(const char *query)
     printf("database: %s\n", patchdb_path(db));
     printf("patches:  %d\n", n);
 
+    /* The PSP game-key database travels in the same zip, so the desktop app
+     * can take the console's own encryption off a save with no network. A
+     * bundle built without it leaves every PSP save needing a key typed by
+     * hand, which is worth failing loudly for rather than discovering later. */
+    {
+        char *keys = NULL;
+        size_t klen = 0;
+        if (!patchdb_read_file(db, "PSP/gamekeys.txt", &keys, &klen)) {
+            fprintf(stderr, "psp keys: MISSING (%s)\n", patchdb_last_error());
+            patchdb_close(db);
+            return 1;
+        }
+        printf("psp keys: %zu bytes\n", klen);
+        free(keys);
+    }
+
     /* Per-platform tally, so a bundle missing a whole platform is obvious. */
     for (int i = 0; i < n; i++) {
         const char *plat = patchdb_at(db, i)->platform;

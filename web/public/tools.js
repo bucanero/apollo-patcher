@@ -15,6 +15,9 @@ import { CDN, SAVES_CDN, PSNDB, TMDB, TMDB_KEY } from './cdn.js';
 import { splitChain, chainTargets, targetLabels, routeChain, matchesTarget,
          chainVariants, splitIndices, chainOptions, optionsReady,
          optionAssignments } from './toolkit.js';
+import { initPsp, wrapsNatively, needsKey, pspSfoInfo, pspKeyFor,
+         pspListedFor, pspNativeDecrypt, pspNativeEncrypt,
+         NULL_KEY } from './psp.js';
 
 const PLATFORM_LABEL = { PS3: 'PS3', PS4: 'PS4', PSV: 'PS Vita', PSP: 'PSP', PS2: 'PS2' };
 
@@ -153,6 +156,18 @@ const call = (type, args = {}, transfer = []) =>
 let catalog = [];
 let active = null;      /* { row, codes, chain, bigEndian, targets, labels } */
 let slots = [];         /* one per file the chain needs: { target, label, file } */
+
+/*
+ * The console's own encryption stage, for a platform that has one (the PSP).
+ *
+ * Kept OUTSIDE `slots` deliberately. The slots are the patch's targets and
+ * their indices are what routeChain() assigns codes to, so adding a row for
+ * PARAM.SFO would shift every route by one. This is a stage wrapped around the
+ * whole run, not another target.
+ *
+ * null for every other platform.
+ */
+let stage = null;       /* { sfo, info, listed, key, keyHex, keyNote } */
 
 /* ---- listing ---------------------------------------------------------- */
 
@@ -297,6 +312,10 @@ $('grid').addEventListener('click', (ev) => {
 
 async function openTool(row, iconSrc) {
     active = null; slots = [];
+    /* A fresh stage per game: the key and the PARAM.SFO belong to one save. */
+    stage = wrapsNatively(row.platform)
+        ? { sfo: null, info: null, listed: '', key: NULL_KEY, keyHex: '', keyNote: '' }
+        : null;
     $('tool-title').textContent = row.name;
     $('tool-sub').innerHTML =
         `${escapeHtml(PLATFORM_LABEL[row.platform] || row.platform)} · `
@@ -311,6 +330,8 @@ async function openTool(row, iconSrc) {
 
     $('drop').hidden = true;
     $('slots').hidden = true;
+    $('stage').hidden = !stage;
+    $('stage-key').hidden = true;
     $('options').hidden = true;
     $('options').innerHTML = '';
     $('outputs').hidden = true;
@@ -361,7 +382,112 @@ async function openTool(row, iconSrc) {
     selectVariant(0);
     setStatus('');
     renderActions();
+    renderStage();
 }
+
+/* ---- the console's own encryption stage -------------------------------- */
+
+/*
+ * The PARAM.SFO row, and the game key once one is known.
+ *
+ * Everything here is optional: with no PARAM.SFO the dialog behaves exactly as
+ * it did before, which is right for someone whose file is already unwrapped.
+ * What it must not do is let a run START with half the stage — a PARAM.SFO
+ * present but no key for a keyed save — because that would silently decrypt in
+ * the unkeyed mode and hand back noise. syncActionState() blocks that.
+ */
+function renderStage() {
+    if (!stage) { $('stage').hidden = true; return; }
+    $('stage').hidden = false;
+
+    const sfo = stage.sfo;
+    $('stage-state').textContent = sfo
+        ? (stage.info ? `${stage.info.directory || 'save'} \u00b7 `
+            + (needsKey(stage.info) ? 'keyed' : 'unkeyed') : '')
+        : 'optional';
+
+    $('stage-slot').innerHTML = `
+      <li class="slot${sfo ? ' filled' : ''}">
+        <span class="slot-target">PARAM.SFO</span>
+        <span class="slot-file">${sfo
+            ? `<strong>${escapeHtml(sfo.name)}</strong> <span class="dim">${sfo.bytes.length.toLocaleString()} bytes</span>`
+            : '<span class="dim">not supplied \u2014 the file is treated as already unwrapped</span>'}</span>
+        <button type="button" class="linkish stage-pick">${sfo ? 'change' : 'choose'}</button>
+      </li>`;
+
+    /* Ask for a key only when there is a save on the table that needs one. */
+    const wantKey = stage.info && needsKey(stage.info);
+    $('stage-key').hidden = !wantKey;
+    if (wantKey) {
+        const have = !stage.key.every((b) => b === 0);
+        $('stage-key').innerHTML = `
+          <p class="psp-key-head">
+            <span class="option-label">Game key</span>
+            <span class="psp-key-state${have ? ' good-text' : ''}">${escapeHtml(stage.keyNote)}</span>
+          </p>
+          <div class="psp-key-inputs">
+            <input id="stage-key-hex" type="text" inputmode="latin" spellcheck="false"
+                   autocomplete="off" maxlength="32" placeholder="32 hex digits"
+                   aria-label="Game key, as 32 hex digits"
+                   value="${escapeHtml(stage.keyHex)}">
+          </div>`;
+    }
+    syncActionState();
+}
+
+/* The stage is ready when it is either entirely absent or entirely present. */
+function stageReady() {
+    if (!stage || !stage.sfo) return true;
+    if (!stage.info) return false;
+    return !needsKey(stage.info) || !stage.key.every((b) => b === 0);
+}
+
+async function loadStageSfo(file) {
+    stage.sfo = { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) };
+    setBusy('Reading PARAM.SFO\u2026');
+    const info = await pspSfoInfo(stage.sfo.bytes);
+    setBusy(null);
+
+    if (info.error) {
+        stage.sfo = null;
+        stage.info = null;
+        setStatus(info.error, 'bad');
+        renderStage();
+        return;
+    }
+
+    stage.info = info;
+    stage.listed = pspListedFor(info, slots[0]?.file?.name || slots[0]?.target);
+    const found = await pspKeyFor(info);
+    stage.key = found.key;
+    stage.keyHex = found.hex;
+    stage.keyNote = found.note;
+    setStatus('');
+    renderStage();
+}
+
+$('stage').addEventListener('click', (ev) => {
+    if (!ev.target.closest('.stage-pick')) return;
+    pickInto = 'stage';
+    $('file').multiple = false;
+    $('file').click();
+});
+
+$('stage').addEventListener('input', (ev) => {
+    if (ev.target.id !== 'stage-key-hex' || !stage) return;
+    stage.keyHex = ev.target.value.trim().toUpperCase();
+    if (/^[0-9A-F]{32}$/.test(stage.keyHex)) {
+        stage.key = Uint8Array.from(stage.keyHex.match(/../g), (b) => parseInt(b, 16));
+        stage.keyNote = 'entered by hand';
+    } else {
+        stage.key = NULL_KEY;
+        stage.keyNote = stage.keyHex ? 'needs 32 hex digits' : '';
+    }
+    const el = $('stage-key').querySelector('.psp-key-state');
+    el.textContent = stage.keyNote;
+    el.classList.toggle('good-text', stage.keyHex.length === 32);
+    syncActionState();
+});
 
 /* Choose which of the patch's tools to drive, and rebuild everything that
  * depends on it: the files it wants, and the buttons it offers. */
@@ -485,7 +611,8 @@ function renderActions() {
 
 function syncActionState() {
     const on = slots.length > 0 && slots.every((s) => s.file)
-        && optionsReady(active?.options || [], active?.chosen);
+        && optionsReady(active?.options || [], active?.chosen)
+        && stageReady();
     $('actions').querySelectorAll('.action').forEach((b) => { b.disabled = !on; });
 }
 
@@ -510,10 +637,32 @@ async function run(spec) {
     /* Always start from the bytes the user loaded, so the actions are
      * idempotent: pressing Decrypt twice gives the same file, not a save
      * decrypted twice. */
-    const files = slots.map((s) => ({
-        name: s.file.name,
-        buffer: s.file.bytes.slice().buffer,
-    }));
+    let inputs = slots.map((s) => ({ name: s.file.name, bytes: s.file.bytes }));
+
+    /*
+     * The console's layer comes OFF before the patch's codes run.
+     *
+     * Only for files PARAM.SFO actually lists: a save folder holds ICON0.PNG
+     * and PIC1.PNG too, and those are not wrapped. A tool whose target is not
+     * listed is left alone and says so in the log rather than failing, because
+     * the patch may legitimately be about a file the console does not encrypt.
+     */
+    if (stage?.sfo && spec.key === 'decrypt') {
+        for (let i = 0; i < inputs.length; i++) {
+            const listed = pspListedFor(stage.info, inputs[i].name, stage.listed);
+            if (!listed) continue;
+            const res = await pspNativeDecrypt(stage.sfo.bytes, inputs[i], stage.key);
+            if (res.error) {
+                setBusy(null);
+                syncActionState();
+                setStatus(`The PSP layer would not come off: ${res.error}`, 'bad');
+                return;
+            }
+            inputs[i] = { name: inputs[i].name, bytes: res.bytes };
+        }
+    }
+
+    const files = inputs.map((f) => ({ name: f.name, buffer: f.bytes.slice().buffer }));
 
     /* Which file each code lands on. For a one-slot tool this is every code
      * on the only file, which is what the front-end has always done. */
@@ -546,12 +695,48 @@ async function run(spec) {
         return;
     }
 
+    let out = res.files || [{ name: slots[0].file.name, bytes: res.patched, changed: true }];
+
+    /*
+     * ...and the console's layer goes back ON after the patch's codes, which
+     * is the reverse of the order above and not negotiable: wrapping first
+     * would encrypt the ciphertext.
+     *
+     * This also rewrites PARAM.SFO — the file's hash lives in its
+     * SAVEDATA_FILE_LIST entry — so the SFO joins the outputs and the user has
+     * to save it too. That is why the message below insists on it.
+     */
+    let stagedSfo = null;
+    if (stage?.sfo && spec.key !== 'decrypt') {
+        setBusy('Re-wrapping for the PSP\u2026');
+        let sfoBytes = stage.sfo.bytes;
+        for (let i = 0; i < out.length; i++) {
+            const listed = pspListedFor(stage.info, out[i].name, stage.listed);
+            if (!listed) continue;
+            const wrap = await pspNativeEncrypt(sfoBytes, out[i], listed, stage.key);
+            if (wrap.error) {
+                setBusy(null);
+                setStatus(`The PSP layer would not go back on: ${wrap.error}`, 'bad');
+                return;
+            }
+            /* Carry the rewritten SFO into the next file's wrap, so a
+             * multi-file tool accumulates every hash into one PARAM.SFO
+             * instead of each overwriting the last. */
+            sfoBytes = wrap.sfo;
+            out[i] = { ...out[i], bytes: wrap.bytes, changed: true };
+        }
+        setBusy(null);
+        if (sfoBytes !== stage.sfo.bytes) {
+            stagedSfo = { name: 'PARAM.SFO', bytes: sfoBytes, changed: true };
+            out = [...out, stagedSfo];
+        }
+    }
+
     /* The engine can touch more than one file, and a page cannot reliably
      * start several downloads in a row — browsers block the second. So a
      * single output downloads as it always did, and several are listed with a
      * Save button each. Unchanged files are still offered, greyed: "this one
      * did not need fixing" is useful to see. */
-    const out = res.files || [{ name: slots[0].file.name, bytes: res.patched, changed: true }];
     if (out.length === 1) {
         download(out[0].bytes, suggestName(slots[0].file.name, spec.key));
         setStatus(`${spec.label} done — ${out[0].bytes.length.toLocaleString()} bytes downloaded.`, 'good');
@@ -560,16 +745,26 @@ async function run(spec) {
 
     $('outputs').innerHTML = out.map((f, i) => `
       <div class="output${f.changed ? '' : ' same'}">
-        <span class="output-name">${escapeHtml(active.labels[i] || f.name)}</span>
+        <span class="output-name">${escapeHtml(
+            (i < slots.length && active.labels[i]) || f.name)}</span>
         <span class="output-note">${f.changed
             ? `${f.bytes.length.toLocaleString()} bytes · updated`
             : 'unchanged'}</span>
         <button type="button" class="linkish output-save" data-i="${i}">Save</button>
       </div>`).join('');
     $('outputs').hidden = false;
-    lastOutputs = out.map((f, i) => ({ ...f, as: suggestName(slots[i].file.name, spec.key) }));
+    /* The re-wrapped PARAM.SFO has no slot of its own, so it keeps its own
+     * name rather than borrowing slot 0's. */
+    lastOutputs = out.map((f, i) => ({
+        ...f,
+        as: i < slots.length ? suggestName(slots[i].file.name, spec.key) : f.name,
+    }));
     const n = out.filter((f) => f.changed).length;
-    setStatus(`${spec.label} done — ${n} of ${out.length} file(s) changed. Save each below.`, 'good');
+    setStatus(stagedSfo
+        ? `${spec.label} done. Save BOTH below and put them back in the save folder — `
+          + 'PARAM.SFO was rewritten too, and the save will not load without it.'
+        : `${spec.label} done — ${n} of ${out.length} file(s) changed. Save each below.`,
+        'good');
 }
 
 let lastOutputs = [];
@@ -660,8 +855,21 @@ function slotFor(name, taken) {
 }
 
 async function loadFiles(list, only) {
-    const files = [...(list || [])];
+    let files = [...(list || [])];
     if (!files.length || !slots.length) return;
+
+    /* The console-encryption stage takes its own file, by name or because the
+     * user asked for it explicitly. Pulled out before the slot matching below
+     * ever sees it. */
+    if (stage) {
+        const explicit = only === 'stage';
+        const sfoFile = explicit ? files[0] : files.find((f) => isSfoName(f.name));
+        if (sfoFile) {
+            files = files.filter((f) => f !== sfoFile);
+            await loadStageSfo(sfoFile);
+        }
+        if (explicit || !files.length) return;
+    }
 
     /* When the tools differ only by which file they are for — Black Ops'
      * two profiles — the file the user brought says which one they meant, so
@@ -713,6 +921,11 @@ $('file').addEventListener('change', (ev) => {
     ev.target.value = '';
     $('file').multiple = slots.length > 1;
 });
+
+/* PARAM.SFO is unmistakable by name. Recognising it here means a PSP user can
+ * drop the whole save folder's contents at once and each file lands where it
+ * belongs, instead of the SFO taking the slot meant for the save. */
+const isSfoName = (name) => /^param\.sfo$/i.test(name);
 for (const type of ['dragenter', 'dragover']) {
     $('drop').addEventListener(type, (ev) => { ev.preventDefault(); $('drop').classList.add('over'); });
 }
@@ -721,6 +934,10 @@ for (const type of ['dragleave', 'drop']) {
 }
 $('drop').addEventListener('drop', (ev) => loadFiles(ev.dataTransfer?.files));
 
-$('tool').addEventListener('close', () => { active = null; slots = []; });
+$('tool').addEventListener('close', () => { active = null; slots = []; stage = null; });
+
+/* The PSP savedata panel shares this page's worker -- it is the same wasm
+ * module, with core/psp compiled in, so there is nothing else to start. */
+initPsp(call);
 
 boot();

@@ -153,10 +153,184 @@ function codeState(index) {
     };
 }
 
+/* ---- PSP savedata ------------------------------------------------------
+ *
+ * The PSP's own encryption, which wraps a save BELOW anything a .savepatch
+ * touches. No session, no patch: these run for any PSP save at all.
+ *
+ * Buffers are copied into the wasm heap by hand rather than through
+ * withBytes(), because each call needs two or three live at once. Note that
+ * M.HEAPU8 is re-read after every allocation and after every call: the module
+ * is built with ALLOW_MEMORY_GROWTH, and a malloc that grows memory detaches
+ * whatever view was captured before it.
+ */
+
+function alloc(bytes) {
+    const ptr = M._malloc(bytes.length || 1);
+    M.HEAPU8.set(bytes, ptr);
+    return ptr;
+}
+
+/* Copy a heap range out. Always a copy: the wasm side frees this buffer on
+ * the next PSP call, and growth can detach the view before then anyway. */
+function heapCopy(ptr, len) {
+    return new Uint8Array(M.HEAPU8.subarray(ptr, ptr + len));
+}
+
+/* Whatever the last PSP call produced, or null. */
+function pspOut() {
+    const ptr = M._apw_psp_out();
+    const len = M._apw_psp_out_size();
+    return ptr && len > 0 ? heapCopy(ptr, len) : null;
+}
+
+const pspError = (rc) => M.UTF8ToString(M._apw_psp_error(rc));
+
 const handlers = {
     async version() {
         await ready();
         return { version: M.UTF8ToString(M._apw_version()) };
+    },
+
+    /*
+     * What a PARAM.SFO says about its save: the directory name (which is the
+     * game-key lookup), the mode byte, and the list of files that are
+     * encrypted at all. Everything the PSP panel needs to render itself.
+     */
+    async pspInfo({ sfo }) {
+        await ready();
+        const bytes = new Uint8Array(sfo);
+        const ptr = alloc(bytes);
+        try {
+            const info = JSON.parse(
+                M.UTF8ToString(M._apw_psp_sfo_json(ptr, bytes.length)));
+            return info.ok ? info : { ok: false, error: info.error };
+        } finally {
+            M._free(ptr);
+        }
+    },
+
+    /* A game key out of a dumper's file (SGKeyDumper 0x10, SGDeemer 0x600).
+     * The recognised shapes live in C so the page and the desktop app agree. */
+    async pspKeyFromFile({ buffer }) {
+        await ready();
+        const bytes = new Uint8Array(buffer);
+        const src = alloc(bytes);
+        const dst = M._malloc(16);
+        try {
+            const rc = M._apw_psp_key_from_file(src, bytes.length, dst);
+            if (rc !== 0) return { ok: false, error: pspError(rc) };
+            const key = heapCopy(dst, 16);
+            return {
+                ok: true,
+                key,
+                hex: [...key].map((b) => b.toString(16).padStart(2, '0'))
+                             .join('').toUpperCase(),
+            };
+        } finally {
+            M._free(src);
+            M._free(dst);
+        }
+    },
+
+    /*
+     * A game key out of apollo-patches' PSP/gamekeys.txt, by save directory.
+     *
+     * The page fetches the file; the matching happens in C, so the prefix rule
+     * and its longest-match tie-break are shared with the desktop app instead
+     * of reimplemented here. (That tie-break is load-bearing: the database
+     * holds both NPJJ30022 and NPJJ30022GAME1, with different keys.)
+     */
+    async pspKeyFromDb({ text, directory }) {
+        await ready();
+        const bytes = new TextEncoder().encode(text);
+        const tp = alloc(bytes);
+        const dp = M.stringToNewUTF8(directory || '');
+        const kp = M._malloc(16);
+        const ip = M._malloc(64);
+        try {
+            const rc = M._apw_psp_key_from_db(tp, bytes.length, dp, kp, ip, 64);
+            if (rc !== 0) return { ok: false, error: pspError(rc) };
+            const key = heapCopy(kp, 16);
+            /* `entry`, not `id`: the reply envelope is {id, ok, ...result},
+             * so a result field called `id` overwrites the message id and the
+             * page never matches the reply to its request. */
+            return {
+                ok: true,
+                key,
+                entry: M.UTF8ToString(ip),
+                hex: [...key].map((b) => b.toString(16).padStart(2, '0'))
+                             .join('').toUpperCase(),
+            };
+        } finally {
+            M._free(tp); M._free(dp); M._free(kp); M._free(ip);
+        }
+    },
+
+    async pspDecrypt({ sfo, data, name, key }) {
+        await ready();
+        const s = new Uint8Array(sfo);
+        const d = new Uint8Array(data);
+        const k = new Uint8Array(key);
+        const sp = alloc(s), dp = alloc(d), kp = alloc(k);
+        try {
+            const rc = M._apw_psp_decrypt(sp, s.length, dp, d.length, kp);
+            if (rc !== 0) return { ok: false, error: pspError(rc) };
+            return { ok: true, files: [{ name, bytes: pspOut(), changed: true }] };
+        } finally {
+            M._free(sp); M._free(dp); M._free(kp);
+        }
+    },
+
+    /*
+     * Encryption rewrites PARAM.SFO as well as producing the data file -- the
+     * file's own hash goes into its SAVEDATA_FILE_LIST entry, and the two
+     * SFO-wide hashes are regenerated over the result. Both come back, in the
+     * same `files` shape apply() uses, because a save put back with a stale
+     * PARAM.SFO does not load and the page must not offer only one of them.
+     */
+    async pspEncrypt({ sfo, data, name, key }) {
+        await ready();
+        const s = new Uint8Array(sfo);
+        const d = new Uint8Array(data);
+        const k = new Uint8Array(key);
+        const sp = alloc(s), dp = alloc(d), kp = alloc(k);
+        /* The name has to cross as a C string, not a JS one: it is the
+         * SAVEDATA_FILE_LIST entry the hash gets written into. */
+        const np = M.stringToNewUTF8(name || '');
+        try {
+            const rc = M._apw_psp_encrypt(sp, s.length, np, dp, d.length, kp);
+            if (rc !== 0) return { ok: false, error: pspError(rc) };
+            /* The SFO was rewritten in place, at the pointer we passed in. */
+            return {
+                ok: true,
+                files: [
+                    { name, bytes: pspOut(), changed: true },
+                    { name: 'PARAM.SFO', bytes: heapCopy(sp, s.length), changed: true },
+                ],
+            };
+        } finally {
+            M._free(sp); M._free(dp); M._free(kp); M._free(np);
+        }
+    },
+
+    /* Regenerate the PARAM.SFO hashes alone -- what an already-plaintext save
+     * needs after something edited it. */
+    async pspResign({ sfo }) {
+        await ready();
+        const s = new Uint8Array(sfo);
+        const sp = alloc(s);
+        try {
+            const rc = M._apw_psp_resign(sp, s.length);
+            if (rc !== 0) return { ok: false, error: pspError(rc) };
+            const bytes = heapCopy(sp, s.length);
+            return {
+                ok: true,
+                files: [{ name: 'PARAM.SFO', bytes, changed: !sameBytes(bytes, s) }],
+            };
+        } finally {
+            M._free(sp);
+        }
     },
 
     /* Parse a .savepatch held in memory and return the full code list. */

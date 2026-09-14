@@ -256,14 +256,36 @@
 # their patches are on apollo-patches main. They moved down to the
 # checksum-only block with the rest of their kind.
 #
-# Samurai Warriors 4 is the one still parked, and not on a patch: NPUB31564 is
-# correct as written and verifies UNMODIFIED against the sample. What it needs
-# is apollo-lib's sw4_checksum host-endianness fix, which stored four native-
-# endian words as a 16-byte blob the variable reader passes through raw, so a
-# little-endian build wrote the checksum reversed. Fixed on apollo-lib branch
-# `fixes`; pages.yml checks out apollo-lib with no `ref`, so the deployed wasm
-# only gets it once that branch reaches main.
-#PS3	NPUB31564	sw4-checksum-fixer/samples/DATA.BIN	-	1
+# Samurai Warriors 4 was parked here too, and not on a patch: NPUB31564 is
+# correct as written and verifies UNMODIFIED. What it needed was apollo-lib's
+# sw4_checksum host-endianness fix -- four native-endian words stored as a
+# 16-byte blob, a length the variable reader passes through raw, so a
+# little-endian build wrote the checksum reversed. That reached apollo-lib main
+# in 190e8f1 "Fixes (#74)", which is what pages.yml builds (it checks out
+# apollo-lib with no `ref`), so the row is live in the checksum-only block
+# below.
+#
+# THE CONSOLE'S OWN LAYER (8th column, `psp=<32 hex digits>` or `psp=-`).
+#
+# A PSP save is wrapped twice: the console encrypts it with a per-title game
+# key, and the game encrypts what is inside that. Every sample below is the
+# INNER form, because that is where the reference decrypters start -- so
+# nothing here exercised the outer wrapper, and the tools page's PSP cards now
+# take it off before the patch runs and put it back after.
+#
+# A row carrying `psp=` has this suite wrap the sample as a console would have
+# stored it (a PARAM.SFO fixture plus the real game key), then requires the
+# full two-stage chain to reach the same plaintext a one-stage row reaches --
+# and, on the way back, to reproduce the wrapped bytes exactly. The key is the
+# one from apollo-patches PSP/gamekeys.txt, which is where the page gets it;
+# `-` is for a game the console stores unkeyed.
+#
+# What that proves is the COMPOSITION -- order, routing, both directions. It
+# does not re-prove the console layer itself: core/test_psp.c does that against
+# known-answer vectors taken from the unmodified apollo-psp implementation, and
+# against real console-written saves. A row without `psp=` is unaffected and
+# still proves the patch alone, which is also what the page does when no
+# PARAM.SFO is supplied.
 #
 # ROUND TRIP. Every decrypt row also re-encrypts what the decrypt produced and
 # requires the original encrypted sample back, byte for byte. Without it the
@@ -492,6 +514,7 @@ PS3	BLUS31476	tears2-checksum-fixer/samples/GAMEDATA.DAT	-	1
 PS3	BLUS31533	toz-checksum-fixer/samples/SAVE.PS3	-	1
 PS3	NPEB02078	digimon-checksum-fixer/samples/SAVEDATA	-	1
 PS3	NPUB31126	ducktales-checksum-fixer/samples/SAVE.DAT	-	1
+PS3	NPUB31564	sw4-checksum-fixer/samples/DATA.BIN	-	1
 PS3	NPUB31675	toz-checksum-fixer/samples/SAVE.PS3	-	1
 PS4	CUSA03617	mafia3-checksum-fixer/samples/HEAD	-	0
 PS4	CUSA03652	mafia3-checksum-fixer/samples/HEAD	-	0
@@ -512,18 +535,18 @@ PS4	CUSA00053	mearth-checksum-fixer/samples/SYSTEM.DAT.mordor	-	0
 PS4	CUSA04402	mearth-checksum-fixer/samples/SYSTEM.DAT.war	-	0
 PS4	CUSA03856	re6-checksum-fixer/samples/savedata.bin	-	0
 PS4	CUSA00057	strider-checksum-fixer/samples/SaveData	-	0
-PSP	UCES01241	invizimals-checksum-fixer/samples/GAMEDATA.UCES01241	-	0
-PSP	UCES01411	invizimals-checksum-fixer/samples/GAMEDATA.UCES01411	-	0
-PSP	UCES01581	invizimals-checksum-fixer/samples/GAMEDATA.UCES01581	-	0
+PSP	UCES01241	invizimals-checksum-fixer/samples/GAMEDATA.UCES01241	-	0	0		psp=0A020300000000000000000000000000
+PSP	UCES01411	invizimals-checksum-fixer/samples/GAMEDATA.UCES01411	-	0	0		psp=0A020300000000000000000000000000
+PSP	UCES01581	invizimals-checksum-fixer/samples/GAMEDATA.UCES01581	-	0	0		psp=0A020300000000000000000000000000
 PSV	PCSE00896	trails-cs-unpacker/samples/vitacs2.save000.dat.pack	trails-cs-unpacker/samples/vitacs2.save000.dat.unpack	0	0	noroundtrip
 # Monster Hunter on PSP. One sample per save file, not per region: all three
 # MHP2ndG releases share MHP2NDG.BIN and each patch is proved against it on
 # its own terms (its chain, byte-equality), so nothing is inferred across
 # regions here.
-PSP	ULUS10391	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0
+PSP	ULUS10391	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0	0		psp=4A1FF359AEB6EFF81CA8CB23BCA57BB3
 PSP	ULES01213	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0
-PSP	ULJM05500	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0	0	noroundtrip
-PSP	ULJM05800	monsterhunter-psp-decrypter/samples/MHP3RD.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP3RD.BIN.DEC	0
+PSP	ULJM05500	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP2NDG.BIN.DEC	0	0	noroundtrip	psp=CD1F2059AE70EF68DCA24513B45ADB0A
+PSP	ULJM05800	monsterhunter-psp-decrypter/samples/MHP3RD.BIN.ENC	monsterhunter-psp-decrypter/samples/MHP3RD.BIN.DEC	0	0		psp=E305CEFAEB46B031859A275BDF32D863
 # PS3 checksum fixers whose sample is named for the game rather than a title
 # ID. Each is a single-game (or single-file) tool, so which patch the sample
 # belongs to is not in doubt; the proof is still per-patch.

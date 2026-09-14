@@ -34,6 +34,7 @@
 #include "portable-file-dialogs.h"   // header-only native dialogs (osascript/zenity/Win32)
 #include "apollo_ctrl.h"   // manages its own C linkage (and apollo.h is C++-safe)
 #include "patchdb.h"       // bundled apollo-patches.zip (browsable database)
+#include "psp_savedata.h"  // the PSP's own savedata encryption, below any patch
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -85,6 +86,34 @@ struct AppState {
     bool                show_log = false; // log pane collapsed by default
     bool                open_apply_popup = false;
     std::string         apply_msg;
+
+    // ---- the PSP's own savedata encryption -------------------------------
+    //
+    // A PSP save is wrapped twice: the console encrypts it with a per-title
+    // game key, and the game encrypts what is inside that. Every .savepatch
+    // addresses the INNER layer, so a file copied straight off a Memory Stick
+    // goes into the engine and comes back as noise that looks like output.
+    //
+    // The desktop app has something the web page does not — the folder. So
+    // this is DETECTED rather than asked for: choose a target, and if a
+    // PARAM.SFO sits beside it that lists the file, everything below fills
+    // itself in, key included. See psp_detect().
+    struct Psp {
+        bool        found = false;      // a PARAM.SFO beside the target lists it
+        bool        wrap  = true;       // unwrap before patching, re-wrap after
+        std::string sfo_path;           // the PARAM.SFO that was found
+        std::string directory;          // SAVEDATA_DIRECTORY, the key lookup
+        std::string listed;             // the SAVEDATA_FILE_LIST entry to use
+        int         mode = 0;           // SAVEDATA_PARAMS[0]
+        bool        keyed = false;      // ...does it need a game key at all
+        unsigned char key[APSP_KEY_LEN] = {0};
+        bool        have_key = false;
+        std::string key_note;           // where the key came from, for the UI
+        char        key_hex[33] = "";   // the editable field
+
+        void clear() { *this = Psp(); }
+    };
+    Psp psp;
 
     void append_log(const char* line) {
         std::lock_guard<std::mutex> lk(log_mtx);
@@ -156,6 +185,15 @@ static ImVec4 type_color(int t) {
 
 // Returns true if every option group of a code has a selection (sel >= 0).
 // The engine initialises sel to -1, so an untouched required option blocks apply.
+// A detected PSP save with the wrap asked for but no game key yet is the one
+// state Apply must refuse. The file on disk is still the console's ciphertext,
+// and running codes over it writes damage that looks exactly like a result --
+// the failure mode this whole layer exists to prevent. Untick the box (for a
+// file that is already plaintext) or supply a key.
+static bool psp_blocked() {
+    return g_app.psp.found && g_app.psp.wrap && !g_app.psp.have_key;
+}
+
 static bool code_options_ready(apctl_code_t* c) {
     for (int g = 0; g < apctl_opt_group_count(c); ++g)
         if (apctl_opt_get_selected(c, g) < 0) return false;
@@ -386,6 +424,198 @@ static bool hex_write_back() {
     return true;
 }
 
+// ---- the PSP's own savedata encryption -------------------------------------
+//
+// Everything here is buffer work; core/psp does the crypto. What the desktop
+// app adds over the web page is that it can look around: the save folder is
+// right there, so the PARAM.SFO, the file list and the game key are all found
+// rather than asked for.
+
+static bool read_all(const std::string& path, std::vector<unsigned char>& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return true;
+}
+
+static bool write_all(const std::string& path, const unsigned char* data, size_t len) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out.write(reinterpret_cast<const char*>(data), (std::streamsize)len);
+    return (bool)out;
+}
+
+static std::string dir_of(const std::string& path) {
+    size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
+}
+
+// The game key, from the database in the bundle. Offline by design: the same
+// file the web page fetches from the CDN travels in apollo-patches.zip, so the
+// desktop app needs no network to open a save. The MATCHING is C shared with
+// the page (apsp_key_from_db) — prefix against the save directory, longest
+// entry wins, which matters because the database holds both NPJJ30022 and
+// NPJJ30022GAME1 with different keys.
+static bool psp_key_from_bundle(const std::string& directory,
+                                unsigned char key[APSP_KEY_LEN], std::string& note) {
+    char*  text = nullptr;
+    size_t len  = 0;
+
+    if (!g_db.db || !patchdb_read_file(g_db.db, "PSP/gamekeys.txt", &text, &len)) {
+        note = "no key database in the bundle";
+        return false;
+    }
+
+    char entry[64] = "";
+    int rc = apsp_key_from_db(text, len, directory.c_str(), key, entry, sizeof entry);
+    free(text);
+
+    if (rc != APSP_OK) { note = apsp_strerror(rc); return false; }
+    note = std::string("from the Apollo database (") + entry + ")";
+    return true;
+}
+
+// Is the chosen target a PSP save the console encrypted? Answered by looking
+// for a PARAM.SFO beside it that LISTS it — the file list is the authoritative
+// answer to what is wrapped, and a save folder holds ICON0.PNG too.
+static void psp_detect() {
+    g_app.psp.clear();
+    if (g_app.target_path.empty()) return;
+
+    const std::string sfo_path = dir_of(g_app.target_path) + "PARAM.SFO";
+    std::vector<unsigned char> sfo;
+    if (!read_all(sfo_path, sfo) || apsp_sfo_valid(sfo.data(), sfo.size()) != APSP_OK)
+        return;
+
+    const char* target = base_name(g_app.target_path);
+    const int n = apsp_sfo_file_count(sfo.data(), sfo.size());
+    for (int i = 0; i < n; i++) {
+        char name[APSP_NAME_LEN + 1];
+        if (apsp_sfo_file_name(sfo.data(), sfo.size(), i, name, sizeof name) != APSP_OK)
+            continue;
+        if (strcmp(name, target) == 0) { g_app.psp.listed = name; break; }
+    }
+    // A file the SFO does not name is not wrapped; say nothing rather than
+    // offering to decrypt something that was never encrypted.
+    if (g_app.psp.listed.empty()) return;
+
+    char dir[64] = "";
+    apsp_sfo_directory(sfo.data(), sfo.size(), dir, sizeof dir);
+
+    g_app.psp.found     = true;
+    g_app.psp.sfo_path  = sfo_path;
+    g_app.psp.directory = dir;
+    g_app.psp.mode      = apsp_sfo_mode(sfo.data(), sfo.size());
+    g_app.psp.keyed     = (g_app.psp.mode & APSP_MODE_KEYED) != 0;
+
+    if (!g_app.psp.keyed) {
+        g_app.psp.have_key = true;             // the null key IS the key
+        g_app.psp.key_note = "not needed - this save is unkeyed";
+    } else if (psp_key_from_bundle(g_app.psp.directory, g_app.psp.key,
+                                   g_app.psp.key_note)) {
+        g_app.psp.have_key = true;
+        for (int i = 0; i < APSP_KEY_LEN; i++)
+            snprintf(g_app.psp.key_hex + i * 2, 3, "%02X", g_app.psp.key[i]);
+    }
+
+    char msg[512];
+    snprintf(msg, sizeof msg, "PSP save detected: %s in %s, mode 0x%02X, key %s",
+             g_app.psp.listed.c_str(), g_app.psp.directory.c_str(),
+             g_app.psp.mode & 0xFF, g_app.psp.key_note.c_str());
+    g_app.append_log(msg);
+}
+
+// Take the console's layer off the target file, in place. Returns false and
+// logs on failure; the caller must not carry on patching a file that is still
+// encrypted.
+static bool psp_unwrap_target() {
+    std::vector<unsigned char> sfo, enc;
+    if (!read_all(g_app.psp.sfo_path, sfo) || !read_all(g_app.target_path, enc)) {
+        g_app.append_log("[!] PSP: could not read the save or its PARAM.SFO");
+        return false;
+    }
+
+    const size_t want = apsp_decrypted_size(enc.size());
+    std::vector<unsigned char> out(want ? want : 1);
+    size_t got = 0;
+    int rc = apsp_decrypt(sfo.data(), sfo.size(), enc.data(), enc.size(),
+                          g_app.psp.key, out.data(), out.size(), &got);
+    if (rc != APSP_OK) {
+        g_app.append_log((std::string("[!] PSP decrypt failed: ") + apsp_strerror(rc)).c_str());
+        return false;
+    }
+    if (!write_all(g_app.target_path, out.data(), got)) {
+        g_app.append_log("[!] PSP: could not write the decrypted save");
+        return false;
+    }
+
+    char msg[256];
+    snprintf(msg, sizeof msg, "PSP layer removed: %zu -> %zu bytes", enc.size(), got);
+    g_app.append_log(msg);
+    return true;
+}
+
+// ...and put it back, rewriting PARAM.SFO with it. Both files are written or
+// neither is: a save whose PARAM.SFO does not match its data does not load, so
+// a half-done wrap is worse than none.
+static bool psp_wrap_target() {
+    std::vector<unsigned char> sfo, plain;
+    if (!read_all(g_app.psp.sfo_path, sfo) || !read_all(g_app.target_path, plain)) {
+        g_app.append_log("[!] PSP: could not read the save or its PARAM.SFO");
+        return false;
+    }
+
+    std::vector<unsigned char> out(apsp_encrypted_size(plain.size()));
+    size_t got = 0;
+    int rc = apsp_encrypt(sfo.data(), sfo.size(), g_app.psp.listed.c_str(),
+                          plain.data(), plain.size(), g_app.psp.key,
+                          out.data(), out.size(), &got);
+    if (rc != APSP_OK) {
+        g_app.append_log((std::string("[!] PSP encrypt failed: ") + apsp_strerror(rc)).c_str());
+        return false;
+    }
+
+    // PARAM.SFO first. If the data write then fails the save is inconsistent
+    // either way, but this order leaves the SFO describing bytes that CAN be
+    // produced again by re-running the wrap, rather than data nothing
+    // describes.
+    if (!write_all(g_app.psp.sfo_path, sfo.data(), sfo.size())) {
+        g_app.append_log("[!] PSP: could not write PARAM.SFO");
+        return false;
+    }
+    if (!write_all(g_app.target_path, out.data(), got)) {
+        g_app.append_log("[!] PSP: could not write the encrypted save");
+        return false;
+    }
+
+    char msg[256];
+    snprintf(msg, sizeof msg, "PSP layer restored: %zu -> %zu bytes, PARAM.SFO rewritten",
+             plain.size(), got);
+    g_app.append_log(msg);
+    return true;
+}
+
+// Regenerate the PARAM.SFO hashes alone — what an already-plaintext save needs
+// after something edited it.
+static bool psp_resign() {
+    std::vector<unsigned char> sfo;
+    if (!read_all(g_app.psp.sfo_path, sfo)) {
+        g_app.append_log("[!] PSP: could not read PARAM.SFO");
+        return false;
+    }
+    int rc = apsp_resign(sfo.data(), sfo.size());
+    if (rc != APSP_OK) {
+        g_app.append_log((std::string("[!] PSP resign failed: ") + apsp_strerror(rc)).c_str());
+        return false;
+    }
+    if (!write_all(g_app.psp.sfo_path, sfo.data(), sfo.size())) {
+        g_app.append_log("[!] PSP: could not write PARAM.SFO");
+        return false;
+    }
+    g_app.append_log("PARAM.SFO resigned");
+    return true;
+}
+
 static void load_patch(const std::string& path) {
     g_app.close();
     apctl_session_t* s = apctl_open_file(path.c_str());
@@ -526,6 +756,30 @@ static void apply_selected() {
     g_app.append_log(g_app.big_endian ? "=== Using big-endian data mode"
                                       : "=== Using host (little-endian) data mode");
 
+    // The console's own layer comes OFF before any code runs and goes back ON
+    // after — the reverse order, which is not negotiable: wrapping first would
+    // encrypt the ciphertext. If it will not come off, stop: patching a file
+    // that is still encrypted writes plausible-looking damage.
+    if (psp_blocked()) {
+        g_app.apply_msg = "This is a PSP save and its game key is not known yet, so "
+                          "nothing was patched.\nSupply the key, or untick the unwrap "
+                          "box if the file is already decrypted.";
+        g_app.open_apply_popup = true;
+        return;
+    }
+
+    const bool psp = g_app.psp.found && g_app.psp.wrap && g_app.psp.have_key && target;
+    if (psp) {
+        g_app.append_log("=== Removing the PSP's own encryption");
+        if (!psp_unwrap_target()) {
+            g_app.show_log = true;
+            g_app.apply_msg = "The PSP layer would not come off, so nothing was patched.\n"
+                              "Check the log for details.";
+            g_app.open_apply_popup = true;
+            return;
+        }
+    }
+
     int applied = 0, errors = 0;
     for (int i = 0; i < apctl_code_count(g_app.session); ++i) {
         if (!g_app.selected[i]) continue;
@@ -543,10 +797,28 @@ static void apply_selected() {
     snprintf(buf, sizeof buf, "Patching completed: %d codes applied, %d error(s)", applied, errors);
     g_app.append_log(buf);
 
+    // Re-wrap even when a code failed: the file on disk is the decrypted save
+    // either way, and leaving it that way would be leaving the user with
+    // something the console cannot read and no obvious way back.
+    bool rewrapped = true;
+    if (psp) {
+        g_app.append_log("=== Restoring the PSP's own encryption");
+        rewrapped = psp_wrap_target();
+        if (!rewrapped) errors++;
+    }
+
     // Result pop-up message.
-    char msg[160];
+    char msg[256];
     if (errors == 0) {
-        snprintf(msg, sizeof msg, "All done — %d code(s) applied successfully.", applied);
+        snprintf(msg, sizeof msg, "All done — %d code(s) applied successfully.%s", applied,
+                 psp ? "\nThe PSP layer was taken off and put back, and PARAM.SFO"
+                       " was rewritten with it." : "");
+    } else if (psp && !rewrapped) {
+        g_app.show_log = true;
+        snprintf(msg, sizeof msg,
+                 "The PSP layer could not be put back, so the save on disk is "
+                 "DECRYPTED.\nCheck the log, then use \"Re-encrypt\" below once the "
+                 "cause is fixed.");
     } else {
         g_app.show_log = true;   // reveal the log so the user can inspect
         snprintf(msg, sizeof msg, "%d of %d code(s) failed to apply.\nCheck the log for details.",
@@ -586,6 +858,7 @@ static std::string pick_save_path(const std::string& suggested) {
 static bool g_pending_open   = false;
 static bool g_pending_target = false;
 static bool g_pending_save_patch = false;
+static bool g_pending_psp_key = false;
 static void do_open_patch()    { g_pending_open = true; }
 static void do_choose_target() { g_pending_target = true; }
 static void do_save_patch()    { g_pending_save_patch = true; }
@@ -650,7 +923,32 @@ static void process_pending_dialogs() {
     if (g_pending_target) {
         g_pending_target = false;
         std::string p = pick_file(nullptr);
-        if (!p.empty()) g_app.target_path = p;
+        if (!p.empty()) {
+            g_app.target_path = p;
+            // Look around the new target for a PARAM.SFO that lists it, so a
+            // PSP save announces itself instead of having to be declared.
+            psp_detect();
+        }
+    }
+    if (g_pending_psp_key) {
+        g_pending_psp_key = false;
+        std::string p = pick_file(nullptr);
+        if (!p.empty()) {
+            std::vector<unsigned char> buf;
+            int rc = read_all(p, buf)
+                ? apsp_key_from_buffer(buf.data(), buf.size(), g_app.psp.key)
+                : APSP_ERR_ARG;
+            if (rc == APSP_OK) {
+                g_app.psp.have_key = true;
+                g_app.psp.key_note = std::string("read from ") + base_name(p);
+                for (int i = 0; i < APSP_KEY_LEN; i++)
+                    snprintf(g_app.psp.key_hex + i * 2, 3, "%02X", g_app.psp.key[i]);
+            } else {
+                g_app.psp.key_note = apsp_strerror(rc);
+                g_app.append_log((std::string("[!] PSP key file: ") + apsp_strerror(rc)
+                                  + " (expected SGKeyDumper's 16 bytes or SGDeemer's 1536)").c_str());
+            }
+        }
     }
     if (g_pending_save_patch) {
         g_pending_save_patch = false;
@@ -1113,6 +1411,94 @@ static void draw_menu_bar(bool* want_quit) {
     }
 }
 
+//
+// The PSP savedata section. Shown only when psp_detect() found a PARAM.SFO
+// beside the target that lists it, so it never appears for the 99% of saves it
+// has nothing to say about.
+//
+// The checkbox is the main event and defaults to ON: a detected PSP save is
+// almost always one somebody wants patched, and doing it by hand means three
+// steps in the right order. The three buttons below are for the other case —
+// opening a save in the hex editor, or repairing one that a failed run left
+// decrypted.
+//
+static void draw_psp_section() {
+    if (!g_app.psp.found) return;
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("PSP save");
+
+    ImGui::Checkbox("Unwrap the console's encryption before patching, and put it back after",
+                    &g_app.psp.wrap);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The PSP encrypts saves itself, underneath whatever the game does,\n"
+                          "and a .savepatch only ever addresses the inner layer.\n"
+                          "Leave this on unless the file is already decrypted.");
+
+    ImGui::TextDisabled("%s in %s - mode 0x%02X, %s", g_app.psp.listed.c_str(),
+                        g_app.psp.directory.c_str(), g_app.psp.mode & 0xFF,
+                        g_app.psp.keyed ? "keyed" : "unkeyed");
+
+    // The game key. Found in the bundled database for a game Apollo knows;
+    // otherwise typed, or read from a dumper's file. Never guessed: without
+    // one, everything here stays disabled rather than quietly decrypting in
+    // the unkeyed mode and handing back noise.
+    if (g_app.psp.keyed) {
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
+        if (ImGui::InputText("Game key", g_app.psp.key_hex, sizeof g_app.psp.key_hex,
+                             ImGuiInputTextFlags_CharsHexadecimal |
+                             ImGuiInputTextFlags_CharsUppercase)) {
+            g_app.psp.have_key =
+                apsp_key_from_hex(g_app.psp.key_hex, g_app.psp.key) == APSP_OK;
+            g_app.psp.key_note = g_app.psp.have_key
+                ? "entered by hand"
+                : (g_app.psp.key_hex[0] ? "needs 32 hex digits" : "");
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Load key file...")) g_pending_psp_key = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("SGKeyDumper's 16 bytes, or SGDeemer's 1536.");
+
+        ImGui::SameLine();
+        if (g_app.psp.have_key)
+            ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.55f, 1.0f), "%s", g_app.psp.key_note.c_str());
+        else
+            ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f), "%s",
+                               g_app.psp.key_note.empty() ? "no key yet"
+                                                          : g_app.psp.key_note.c_str());
+    }
+
+    ImGui::BeginDisabled(!g_app.psp.have_key);
+    if (ImGui::Button("Decrypt only")) {
+        if (psp_unwrap_target()) {
+            g_app.psp.wrap = false;   // it is plaintext now; do not unwrap twice
+            g_app.show_log = true;
+        }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Take the console's layer off and leave it off, for editing\n"
+                          "the file by hand. Turns the checkbox above off.");
+    ImGui::SameLine();
+    if (ImGui::Button("Re-encrypt")) {
+        if (psp_wrap_target()) {
+            g_app.psp.wrap = true;
+            g_app.show_log = true;
+        }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Put the console's layer back on, and rewrite PARAM.SFO\n"
+                          "with the file's new hash.");
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    if (ImGui::Button("Resign PARAM.SFO")) { psp_resign(); g_app.show_log = true; }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Recompute the PARAM.SFO hashes alone. Needs no game key -\n"
+                          "for a save that was never encrypted.");
+
+    ImGui::Spacing();
+}
+
 static void draw_main_window(bool* want_quit) {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
@@ -1164,6 +1550,8 @@ static void draw_main_window(bool* want_quit) {
                               "Edits are written only when you ask.");
     }
 
+    draw_psp_section();
+
     ImGui::Checkbox("Back up target (.bak) before patching", &g_app.backup);
 
     // Data byte order — equivalent of the CLI's -b/--big-endian flag. Applied
@@ -1191,7 +1579,8 @@ static void draw_main_window(bool* want_quit) {
 
     // --- action row ---
     bool blocked = has_unfilled_selection();
-    ImGui::BeginDisabled(blocked || !g_app.session || count_selected() == 0);
+    bool psp_wait = psp_blocked();
+    ImGui::BeginDisabled(blocked || psp_wait || !g_app.session || count_selected() == 0);
     if (ImGui::Button("Apply selected", ImVec2(140, 0))) apply_selected();
     ImGui::EndDisabled();
     ImGui::SameLine();
@@ -1200,6 +1589,10 @@ static void draw_main_window(bool* want_quit) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f),
                            "Fill the required options on the highlighted codes first.");
+    } else if (psp_wait) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f),
+                           "This PSP save needs its game key, or untick the unwrap box.");
     }
 
     // --- collapsible log ---

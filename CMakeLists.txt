@@ -63,6 +63,13 @@ set(MBEDTLS_DIR "${APOLLO_ROOT}/mbedtls-2.16.12")
 # core/patchdb.c reads the bundled patch database (apollo-patches.zip). The web
 # build does not use it — the page fetches patches over the network instead —
 # but it costs nothing to carry in the shared library.
+#
+# core/psp/ is the PSP's own savedata encryption — the layer BELOW anything a
+# .savepatch does, and the reason a save taken straight off a Memory Stick used
+# to come out of the patch engine as garbage. Vendored from apollo-psp; see the
+# note at the top of core/psp/psp_savedata.c for why it lives here rather than
+# in apollo-lib, and what would move it there. It needs only mbedTLS's AES and
+# SHA1, both of which the engine already links.
 # ---------------------------------------------------------------------------
 set(ENGINE_SRCS
     ${APOLLO_ROOT}/source/crc_util.c
@@ -75,12 +82,18 @@ set(ENGINE_SRCS
     ${APOLLO_ROOT}/source/wildcard.c
     ${APOLLO_ROOT}/source/upy.c)
 
-add_library(apollo_engine STATIC ${ENGINE_SRCS} core/apollo_ctrl.c core/patchdb.c)
+set(PSP_SRCS
+    core/psp/kirk_engine.c
+    core/psp/psp_savedata.c)
+
+add_library(apollo_engine STATIC ${ENGINE_SRCS} ${PSP_SRCS}
+                                 core/apollo_ctrl.c core/patchdb.c)
 target_include_directories(apollo_engine PUBLIC
     ${APOLLO_ROOT}/include
     ${APOLLO_ROOT}/tools          # provides dbglogger.h prototype
     ${MBEDTLS_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/core)
+    ${CMAKE_CURRENT_SOURCE_DIR}/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/psp)
 target_compile_definitions(apollo_engine PRIVATE _GNU_SOURCE _USE_MBEDTLS)
 
 # mbedcrypto: prefer the prebuilt static lib (built by CI), else expect a
@@ -108,6 +121,14 @@ target_link_libraries(apollo_engine PUBLIC ${MBEDCRYPTO_LIB} z m)
 # ---------------------------------------------------------------------------
 add_executable(apollo_ctrl_test core/test_ctrl.c)
 target_link_libraries(apollo_ctrl_test PRIVATE apollo_engine)
+
+# PSP savedata: bounds checks on the PARAM.SFO parser, and known-answer vectors
+# taken from the unmodified apollo-psp implementation, so a pass says the
+# vendored copy is byte-faithful to what ships on the console rather than
+# merely self-consistent. Needs no sample save; `--save DIR FILE KEY` runs a
+# real one when you have it.
+add_executable(apollo_psp_test core/test_psp.c)
+target_link_libraries(apollo_psp_test PRIVATE apollo_engine)
 
 # ---------------------------------------------------------------------------
 # Front-ends.

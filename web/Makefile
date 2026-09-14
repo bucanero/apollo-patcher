@@ -34,7 +34,7 @@ APOLLO_LIB ?= $(patsubst %/include/apollo.h,%,$(firstword \
 #                 used to be embedded, which cost every visitor 133KB gzipped
 #                 for something 1.6% of patches use, and froze them at build
 #                 time while the patches importing them were fetched live.
-#   PS3/ PS4/ ... the ~2200 .savepatch files themselves, which the page lets
+#   PS3/ PS4/ ... the ~2250 .savepatch files themselves, which the page lets
 #                 users browse. Only an INDEX is built in (dist/patches.json);
 #                 the patches are fetched from a CDN at runtime, so a patch fix
 #                 upstream does not need a redeploy here.
@@ -60,7 +60,13 @@ TOOLS       = $(DIST)/tools.json
 # it; a plain build just reads it, so dist/ can be wiped without losing it.
 VERIFIED    = ../tools/verified.json
 
-SRCS        = src/apollo_wasm.c ../core/apollo_ctrl.c
+# ../core/psp/ is the PSP's own savedata encryption -- the layer below
+# anything a .savepatch does. It needs only mbedTLS's AES and SHA1, which
+# this module already links for libapollo's own decrypters, so it rides in
+# the same wasm rather than a second one: ~10KB gzipped against a separate
+# module's duplicated crypto, second heap and second instantiate.
+SRCS        = src/apollo_wasm.c ../core/apollo_ctrl.c \
+			  ../core/psp/kirk_engine.c ../core/psp/psp_savedata.c
 STATIC      = $(wildcard public/*)
 
 CC          = emcc
@@ -113,6 +119,7 @@ CFLAGS      = -O3 -Wall \
 			  -I$(APOLLO_LIB)/tools \
 			  -I$(APOLLO_LIB)/mbedtls-2.16.12/include \
 			  -I../core \
+			  -I../core/psp \
 			  --use-port=zlib
 
 # -sSTACK_SIZE: Emscripten's 64KB default is below MicroPython's own 40KB stack
@@ -135,7 +142,7 @@ LDFLAGS     = -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=worker \
 			  --profiling-funcs \
 			  -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4MB -sINVOKE_RUN=0 \
 			  -sEXPORTED_RUNTIME_METHODS='["FS","UTF8ToString","stringToNewUTF8","HEAPU8"]' \
-			  -sEXPORTED_FUNCTIONS='["_malloc","_free","_apw_version","_apw_is_be","_apw_open","_apw_close","_apw_codes_json","_apw_code_text","_apw_set_code_text","_apw_code_is_edited","_apw_code_flags","_apw_set_code_type","_apw_code_type","_apw_export_patch","_apw_export_size","_apw_export_mismatches","_apw_revert_code","_apw_set_option","_apw_apply","_apw_reset_vars"]'
+			  -sEXPORTED_FUNCTIONS='["_malloc","_free","_apw_version","_apw_is_be","_apw_open","_apw_close","_apw_codes_json","_apw_code_text","_apw_set_code_text","_apw_code_is_edited","_apw_code_flags","_apw_set_code_type","_apw_code_type","_apw_export_patch","_apw_export_size","_apw_export_mismatches","_apw_revert_code","_apw_set_option","_apw_apply","_apw_reset_vars","_apw_psp_sfo_json","_apw_psp_key_from_file","_apw_psp_key_from_db","_apw_psp_decrypt","_apw_psp_encrypt","_apw_psp_resign","_apw_psp_out","_apw_psp_out_size","_apw_psp_error"]'
 
 .PHONY: all serve verify clean
 
@@ -171,7 +178,7 @@ $(MODULE): $(SRCS) $(LIBAPOLLO) $(LIBMBED) Makefile | $(DIST)
 		$(DIST)/apollo.wasm -o $(DIST)/apollo.wasm $(WASM_FEATURES)
 	@echo "built $@ (--spill-pointers applied)"
 
-# The browsable index of the database. Reading ~2200 files is trivial here and
+# The browsable index of the database. Reading ~2250 files is trivial here and
 # impossible from a browser, so the page fetches this instead of crawling.
 $(INDEX): ../tools/build-index.py $(PYTHON_MODULES) | $(DIST)
 	@python3 ../tools/build-index.py $(APOLLO_PATCHES) $@
@@ -180,7 +187,7 @@ $(INDEX): ../tools/build-index.py $(PYTHON_MODULES) | $(DIST)
 # fix a checksum, of the ones proven against a real save.
 #
 # --verified-only is the whole scoping decision for the first release. The
-# catalog knows about 1148 patches; 37 of them have been run end to end by
+# catalog knows about 1156 patches; 187 of them have been run end to end by
 # `make verify`, and only those are listed. Drop the flag to publish the rest
 # as an unverified long tail — but then the page promises something nobody has
 # checked.

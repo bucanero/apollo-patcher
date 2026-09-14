@@ -9,10 +9,50 @@ drive the same `libapollo` engine the console apps use.
 | Front-end | What it is |
 |-----------|------------|
 | [`gui/`](gui/README.md) | Native desktop app (Dear ImGui + GLFW) for Windows, macOS and Linux — with the patch database bundled offline |
-| [`web/`](web/README.md) | The engine compiled to WebAssembly, running in a browser tab — the patcher, with the patch database searchable in-page, plus a **tools page** offering one decrypt / re-encrypt pair per game |
+| [`web/`](web/README.md) | The engine compiled to WebAssembly, running in a browser tab — the patcher, with the patch database searchable in-page, plus a **tools page** offering one decrypt / re-encrypt pair per game, and a **PSP savedata panel** for the console's own encryption |
 
 The command-line tools (`patcher`, `dumper`) and the engine itself live in
 [apollo-lib](https://github.com/bucanero/apollo-lib).
+
+## PSP savedata
+
+A PSP save is encrypted twice. The console wraps it with a per-title game key
+before the game's own encryption is anywhere in the picture, and every PSP
+patch in the database addresses only the inner layer — so a file copied
+straight off a Memory Stick used to go into the patch engine and come back as
+noise that looked like output.
+
+`core/psp/` is that outer layer, vendored from
+[apollo-psp](https://github.com/bucanero/apollo-psp) (`kirk_engine.c` and
+`psp_decrypter.c`, at `17cb5ea`) and reworked into a buffer API with no stdio,
+because there is no filesystem in a browser tab. The PARAM.SFO parsing is
+bounds-checked against the length it is handed rather than trusting the offsets
+inside the file — the difference between a save off your own console and one a
+stranger put on the web.
+
+It needs only mbedTLS's AES and SHA1, which both front-ends already link, so it
+rides in the existing wasm module (about 12KB gzipped) rather than a second one.
+
+Both front-ends reach it, and they reach it differently because one of them can
+look around. The web page asks for `PARAM.SFO` and fetches the game key from
+apollo-patches' `PSP/gamekeys.txt` over the CDN; the desktop app has the save
+folder, so it *detects* the whole thing from the target you pick and reads the
+same key database out of `apollo-patches.zip`, offline. The matching rule —
+prefix against the save directory, longest entry wins — is one C function they
+share, because the tie-break is load-bearing: the database holds both
+`NPJJ30022` and `NPJJ30022GAME1`, with different keys.
+
+`core/test_psp.c` pins it to the unmodified upstream implementation: the
+known-answer digests come from apollo-psp's own code compiled for the host, so
+a pass says the vendored copy is byte-faithful to what ships on the console
+rather than merely self-consistent. The whole chain has been checked against a
+real console save — the plaintext it produces matches what the reference
+Monster Hunter decrypter validates by the game's own stored SHA-1.
+
+The better long-term home for this is apollo-lib, shared with apollo-psp and
+apollo-vita instead of copied a third time. That waits on apollo-vita finishing
+its migration to mbedTLS, since its copy is still on polarSSL and that is the
+only substantive difference between the two upstream versions.
 
 ## Layout
 
@@ -20,6 +60,9 @@ The command-line tools (`patcher`, `dumper`) and the engine itself live in
 core/     apollo_ctrl.[ch] — stdio-free engine facade, shared by both front-ends
                              (incl. the PS3 big-endian guess both apply)
           patchdb.[ch]     — reads the bundled patch database (apollo-patches.zip)
+          psp/             — the PSP's own savedata encryption, the layer below
+                             any patch; vendored from apollo-psp, see above
+          test_psp.c       — its known-answer vectors, taken from that upstream
 gui/      Dear ImGui desktop app
 web/      WebAssembly build + static site
 tools/    build-index.py   — patch index, for both front-ends; also the
@@ -28,12 +71,12 @@ tools/    build-index.py   — patch index, for both front-ends; also the
           make-bundle.py   — apollo-patches.zip, for the desktop app
 ```
 
-Both front-ends let you search the ~2240 patches in
+Both front-ends let you search the ~2250 patches in
 [apollo-patches](https://github.com/bucanero/apollo-patches) by game name or
 title ID, so nobody has to go hunting for a `.savepatch` first. They get there
 differently, on purpose: the web page fetches patches and Python helper modules
 from a CDN as it needs them, while the desktop app carries the whole database in
-a 2.8MB zip built by CI and works offline. A page is a download you make every
+a 2.7MB zip built by CI and works offline. A page is a download you make every
 visit; an app is one you keep.
 
 `core/apollo_ctrl.c` is the only code that adapts libapollo's data model for a
@@ -56,13 +99,15 @@ per game instead of a code list.
 python3 tools/build-index.py /path/to/apollo-patches tools.json --format=tools
 ```
 
-1148 of the 2240 patches qualify (540 distinct games): 906 can fix a checksum,
-242 can decrypt and re-encrypt, and 43 of those go through offzip. 15KB
-gzipped. `--verified=FILE` marks the ones `verify-tools.mjs` has proved against
-a real save — 107 today, across 51 tools — and `--verified-only` emits nothing else, which is
-what the web tools page ships, so it promises only what has been run. Each row is `[platform, title_id, name, kinds, files]`, where `kinds`
-holds `d` decrypt, `e` re-encrypt, `c` checksum, `z` offzip, and `files` names
-what the user should supply.
+1156 of the 2247 patches qualify, covering 509 distinct games once a game's
+regions are folded together: 913 are checksum-only, 243 can decrypt and
+re-encrypt, and 43 of those go through offzip. 15KB gzipped.
+`--verified=FILE` marks the ones `verify-tools.mjs` has proved against a real
+save — 187 today, across 79 distinct code chains — and `--verified-only` emits
+nothing else, which is what the web tools page ships, so it promises only what
+has been run. Each row is `[platform, title_id, name, kinds, files]`, where
+`kinds` holds `d` decrypt, `e` re-encrypt, `c` checksum, `z` offzip, and
+`files` names what the user should supply.
 
 Two things it deliberately does not do:
 
@@ -77,7 +122,7 @@ Two things it deliberately does not do:
 - **It does not decide which codes to run.** The engine stays the source of
   truth for that: the page opens the patch, reads the real code list back, and
   applies the required ones in file order. The catalog only answers "which
-  games have a tool, and what kind" — the question you cannot ask 2240 files
+  games have a tool, and what kind" — the question you cannot ask 2247 files
   from a browser.
 
 ## Building
@@ -117,7 +162,9 @@ cmake --build build -j
 Targets:
 - `apollo_patcher_gui` — the desktop app (macOS: `build/gui/apollo_patcher_gui.app`)
 - `apollo_ctrl_test` — headless lister, proves parity with `patcher <file>`
-- `-DAPOLLO_BUILD_GUI=OFF` builds only the engine + headless test (no GL needed)
+- `apollo_psp_test` — the PSP savedata checks; needs no sample save, and takes
+  `--save DIR FILE KEY` to run a real one
+- `-DAPOLLO_BUILD_GUI=OFF` builds only the engine + headless tests (no GL needed)
 
 ### Web
 
