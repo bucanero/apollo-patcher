@@ -88,13 +88,49 @@ cmake --build build
 **Find a game...** (or Ctrl+F) searches the ~2250 patches from
 [apollo-patches](https://github.com/bucanero/apollo-patches) by game name or
 title ID and loads the one you pick — the same flow as the web front-end, but
-offline. CI builds the database into `apollo-patches.zip` and ships it in the
-artifact (`tools/make-bundle.py`).
+offline.
+
+The database is `apollo-patches.zip`, built by `tools/make-bundle.py`. **The
+CMake build makes it for you**, from the same `apollo-patches` checkout the web
+build uses (`./apollo-patches`, then `../apollo-patches`, or
+`-DAPOLLO_PATCHES=...`), and copies it into the app — `Contents/Resources` for
+a macOS `.app`, beside the executable elsewhere. It lands at
+`build/apollo-patches.zip` too, which is next to `apollo_ctrl_test`, so
+`--db` works with no environment variable.
+
+It is optional and never fails a build: with no patch checkout, or no Python,
+configuring says what is missing and carries on. The app then opens
+`.savepatch` files by hand as before, and the browser explains itself.
+
+Rebuilds are tracked — the glob over the patch files is `CONFIGURE_DEPENDS`, so
+pulling new patches rebuilds the zip and refreshes the app's copy on the next
+build. A build with nothing changed does neither.
 
 Where it looks, in order: `$APOLLO_PATCHES_ZIP`, next to the executable,
 `../Resources/` (so a macOS `.app` is self-contained), then the working
-directory. Without it the app still opens `.savepatch` files by hand; the
-browser just explains what is missing.
+directory.
+
+### The patch finds itself
+
+Every title ID in the database is exactly nine characters, on every platform,
+and a save folder is named after it with an optional suffix — `ULUS10391`,
+`ULJM05500DATA00`, `UCUS98751_DATA01`. So **choosing a target usually identifies
+the game**: the first nine characters of the folder are looked up in the
+database, and for a PSP save the `SAVEDATA_DIRECTORY` out of `PARAM.SFO` is
+preferred over the folder on disk, since that is what the console recorded and
+it survives a rename.
+
+With no patch open it loads outright. With one already open it only *offers* —
+a line naming the game and a button — because loading closes the current
+session along with any edited code bodies in it, and discarding somebody's work
+to be helpful is not a trade worth making.
+
+An exact match against a real title ID is the whole guard, which is what keeps
+it quiet: across the 792 real PSP save folders in
+[apollo-saves](https://github.com/bucanero/apollo-saves) it matches 23 and
+nothing else — `Brave_Story_New_Traveler` and a folder called `Downloads` name
+no game, and neither does `Copy of ULUS101890001`, since the id has to be at
+the front. Those open a patch by hand as before.
 
 Patches are read straight out of the zip, so there is nothing to unpack. The
 Python helper modules are the exception — MicroPython's `import` goes through
@@ -154,6 +190,36 @@ user with something the console cannot read and no obvious way back.
 
 The crypto is `../core/psp/`, vendored from apollo-psp and pinned to it by
 `core/test_psp.c`; see the [top-level README](../README.md#psp-savedata).
+
+## Opening things
+
+```bash
+apollo_patcher_gui [FILE...]
+```
+
+A `.savepatch` is opened as the patch; anything else is opened as the save to
+patch, which pulls in everything that follows from it — the PSP game key, and
+that game's patch from the database. Arguments are taken in the order given, so
+an explicit patch beats the one a save's title ID would have auto-loaded,
+whichever way round they are written. `--help` prints this and exits.
+
+**A folder works too**, which is the obvious thing to drag for a PSP save: its
+`PARAM.SFO` already says which files the console encrypted, and the first of
+those becomes the target. So
+
+```bash
+apollo_patcher_gui /Volumes/PSP/PSP/SAVEDATA/ULUS10391
+```
+
+opens the save, finds its key, and loads Monster Hunter Freedom Unite's patch —
+from the folder alone. A folder that is not a PSP save says so rather than
+becoming a target nothing can read.
+
+Files can also be **dropped on the window**, which takes the same route. Note
+that on macOS a `.app` launched from Finder is handed documents through Apple
+Events rather than `argv`, so dragging onto the Dock icon is not the same
+gesture and is not wired up — the command line covers a terminal, a script and
+a Windows/Linux file association, and the drop handler covers the window.
 
 ## Viewing and editing data
 
@@ -233,6 +299,11 @@ The crypto is `../core/psp/`, vendored from apollo-psp and pinned to it by
 - **PSP savedata**: the console's own encryption, detected from the save
   folder and taken off and put back around Apply. See [PSP saves](#psp-saves)
   above.
+- **The patch finds itself**: choosing a target looks its title ID up in the
+  bundled database and loads that game's patch, or offers it when one is
+  already open.
+- **Files on the command line and dropped on the window**, including a PSP save
+  folder. See [Opening things](#opening-things).
 
 ## Known caveats / TODO
 - **Linux dialogs:** portable-file-dialogs needs a dialog helper present at

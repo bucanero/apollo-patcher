@@ -139,7 +139,8 @@ git clone https://github.com/bucanero/apollo-patches   # web build only
 Both front-ends need that third clone: the web build embeds the patch
 database's `python/` helper modules, and the desktop build bundles the whole
 database. Neither is required to *compile* — only to produce a release with a
-searchable database.
+searchable database. The desktop build finds it the same two ways it finds
+apollo-lib, or takes `-DAPOLLO_PATCHES=/path/to/apollo-patches`.
 
 Both build systems look for it in two places: `./apollo-lib` inside this repo
 first (which is what CI produces, and where a submodule would sit), then
@@ -160,7 +161,13 @@ cmake --build build -j
 ```
 
 Targets:
-- `apollo_patcher_gui` — the desktop app (macOS: `build/gui/apollo_patcher_gui.app`)
+- `apollo_patcher_gui` — the desktop app (macOS: `build/gui/apollo_patcher_gui.app`).
+  Takes files on the command line, or dropped on its window: a `.savepatch`, a
+  save, or a PSP save folder
+- `apollo_patches_bundle` — `apollo-patches.zip`, the database the app browses
+  and the PSP game keys it needs. Built automatically when an `apollo-patches`
+  checkout is present (see below) and copied into the app; skipped with a
+  message when it is not, never fatal
 - `apollo_ctrl_test` — headless lister, proves parity with `patcher <file>`
 - `apollo_psp_test` — the PSP savedata checks; needs no sample save, and takes
   `--save DIR FILE KEY` to run a real one

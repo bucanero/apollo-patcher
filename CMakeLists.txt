@@ -117,6 +117,89 @@ endif()
 target_link_libraries(apollo_engine PUBLIC ${MBEDCRYPTO_LIB} z m)
 
 # ---------------------------------------------------------------------------
+# apollo-patches.zip — the patch database the desktop app browses.
+#
+# Built here rather than only in CI, because the failure when it is missing is
+# silent: the app starts, "Find a game..." lists nothing, and PSP saves ask for
+# a game key that is sitting in the database nobody built. The zip is also what
+# `apollo_ctrl_test --db` reads, and it lands beside that binary, so the test
+# needs no $APOLLO_PATCHES_ZIP either.
+#
+# Optional on purpose. The patch database is a separate checkout that is NOT
+# needed to compile anything, so a missing one (or a missing Python) says so
+# and carries on — it must never be the reason a build fails.
+#
+# Found the same two ways apollo-lib is, and overridable the same way:
+#   -DAPOLLO_PATCHES=/path/to/apollo-patches
+# ---------------------------------------------------------------------------
+set(APOLLO_PATCHES "" CACHE PATH "Path to the apollo-patches checkout")
+
+if(APOLLO_PATCHES)
+    set(_patches_candidates "${APOLLO_PATCHES}")
+else()
+    set(_patches_candidates
+        "${CMAKE_CURRENT_SOURCE_DIR}/apollo-patches"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../apollo-patches")
+endif()
+
+set(_patches_found "")
+foreach(_dir IN LISTS _patches_candidates)
+    if(EXISTS "${_dir}/PSP/gamekeys.txt")
+        get_filename_component(_patches_found "${_dir}" ABSOLUTE)
+        break()
+    endif()
+endforeach()
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+
+set(APOLLO_BUNDLE "")
+if(_patches_found AND Python3_Interpreter_FOUND)
+    set(APOLLO_BUNDLE "${CMAKE_BINARY_DIR}/apollo-patches.zip")
+
+    # CONFIGURE_DEPENDS so a `git pull` in the patch database is noticed: the
+    # glob is re-run at build time and a changed list triggers a reconfigure.
+    # It costs one directory sweep per build over ~2250 files.
+    #
+    # The platform list mirrors PLATFORMS in tools/make-bundle.py; a console
+    # added there and not here means its patches stop triggering a rebuild,
+    # not that they are left out of the zip.
+    file(GLOB APOLLO_BUNDLE_INPUTS CONFIGURE_DEPENDS
+        "${_patches_found}/PS2/*.savepatch"
+        "${_patches_found}/PS3/*.savepatch"
+        "${_patches_found}/PS4/*.savepatch"
+        "${_patches_found}/PSP/*.savepatch"
+        "${_patches_found}/PSV/*.savepatch"
+        "${_patches_found}/python/*.py")
+
+    add_custom_command(
+        OUTPUT  "${APOLLO_BUNDLE}"
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-bundle.py"
+                "${_patches_found}" "${APOLLO_BUNDLE}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-bundle.py"
+                "${_patches_found}/PSP/gamekeys.txt"
+                ${APOLLO_BUNDLE_INPUTS}
+        COMMENT "Building the patch database (apollo-patches.zip)"
+        VERBATIM)
+
+    add_custom_target(apollo_patches_bundle ALL DEPENDS "${APOLLO_BUNDLE}")
+    message(STATUS "Patch database from ${_patches_found}")
+elseif(NOT _patches_found)
+    string(REPLACE ";" "\n    " _patches_tried "${_patches_candidates}")
+    message(STATUS
+        "apollo-patches not found, so apollo-patches.zip will not be built.\n"
+        "  Looked for PSP/gamekeys.txt under:\n    ${_patches_tried}\n"
+        "  The app runs without it, but the game browser is empty and PSP saves\n"
+        "  cannot look up their game key. Clone it beside this repo, or pass\n"
+        "  -DAPOLLO_PATCHES=/path/to/apollo-patches.")
+else()
+    message(STATUS
+        "No Python interpreter, so apollo-patches.zip will not be built "
+        "(tools/make-bundle.py needs one). The app runs without it; the game "
+        "browser will be empty.")
+endif()
+
+# ---------------------------------------------------------------------------
 # Headless parity test (no GUI deps) — always buildable.
 # ---------------------------------------------------------------------------
 add_executable(apollo_ctrl_test core/test_ctrl.c)

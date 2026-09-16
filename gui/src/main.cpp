@@ -16,6 +16,7 @@
 #include <cstring>   // strlen/strstr over the engine's C strings
 #include <fstream>
 #include <mutex>
+#include <sys/stat.h>   // telling a save FOLDER from a save file (see open_path)
 
 #include "imgui.h"
 #include "imgui_internal.h"   // PushItemFlag + ImGuiItemFlags_MixedValue (tri-state)
@@ -86,6 +87,14 @@ struct AppState {
     bool                show_log = false; // log pane collapsed by default
     bool                open_apply_popup = false;
     std::string         apply_msg;
+
+    // The database patch this target's own location names, or -1. Every title
+    // ID in the database is exactly 9 characters and save folders are named
+    // <TITLEID><suffix> ("ULUS10391", "ULJM05500DATA00", "UCUS98751_DATA01"),
+    // so the folder answers "which game is this" without asking. See
+    // detect_patch_for_target().
+    int                 match_index = -1;
+    std::string         match_label;      // "PSP/ULUS10391.savepatch"
 
     // ---- the PSP's own savedata encryption -------------------------------
     //
@@ -445,6 +454,16 @@ static bool write_all(const std::string& path, const unsigned char* data, size_t
     return (bool)out;
 }
 
+static bool is_dir(const std::string& path) {
+#ifdef _WIN32
+    const DWORD a = GetFileAttributesA(path.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
 static std::string dir_of(const std::string& path) {
     size_t slash = path.find_last_of("/\\");
     return slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
@@ -706,6 +725,127 @@ static void refilter_db() {
     g_db.refilter = false;
 }
 
+//
+// Which patch in the database this target's own location names, or -1.
+//
+// Every title ID in the database is exactly nine characters, on every platform,
+// and a save folder is named after it with an optional suffix — "ULUS10391",
+// "ULJM05500DATA00", "UCUS98751_DATA01". So the first nine characters of the
+// folder are the lookup, and an EXACT match against a real title ID is the
+// guard: "Downloads" and "Brave_Sto" match nothing, which is the right answer
+// for a loose file and for the handful of games that name their save folder
+// after themselves rather than their title.
+//
+// The PSP's SAVEDATA_DIRECTORY is preferred over the folder on disk when there
+// is one: it is what the console recorded, and survives someone renaming the
+// directory on the way off the Memory Stick.
+//
+static int detect_patch_for_target() {
+    g_app.match_index = -1;
+    g_app.match_label.clear();
+    if (!g_db.db || g_app.target_path.empty()) return -1;
+
+    std::string from = g_app.psp.found && !g_app.psp.directory.empty()
+                     ? g_app.psp.directory
+                     : std::string();
+    if (from.empty()) {
+        // The containing folder's own name. dir_of() keeps its trailing
+        // separator, so drop that before taking the last component.
+        std::string dir = dir_of(g_app.target_path);
+        if (!dir.empty()) dir.erase(dir.size() - 1);
+        size_t slash = dir.find_last_of("/\\");
+        from = slash == std::string::npos ? dir : dir.substr(slash + 1);
+    }
+    if (from.size() < 9) return -1;
+
+    const std::string id = lowered(from.substr(0, 9));
+    for (int i = 0; i < patchdb_count(g_db.db); i++) {
+        const patchdb_entry_t* e = patchdb_at(g_db.db, i);
+        if (!e || lowered(e->title_id) != id) continue;
+        // A title ID belongs to one platform in practice (the letters say
+        // which), but if the PSP detection already spoke, believe it.
+        if (g_app.psp.found && strcmp(e->platform, "PSP") != 0) continue;
+        g_app.match_index = i;
+        g_app.match_label = std::string(e->platform) + "/" + e->title_id + ".savepatch";
+        return i;
+    }
+    return -1;
+}
+
+// Defined below, next to the database browser it belongs to.
+static void load_patch_from_db(int index);
+
+//
+// Take `path` as the save to patch, and work out everything that follows from
+// it. Shared by the "Choose target..." dialog, the command line and files
+// dropped on the window, so all three behave identically.
+//
+static void adopt_target(const std::string& path) {
+    g_app.target_path = path;
+
+    // Look around the new target for a PARAM.SFO that lists it, so a PSP save
+    // announces itself instead of having to be declared.
+    psp_detect();
+
+    // ...and for the patch its title ID names. Loaded outright only when
+    // nothing is open: load_patch_from_db() closes the current session, and
+    // silently discarding somebody's edited codes to be helpful is not a trade
+    // worth making. With a patch already open this only offers (see
+    // draw_main_window).
+    if (detect_patch_for_target() >= 0 && !g_app.session) {
+        g_app.append_log(("Save matches " + g_app.match_label
+                          + " - loading it from the database").c_str());
+        load_patch_from_db(g_app.match_index);
+    }
+}
+
+//
+// Open whatever this path is.
+//
+// A .savepatch is the patch; anything else is the save to patch. Decided on
+// the extension rather than by sniffing, so it matches what the file dialogs
+// filter on and stays predictable — a patch under another name can still be
+// opened through File > Open.
+//
+// Used by the command line, by files dropped on the window, and so by
+// whatever a desktop environment does with a file association.
+//
+static void open_path(const std::string& path) {
+    // A FOLDER, which for a PSP save is the obvious thing to drag: the whole
+    // directory off the Memory Stick. Its PARAM.SFO already says which files
+    // the console encrypted, and the first of those is what a patch is about,
+    // so take that as the target. Anything else about the folder — the key,
+    // the patch — follows from it as usual.
+    //
+    // Taking the directory itself as the target, which is what happened
+    // before this, produced a target nothing could read and no explanation.
+    if (is_dir(path)) {
+        std::vector<unsigned char> sfo;
+        char name[APSP_NAME_LEN + 1];
+        const std::string sfo_path = path + "/PARAM.SFO";
+
+        if (read_all(sfo_path, sfo) &&
+            apsp_sfo_valid(sfo.data(), sfo.size()) == APSP_OK &&
+            apsp_sfo_file_count(sfo.data(), sfo.size()) > 0 &&
+            apsp_sfo_file_name(sfo.data(), sfo.size(), 0, name, sizeof name) == APSP_OK) {
+            adopt_target(path + "/" + name);
+            return;
+        }
+        g_app.append_log(("[!] " + path + " is a folder, and not a PSP save one "
+                          "(no PARAM.SFO listing an encrypted file). Pick the "
+                          "save file itself.").c_str());
+        return;
+    }
+
+    const size_t dot = path.find_last_of('.');
+    const std::string ext = dot == std::string::npos ? std::string()
+                                                     : lowered(path.substr(dot));
+    if (ext == ".savepatch")
+        load_patch(path);
+    else
+        adopt_target(path);
+}
+
 static void load_patch_from_db(int index) {
     const patchdb_entry_t* e = patchdb_at(g_db.db, index);
     if (!e) return;
@@ -923,12 +1063,7 @@ static void process_pending_dialogs() {
     if (g_pending_target) {
         g_pending_target = false;
         std::string p = pick_file(nullptr);
-        if (!p.empty()) {
-            g_app.target_path = p;
-            // Look around the new target for a PARAM.SFO that lists it, so a
-            // PSP save announces itself instead of having to be declared.
-            psp_detect();
-        }
+        if (!p.empty()) adopt_target(p);
     }
     if (g_pending_psp_key) {
         g_pending_psp_key = false;
@@ -1550,6 +1685,27 @@ static void draw_main_window(bool* want_quit) {
                               "Edits are written only when you ask.");
     }
 
+    // The patch this save's title ID names, when it is not the one already
+    // open. Never swapped in silently from here: the session being replaced
+    // may carry edited code bodies and ticked rows, and this is a one-click
+    // offer rather than a surprise.
+    if (g_app.match_index >= 0 && g_app.patch_path != g_app.match_label) {
+        const patchdb_entry_t* e = patchdb_at(g_db.db, g_app.match_index);
+        ImGui::TextColored(ImVec4(0.80f, 0.80f, 0.95f, 1.0f),
+                           "This save is %s%s%s",
+                           g_app.match_label.c_str(),
+                           (e && e->name && *e->name) ? " - " : "",
+                           (e && e->name) ? e->name : "");
+        ImGui::SameLine();
+        if (ImGui::SmallButton(g_app.session ? "Load its patch instead"
+                                             : "Load its patch"))
+            load_patch_from_db(g_app.match_index);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Open this game's patch from the bundled database.%s",
+                              g_app.session ? "\nThe patch open now is closed, "
+                                              "along with any code edits in it." : "");
+    }
+
     draw_psp_section();
 
     ImGui::Checkbox("Back up target (.bak) before patching", &g_app.backup);
@@ -1671,9 +1827,53 @@ static void fatal(const std::string& msg) {
 #endif
 }
 
-int main(int, char**) {
+// Files dragged onto the window. GLFW delivers these on the main thread from
+// glfwPollEvents(), so touching app state here is safe.
+//
+// This is what "drag the app a file" means on macOS: a .app launched from
+// Finder is handed documents through Apple Events, not argv, so the command
+// line below covers a terminal, a script and a Windows/Linux file association,
+// and this covers the gesture people actually reach for.
+static void drop_cb(GLFWwindow*, int count, const char** paths) {
+    for (int i = 0; i < count; i++)
+        if (paths[i] && *paths[i]) open_path(paths[i]);
+}
+
+static void print_usage(const char* argv0) {
+    fprintf(stderr,
+        "Apollo Save Patcher\n"
+        "\n"
+        "  %s [FILE...]\n"
+        "\n"
+        "A .savepatch is opened as the patch; anything else is opened as the\n"
+        "save to patch, which also looks up its game key and its patch in the\n"
+        "bundled database. Files can be dropped on the window instead.\n"
+        "\n"
+        "  $APOLLO_PATCHES_ZIP   where to find apollo-patches.zip\n",
+        argv0 && *argv0 ? argv0 : "apollo_patcher_gui");
+}
+
+int main(int argc, char** argv) {
     apctl_set_log_sink(log_sink, &g_app);
     init_patchdb();
+
+    // Opened before the window exists: everything here only touches app state
+    // and the log, which the panel picks up when it first draws.
+    //
+    // In the order given, so an explicit patch beats the one a save's title ID
+    // would have auto-loaded, whichever way round they are written.
+    for (int i = 1; i < argc; i++) {
+        if (!argv[i] || !*argv[i]) continue;
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        }
+        // macOS hands a Finder-launched .app a -psn_... process serial number.
+        // It is not a file and predates modern launch services; skip it rather
+        // than report it as an unreadable save.
+        if (strncmp(argv[i], "-psn_", 5) == 0) continue;
+        open_path(argv[i]);
+    }
 
 #ifdef _WIN32
     // The app ships a Mesa software opengl32.dll in a "softgl" subfolder. If the
@@ -1700,6 +1900,7 @@ int main(int, char**) {
     }
     g_window = window;
     set_window_icon(window);   // Windows/Linux title-bar & taskbar icon
+    glfwSetDropCallback(window, drop_cb);
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
