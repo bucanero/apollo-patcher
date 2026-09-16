@@ -2,6 +2,21 @@
 #
 # The engine + apollo_ctrl facade come from the apollo_engine target defined by
 # the top-level CMakeLists.txt; this file only builds the app itself.
+#
+# NOT a standalone CMake project. It is add_subdirectory()'d from the root and
+# has no project() or cmake_minimum_required() of its own, so pointing CMake at
+# this directory fetches GLFW, configures it, and only then fails with CMP0000's
+# "No cmake_minimum_required command is present" — a minute of downloads before
+# an error that names the wrong problem. Say so up front instead.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    message(FATAL_ERROR
+        "gui/ is not a standalone CMake project — it is built as part of the "
+        "one in the repository root.\n"
+        "Configure from there instead:\n"
+        "  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release\n"
+        "  cmake --build build -j\n"
+        "The GUI is on by default; -DAPOLLO_BUILD_GUI=OFF leaves it out.")
+endif()
 
 include(FetchContent)
 
