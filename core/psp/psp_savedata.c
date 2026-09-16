@@ -8,22 +8,10 @@
  * it can be so the two stay diffable; it is proven byte-exact against real
  * console saves and is not the part to get clever with.
  *
- * What changed is the layer around it. Upstream reads and writes files:
- *
- *     int psp_DecryptSavedata(const char *fpath, const char *fname, uint8_t *key);
- *     int psp_EncryptSavedata(const char *fpath, const char *fname, uint8_t *key);
- *
- * -- where `fpath` is a directory with a trailing separator, `fname` is a full
- * path in one function and a bare name joined to `fpath` in the other, and the
- * result is written back over the input. None of that survives contact with a
- * browser tab, so this file is buffers in, buffers out, and the PARAM.SFO
- * parsing is bounds-checked against the length it was given rather than
- * trusting the offsets inside the file.
- *
- * The four deliberate divergences are each commented where they are: mode
- * selection is now an error instead of silent garbage, the two scratch buffers
- * are calloc'd, the dead random-IV branch is gone, and the SFO walk uses the
- * file's own declared extent instead of a hardcoded 0xC60.
+ * The layer around it is this repository's: buffers in, buffers out, because
+ * there is no filesystem in a browser tab, and PARAM.SFO parsing that checks
+ * every offset against the length it was given rather than trusting what the
+ * file claims.
  *
  * Original credits, kept:
  *
@@ -85,9 +73,8 @@ const char *apsp_strerror(int err)
     }
 }
 
-/* Upstream also carries sdHashKey1 = 40 E6 53 3F 05 11 3A 4E A1 4B DA D6 72 7C
- * 53 4C, which nothing reads: mode 1 is the unkeyed path and mixes in no hash
- * key of its own. Dropped rather than left to warn on every build. */
+/* There is no sdHashKey1: mode 1 is the unkeyed path and mixes in no hash key
+ * of its own. The numbering follows the modes, not this array. */
 static uint8_t sdHashKey2[] = {0xFA, 0xAA, 0x50, 0xEC, 0x2F, 0xDE, 0x54, 0x93, 0xAD, 0x14, 0xB2, 0xCE, 0xA5, 0x30, 0x05, 0xDF};
 static uint8_t sdHashKey3[] = {0x36, 0xA5, 0x3E, 0xAC, 0xC5, 0x26, 0x9E, 0xA3, 0x83, 0xD9, 0xEC, 0x25, 0x6C, 0x48, 0x48, 0x72};
 static uint8_t sdHashKey4[] = {0xD8, 0xC0, 0xB0, 0xF3, 0x3E, 0x6B, 0x76, 0x85, 0xFD, 0xFB, 0x4D, 0x7D, 0x45, 0x1E, 0x92, 0x03};
@@ -174,10 +161,9 @@ static int getModeSeed(int mode) {
 /*
  * Which SD mode SAVEDATA_PARAMS[0] selects, or -1 when it names none.
  *
- * Hoisted out of Decrypt/EncryptSavedata, which had this inline and, in the
- * default case, logged an error and then carried on with `declared` -- a value
- * that is never 1, 3 or 5, so every downstream branch fell through and the
- * caller got silent garbage back. Now it is an error both directions.
+ * -1 has to be treated as fatal by both callers. A mode byte that is not 1, 3
+ * or 5 matches no branch downstream, so carrying on with it returns the
+ * caller's buffer full of garbage and a success code.
  */
 static int sdModeFor(const uint8_t *key, int declared)
 {
@@ -537,11 +523,10 @@ static int DecryptSavedata(uint8_t *buf, int size, uint8_t *key, int sdDecMode) 
 	}
 	sdDecMode = mode;
 
-	// Setup the buffers. calloc, not malloc: the aligned tail past
-	// size - 0x10 is never written before it is read back. Nothing downstream
-	// of it reaches the output -- hleSdGetLastIndex, the one consumer that
-	// would carry it, is not called on this path -- so upstream's malloc is
-	// harmless, but reading uninitialised memory at all trips every sanitiser
+	// calloc, not malloc: the aligned tail past size - 0x10 is read back
+	// before anything writes it. Nothing carries it to the output --
+	// hleSdGetLastIndex, the one consumer that would, is not called on this
+	// path -- but reading uninitialised memory at all trips every sanitiser
 	// and makes a clean run unverifiable.
 	int alignedSize = ((size + 0xF) >> 4) << 4;
 	uint8_t *tmpbuf = calloc(1, alignedSize);
@@ -600,11 +585,9 @@ static int EncryptSavedata(uint8_t* buf, int size, uint8_t *key, uint8_t *hash, 
 	// The encryption IV (first 0x10 bytes).
 	//
 	// A console picks this at random (hleSdCreateList genMode 1, off KIRK's
-	// PRNG). Apollo uses a fixed one instead, which is why re-encrypting a
-	// save does not reproduce the ciphertext the PSP wrote -- and why both
-	// directions here are deterministic and can be pinned by a test. Upstream
-	// keeps the random path behind `if(!iv)`, a test on the address of an
-	// array, so it is never taken; dropped rather than left to read as live.
+	// PRNG). Apollo uses a fixed one, which is why re-encrypting a save does
+	// not reproduce the ciphertext the PSP wrote -- and why both directions
+	// here are deterministic and can be pinned by a test.
 	ctx2.mode = sdEncMode;
 	ctx2.unk = 0x1;
 	memcpy(ctx2.buf,iv,0x10);
@@ -698,10 +681,9 @@ static void UpdateSavedataHashes(uint8_t* savedataParams, uint8_t* data, int siz
  *              0x08  u32  reserved length of the value
  *              0x0C  u32  offset of the value within the data table
  *
- * Every one of those offsets comes out of the file. Upstream followed them
- * unchecked, which is fine for a file off your own Memory Stick and an
- * out-of-bounds read for one a browser handed you, so each is checked against
- * the buffer's real length here before it is used.
+ * Every one of those offsets comes out of the file, so every one is checked
+ * against the buffer's real length before it is followed. A PARAM.SFO reaches
+ * this from a browser tab, not only from your own Memory Stick.
  * ------------------------------------------------------------------------ */
 
 #define SFO_MAGIC    0x46535000u
@@ -809,9 +791,9 @@ static int sfo_params(const uint8_t *sfo, size_t sfo_len, sfo_val_t *out)
     return APSP_OK;
 }
 
-/* A FILE_LIST entry's name, copied out rather than read in place: upstream
- * strcmp()s the entry directly, which walks into the hash that follows when a
- * name uses all APSP_NAME_LEN bytes. */
+/* A FILE_LIST entry's name, copied out rather than read in place. The field
+ * is NUL-padded but not NUL-terminated when a name uses all APSP_NAME_LEN
+ * bytes, so reading it in place walks into the hash that follows. */
 static void flist_name(const uint8_t *entry, char out[APSP_NAME_LEN + 1])
 {
     memcpy(out, entry, APSP_NAME_LEN);
@@ -821,9 +803,9 @@ static void flist_name(const uint8_t *entry, char out[APSP_NAME_LEN + 1])
 /*
  * Walk SAVEDATA_FILE_LIST. `want` NULL enumerates and the n'th used entry's
  * offset comes back; `want` non-NULL looks that name up. Either way the whole
- * FLIST_ENTRY_LEN entry is required to be inside the value's declared extent
- * -- upstream stops at a hardcoded 0xC60 and only checks the entry's first
- * 0x0D bytes, so the hash it then writes at +0x0D could land past the end.
+ * FLIST_ENTRY_LEN entry must be inside the value's declared extent, not just
+ * the name at its front: encryption writes a hash at +0x0D, which an entry
+ * bounded by its name alone would let land past the end.
  *
  * Returns the number of used entries seen (>= 0), or a negative error. When
  * a match is found, *entry_off is its absolute offset.

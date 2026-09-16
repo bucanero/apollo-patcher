@@ -500,15 +500,14 @@ for (const row of rows) {
      * ROUND TRIP -- re-encrypt what the decrypt just produced and require the
      * original encrypted sample back, byte for byte.
      *
-     * Without this the whole re-encrypt half of the database is unproven. A
-     * sweep of every BSD opcode in apollo-patches against what the suite
-     * actually exercises found that of 107 applied codes, exactly TWO contained
-     * an `encrypt` line -- and both were Resident Evil Remake DECRYPT codes that
-     * run `encrypt blowfish_cbc` over a header while unwrapping it. So
-     * `encrypt ffxiii`, `encrypt mgs`, `encrypt mgs_base64`,
-     * `encrypt monster_hunter` and `encrypt diablo3` were all shipping behind a
-     * Re-encrypt button that nothing had ever checked. The forward run proves
-     * the key and the algorithm; this proves the way back.
+     * Without this the whole re-encrypt half of the database is unproven, and
+     * a decrypt row proves almost none of it by accident: across the codes
+     * this suite applies, the only `encrypt` lines that run are the two
+     * Resident Evil Remake DECRYPT codes that `encrypt blowfish_cbc` over a
+     * header while unwrapping it. `encrypt ffxiii`, `encrypt mgs`,
+     * `encrypt mgs_base64`, `encrypt monster_hunter` and `encrypt diablo3` sit
+     * behind the Re-encrypt button and are reached only from here. The forward
+     * run proves the key and the algorithm; this proves the way back.
      *
      * Fed from the ENGINE's own decrypt output rather than from the .dec file
      * on disk. That is the property a user depends on -- press Decrypt, edit,

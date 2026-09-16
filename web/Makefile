@@ -30,10 +30,11 @@ APOLLO_LIB ?= $(patsubst %/include/apollo.h,%,$(firstword \
 #   python/       helper modules Python patches `import` (rijndael, umsgpack,
 #                 and per-game ones). Only their NAMES are built in
 #                 (dist/python-modules.json); the modules themselves are
-#                 fetched from a CDN the first time a patch needs one. They
-#                 used to be embedded, which cost every visitor 133KB gzipped
-#                 for something 1.6% of patches use, and froze them at build
-#                 time while the patches importing them were fetched live.
+#                 fetched from a CDN the first time a patch needs one, rather
+#                 than embedded — which would cost every visitor 133KB gzipped
+#                 for something 1.6% of patches use, and would freeze them at
+#                 build time while the patches importing them are fetched
+#                 live.
 #   PS3/ PS4/ ... the ~2250 .savepatch files themselves, which the page lets
 #                 users browse. Only an INDEX is built in (dist/patches.json);
 #                 the patches are fetched from a CDN at runtime, so a patch fix

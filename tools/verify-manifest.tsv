@@ -72,8 +72,8 @@
 #       a PS4 save (the C tool says so itself) and a PS3 save stores this
 #       checksum the other way round, so the same edit on PS3/NPEB01297 and
 #       PS3/NPUB31139 would be a guess dressed up as a fix. They keep their
-#       original bodies, which also means they no longer share a chain with
-#       the PS4 pair and stay unlisted until a PS3 Strider save turns up.
+#       original bodies, which also means they do not share a chain with the
+#       PS4 pair and stay unlisted until a PS3 Strider save turns up.
 #
 #   NPUB31564 (SAMURAI WARRIORS 4) looked like the same defect and was NOT.
 #       Its patch is correct and untouched; the bug was in apollo-lib, and the
@@ -181,11 +181,10 @@
 #       sample unchanged and reacts to a changed byte. Only the
 #       compress/decompress pair is unverifiable, for the usual reason.
 #
-#       I had this filed under "sample and patch disagree" against
-#       PS4/CUSA01587. That was simply the wrong game: CUSA01587 and CUSA02811
-#       are Shantae: RISKY'S REVENGE, a plain fixed-range checksum
-#       (0x027C..0x048F written to 0x0278) with no sample in this repository
-#       at all. The unpacker's sample is Pirate's Curse.
+#       Not to be confused with PS4/CUSA01587: CUSA01587 and CUSA02811 are
+#       Shantae: RISKY'S REVENGE, a different game with a plain fixed-range
+#       checksum (0x027C..0x048F written to 0x0278) and no sample in this
+#       repository at all. The unpacker's sample is Pirate's Curse.
 #   PS4/CUSA12555  Dying Light 2, and PSV/PCSE00608, PSV/PCSF00728,
 #       PSV/PCSG00594  Resident Evil: Revelations 2 (Vita) — CONTAINER
 #       patches, deliberately left out. Their middle codes target
@@ -251,19 +250,6 @@
 #PS3	NPEB00686	mgs-pw-decrypter/samples/00000000.000	mgs-pw-decrypter/samples/00000000.000.dec	1
 #PS3	BLES00450	nfs-undercover-decrypter/samples/USR-DATA.enc	nfs-undercover-decrypter/samples/USR-DATA.dec	1
 #PS3	BLUS30248	nfs-undercover-decrypter/samples/USR-DATA.enc	nfs-undercover-decrypter/samples/USR-DATA.dec	1
-# Five rows that used to sit here — Digimon World: Next Order, both
-# Middle-earth games, Resident Evil 6 (PS4) and Strider — are live now that
-# their patches are on apollo-patches main. They moved down to the
-# checksum-only block with the rest of their kind.
-#
-# Samurai Warriors 4 was parked here too, and not on a patch: NPUB31564 is
-# correct as written and verifies UNMODIFIED. What it needed was apollo-lib's
-# sw4_checksum host-endianness fix -- four native-endian words stored as a
-# 16-byte blob, a length the variable reader passes through raw, so a
-# little-endian build wrote the checksum reversed. That reached apollo-lib main
-# in 190e8f1 "Fixes (#74)", which is what pages.yml builds (it checks out
-# apollo-lib with no `ref`), so the row is live in the checksum-only block
-# below.
 #
 # THE CONSOLE'S OWN LAYER (8th column, `psp=<32 hex digits>` or `psp=-`).
 #
@@ -303,15 +289,14 @@
 # Metal Gear Solid HD's MASTER.BIN comes back 32 bytes holding the 21 the
 # reference writes.
 #
-# It found two real bugs on its first run:
+# Two things it guards that nothing else does:
 #
-#   * Final Fantasy XIII-2 / Lightning Returns re-encrypted with no key. Their
-#     "Read Encryption KEY.DAT" code sets [key] from a second file and
-#     classifies as neither decrypt nor checksum, so it sat at the head of the
-#     DECRYPT chain only -- and `ENCRYPT FFXIII(2, [key])` needs it. toolkit.js
-#     splitIndices() now gives a leading unlabelled code to both halves. Five
-#     patches in the database have such a prelude and all five reference its
-#     variable from the re-encrypt half.
+#   * A code that sets a variable and classifies as neither decrypt nor
+#     checksum -- Final Fantasy XIII-2 / Lightning Returns read [key] from a
+#     second file this way -- has to reach BOTH halves of the chain, since
+#     `ENCRYPT FFXIII(2, [key])` needs it. toolkit.js splitIndices() gives a
+#     leading unlabelled code to both. Five patches have such a prelude and all
+#     five reference its variable from the re-encrypt half.
 #
 #   * The Naughty Dog family writes an HMAC-SHA1 the game will reject; see the
 #     parked rows below.
@@ -327,16 +312,15 @@
 #
 # NAUGHTY DOG -- read this before believing a round-trip failure here.
 #
-# I first read these as five broken patches. That was wrong, and the mistake is
-# worth recording: `set range:S,pointer` looks inclusive, but
-# range_end = _parse_int_value(line, pointer - eof, dsize) + 1 -- when the
-# pointer came from EOF the `eof` flag makes the end EXCLUSIVE. So
+# These read as five broken patches and are not. `set range:S,pointer` looks
+# inclusive, but range_end = _parse_int_value(line, pointer - eof, dsize) + 1
+# -- when the pointer came from EOF the `eof` flag makes the end EXCLUSIVE. So
 # `set pointer:EOF-0x1F` + `set range:0x08,pointer` covers 0x08..EOF-0x20 and
-# writes at EOF-0x1F, which is exactly right. Deriving offsets from the source
-# rather than from a sample would have caught it.
+# writes at EOF-0x1F, which is exactly right. Derive offsets from the engine
+# source, not from a sample.
 #
-# WHICH SAMPLE IS WHICH. Getting this wrong is the other half of the story, so
-# it is written down: three of the four samples embed their game name, and the
+# WHICH SAMPLE IS WHICH. This is the other half of the trap: three of the four
+# samples embed their game name, and the
 # C one was identified by Damian as a Nathan Drake Collection save (nothing in
 # it carries a title ID -- the Collection contains Drake's Fortune Remastered,
 # so its saves name that game).
@@ -407,11 +391,10 @@
 # decrypt-only test cannot tell the two apart -- the same trap as Naughty Dog
 # type A above.
 #
-# I first called this a stale sample, on the strength of a search that came back
-# empty. The search was wrong, not the save: Bucanero ran the reference tool
-# (`monsterhunter-psp-decrypter -e 1`, where type 1 selects MHP2G_NA_HASH_SALT)
-# and it reproduced the stored hash exactly. Recomputing by hand settles it --
-# the construction is the patch's, only the salt differs:
+# This is not a stale sample, whatever a search of the patch text suggests.
+# The reference tool (`monsterhunter-psp-decrypter -e 1`, where type 1 selects
+# MHP2G_NA_HASH_SALT) reproduces the stored hash exactly, and recomputing by
+# hand settles it -- the construction is the patch's, only the salt differs:
 #
 #   salt at size-36, SHA1 over the first size-16 bytes, written at size-24
 #     NA "3Nc94Hq1zOLh8d62Sb69" -> 62faf95a...  == what the save carries

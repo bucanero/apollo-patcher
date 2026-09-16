@@ -817,8 +817,8 @@ static void open_path(const std::string& path) {
     // so take that as the target. Anything else about the folder — the key,
     // the patch — follows from it as usual.
     //
-    // Taking the directory itself as the target, which is what happened
-    // before this, produced a target nothing could read and no explanation.
+    // The directory itself must never become the target: nothing can read it,
+    // and the failure would surface much later with no explanation.
     if (is_dir(path)) {
         std::vector<unsigned char> sfo;
         char name[APSP_NAME_LEN + 1];

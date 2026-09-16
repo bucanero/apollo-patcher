@@ -277,10 +277,10 @@ static void check_sfo_accessors(void)
 /*
  * Malformed input.
  *
- * Every offset in a PARAM.SFO comes out of the file, and upstream followed all
- * of them unchecked. These are the shapes that walk off the end of the buffer
- * if nothing is verified: each must be REFUSED, and none may crash. Run this
- * under ASan to get the second half of that sentence checked as well.
+ * Every offset in a PARAM.SFO comes out of the file. These are the shapes that
+ * walk off the end of the buffer when one is followed unchecked: each must be
+ * REFUSED, and none may crash. Run this under ASan to get the second half of
+ * that sentence checked as well.
  */
 static void check_sfo_bounds(void)
 {
@@ -609,8 +609,8 @@ static void check_crypto_args(void)
           apsp_encrypt(sfo, len, "NOPE.BIN", in, sizeof in, key, out, sizeof out, NULL)
           == APSP_ERR_NO_FILE);
 
-    /* A mode byte naming none of 1/3/5. Upstream logged and carried on with
-     * the raw byte, which produced silent garbage; it is an error now. */
+    /* A mode byte naming none of 1/3/5 matches no branch downstream, so it has
+     * to be refused rather than carried through as a value. */
     {
         uint8_t odd[0x2000];
         size_t olen = build_sfo(odd, sizeof odd, 0x10);

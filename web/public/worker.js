@@ -40,12 +40,14 @@ function drainLog() {
  * Python helper modules.
  *
  * Python patches `import` these (rijndael, umsgpack, per-game decrypters).
- * They used to be baked into the wasm module with --embed-file, which cost
- * every visitor 133KB gzipped — 31% of the download — for something 35 of 2240
- * patches use, and froze them at build time while the patches that import them
- * are fetched live. Now they are fetched too, and written into the in-memory
- * filesystem; MicroPython's import does stat()/open() and does not care that
- * the files arrived after startup.
+ * They are fetched at run time and written into the in-memory filesystem;
+ * MicroPython's import does stat()/open() and does not care that the files
+ * arrived after startup.
+ *
+ * Fetched rather than embedded with --embed-file, which would cost every
+ * visitor 133KB gzipped — 31% of the download — for something 35 of 2247
+ * patches use, and would freeze them at build time while the patches that
+ * import them are fetched live.
  *
  * Fetched as a set rather than per import, because the modules import each
  * other (umsgpack pulls in datetime) — resolving that from the outside would
@@ -475,10 +477,10 @@ const handlers = {
             }
         }
 
-        /* One file or several. The single-file form is the old one and stays
-         * the default; `files` + `routes` is what the tools page sends for a
-         * patch whose required chain spans two targets (Dead Space writes the
-         * checksum of USR-DATA into HED-DATA). Routing is decided by the
+        /* One file or several. The single-file form is the default; `files`
+         * + `routes` is what the tools page sends for a patch whose required
+         * chain spans two targets (Dead Space writes the checksum of USR-DATA
+         * into HED-DATA). Routing is decided by the
          * caller, in toolkit.js, so the page and the verifier agree. */
         const inputs = files?.length
             ? files.map((f) => ({ name: f.name, bytes: new Uint8Array(f.buffer) }))

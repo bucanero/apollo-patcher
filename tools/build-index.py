@@ -90,10 +90,9 @@ def read_game_name(path):
 
     # Some patches cover several games and say so on the lines that follow:
     # the Metal Gear Solid HD Collection declares "Metal Gear Solid 2 HD" and
-    # then "Metal Gear Solid 3 HD". Taking only the first line hid the second
-    # game completely — a search for it found nothing, even though the patch
-    # handles it. Keep the rest as alternative titles so the card is findable
-    # by any of them.
+    # then "Metal Gear Solid 3 HD". Only the first line is the card's name, so
+    # the rest are kept as alternative titles — otherwise a search for the
+    # second game finds nothing, even though the patch handles it.
     #
     # Only the unbroken run of ';' lines right after the name counts, and
     # credit lines are dropped: those are people, not games.

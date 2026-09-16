@@ -1,25 +1,21 @@
 /*
- * Vendored into apollo-patcher from bucanero/apollo-psp @ 17cb5ea
- * ("Use Mbedtls (#52)"), source/kirk_engine.c and include/kirk_engine.h.
+ * KIRK, the PSP's crypto engine, as a host library.
  *
- * Two changes from upstream, both about running off a PSP:
+ * Vendored from bucanero/apollo-psp @ 17cb5ea (source/kirk_engine.c,
+ * include/kirk_engine.h). The algorithms are upstream's, verbatim, and should
+ * stay that way: they are proven byte-exact against real console saves, and a
+ * copy that stays diffable is a copy that can be re-synced.
  *
- *   - <psptypes.h> is gone; the u8/u16/u32/u64 typedefs come from <stdint.h>.
- *   - kirk_init() no longer reads the console's Fuse ID (a kernel-exploit read
- *     at 0xBC100090, falling back to ./DATA/FUSEID.BIN). A desktop or a browser
- *     tab has no fuse, so the value is a parameter here -- see kirk_init_fuse()
- *     and the note above it.
+ * This copy differs from upstream in two places, both because it runs off a
+ * PSP: u8..u64 come from <stdint.h> rather than the SDK's <psptypes.h>, and the
+ * Fuse ID is a parameter (see kirk_init_fuse) rather than a kernel read, since
+ * a desktop and a browser tab have no fuse to read.
  *
- * Nothing else is touched, deliberately: the algorithms are proven byte-exact
- * against real console saves and this file should stay diffable against
- * upstream.
- *
- * The eventual home for this is apollo-lib/source/psp/, shared with apollo-psp
- * and apollo-vita instead of copied. That move waits on apollo-vita finishing
- * its own migration to mbedTLS -- its copy is still on polarSSL, which is the
- * only substantive difference between the two upstream versions. When it
- * lands, the backend split is the same #ifdef _USE_MBEDTLS / compat-1.3.h
- * shim that apollo-lib's source/decrypt.c already uses.
+ * Its eventual home is apollo-lib/source/psp/, shared with apollo-psp and
+ * apollo-vita rather than copied. That waits on apollo-vita's migration to
+ * mbedTLS -- its copy is on polarSSL, the only substantive difference between
+ * the two -- after which the backend split is the same #ifdef _USE_MBEDTLS /
+ * compat-1.3.h shim apollo-lib's source/decrypt.c uses.
  */
 /*
 	Draan proudly presents:

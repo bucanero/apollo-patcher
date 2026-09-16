@@ -30,10 +30,9 @@
  *               which apsp_sfo_directory() reads straight out of the SFO. A
  *               key of all zeroes is legitimate and means "unkeyed".
  *
- * Bounds. Every offset in a PARAM.SFO is read out of the file itself, and the
- * upstream parser trusted all of them -- fine for a file off your own Memory
- * Stick, an out-of-bounds read for a file a browser handed you. Everything
- * here is checked against the real length before it is followed.
+ * Bounds. Every offset in a PARAM.SFO is read out of the file itself, and one
+ * of these reaches you from a browser tab as readily as from your own Memory
+ * Stick, so each is checked against the real length before it is followed.
  */
 #ifndef APOLLO_PSP_SAVEDATA_H
 #define APOLLO_PSP_SAVEDATA_H
@@ -189,8 +188,7 @@ int apsp_decrypt(const uint8_t *sfo, size_t sfo_len,
  * On the hashes: for savedata modes 4 and 6 one of them is derived from the
  * console's Fuse ID, which a desktop or a browser does not have (see
  * kirk_engine.h). The value written here therefore differs from the one the
- * originating PSP wrote -- and the PSP accepts it anyway, which is what
- * apollo-psp's "somehow accepts it" comment upstream is about. Decryption is
+ * originating PSP wrote, and the PSP loads the save anyway. Decryption is
  * unaffected: it never touches the fuse.
  */
 int apsp_encrypt(uint8_t *sfo, size_t sfo_len, const char *name,

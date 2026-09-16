@@ -75,10 +75,10 @@ MHP2NDG.BIN (1,483,024 bytes)   PSP savedata encryption (KIRK + the game key)
        └─ plaintext
 ```
 
-Every PSP tool in the catalog operates on the *middle* layer, so until now a
-file copied straight off a Memory Stick went into the patch engine and came
-back as noise that looked like output. The panel is the layer underneath, and
-it is deliberately not a card in the grid: it is not per-game, and it works for
+Every PSP tool in the catalog operates on the *middle* layer, so a file copied
+straight off a Memory Stick goes into the patch engine and comes back as noise
+that looks like output unless the outer layer comes off first. The panel is
+that outer layer, and it is deliberately not a card in the grid: it is not per-game, and it works for
 any PSP save at all — including the ~60 PSP titles the patch database covers
 but the catalog does not, and saves with no patch.
 
@@ -163,8 +163,9 @@ known-answer vectors taken from the unmodified apollo-psp implementation and
 against real console-written saves.
 
 What it is really guarding is the seam between the engine and the patches,
-which has drifted before and gives no signal when it does. On its first run it
-refused four patches, all for that reason — `main` predates fixes that exist on
+which drifts silently: a patch written against a fixed engine keeps parsing
+against an unfixed one and simply produces the wrong bytes. Four patches are
+refused for exactly that reason, because `main` predates fixes that exist on
 branches held back for the next console release:
 
 - `PS3/BLES00450` + `PS3/BLUS30248` (Need for Speed: Undercover) decrypt with a
@@ -223,9 +224,9 @@ previous runs.
   scans the C stack conservatively, and under wasm that finds almost nothing:
   locals live in wasm locals rather than addressable memory, so a measured run
   had **1276 bytes** of shadow stack for the entire live VM call chain. Live
-  objects went unseen, were swept, and the next free of one aborted the module
-  with `assert(!"bad free")`. Before this step, applying *any* Python patch
-  here failed outright — about 50 patches in the database contain Python codes.
+  objects go unseen, are swept, and the next free of one aborts the module with
+  `assert(!"bad free")` — which takes out *every* Python patch, about 50 of
+  them in the database.
 
   It cannot be passed as `-sBINARYEN_EXTRA_PASSES=--spill-pointers`, because
   that route is a catch-22: the pass locates the stack pointer **by name**, so
@@ -354,7 +355,7 @@ once rather than waiting for *Save changes*: the type and the text are separate
 things, and a wrongly-typed code often has nothing to type. It matters more
 than it sounds — without a `[SW:…]` / `[BSD:…]` / `[PYTHON:…]` prefix the type
 comes from the shape of the body, so a single mistyped line makes a Save Wizard
-code parse as BSD and fail, with no way to correct it from here until now.
+code parse as BSD and fail, and this is the only way to correct it from here.
 
 Switching a code *to* Python has to tell the worker, because the Python helper
 modules are fetched on demand and that decision is made from the parsed types

@@ -821,8 +821,8 @@ function renderSlots() {
         : 'or click to choose · nothing is uploaded';
     $('file').multiple = multi;
 
-    /* Single-file keeps the old behaviour: the drop zone gives way once the
-     * save is in. Multi-file keeps it, because more files are still wanted. */
+    /* Single-file: the drop zone gives way once the save is in. Multi-file
+     * keeps it, because more files are still wanted. */
     $('drop').hidden = !multi && filled === slots.length;
     $('slots').hidden = !multi && !filled;
 

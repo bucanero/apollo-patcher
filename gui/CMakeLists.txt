@@ -96,10 +96,11 @@ if(APOLLO_BUNDLE)
         set(_bundle_dest "$<TARGET_FILE_DIR:apollo_patcher_gui>")
     endif()
 
-    # Driven by a stamp rather than POST_BUILD on the app. POST_BUILD runs only
-    # when the executable itself is relinked, so pulling new patches rebuilt the
-    # zip and left the app carrying the old one — stale in exactly the case the
-    # rebuild was for. This re-copies whenever either side moves.
+    # Driven by a stamp rather than POST_BUILD on the app, which runs only when
+    # the executable is relinked: pulling new patches rebuilds the zip without
+    # touching the binary, and the app would keep the old copy — stale in
+    # exactly the case the rebuild was for. This re-copies whenever either side
+    # moves.
     set(_bundle_stamp "${CMAKE_CURRENT_BINARY_DIR}/bundle-installed.stamp")
     add_custom_command(
         OUTPUT  "${_bundle_stamp}"

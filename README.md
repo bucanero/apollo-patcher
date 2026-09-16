@@ -18,9 +18,9 @@ The command-line tools (`patcher`, `dumper`) and the engine itself live in
 
 A PSP save is encrypted twice. The console wraps it with a per-title game key
 before the game's own encryption is anywhere in the picture, and every PSP
-patch in the database addresses only the inner layer — so a file copied
-straight off a Memory Stick used to go into the patch engine and come back as
-noise that looked like output.
+patch in the database addresses only the inner layer. So the console's wrapper
+has to come off before any patch means anything: feed the engine a file copied
+straight off a Memory Stick and it returns noise that looks like output.
 
 `core/psp/` is that outer layer, vendored from
 [apollo-psp](https://github.com/bucanero/apollo-psp) (`kirk_engine.c` and
