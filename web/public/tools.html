@@ -37,6 +37,21 @@
       </svg>
       Support
     </a>
+    <button type="button" id="settings-open" class="gh-button"
+            title="Which console saves are written for">
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+        <path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12
+          15.5m7.43-2.53a7.7 7.7 0 0 0 0-1.94l2.03-1.58a.5.5 0 0 0
+          .12-.62l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.4 7.4 0 0
+          0-1.68-.97l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36
+          2.54a7.4 7.4 0 0 0-1.68.97l-2.39-.96a.5.5 0 0 0-.6.22L2.42 8.83a.5.5 0 0
+          0 .12.62l2.03 1.58a7.7 7.7 0 0 0 0 1.94l-2.03 1.58a.5.5 0 0 0-.12.62l1.92
+          3.32a.5.5 0 0 0 .6.22l2.39-.96a7.4 7.4 0 0 0 1.68.97l.36 2.54a.5.5 0 0 0
+          .5.42h3.84a.5.5 0 0 0 .5-.42l.36-2.54a7.4 7.4 0 0 0 1.68-.97l2.39.96a.5.5
+          0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.62Z"/>
+      </svg>
+      Settings
+    </button>
     </div>
   </div>
   <p class="tagline">
@@ -64,6 +79,27 @@
     </div>
     <button type="button" id="psp-open" class="psp-banner-go">
       <span class="action-label">Open the PSP tool</span>
+      <span class="action-hint">Decrypt &middot; re-encrypt &middot; resign</span>
+    </button>
+  </section>
+
+  <!-- The same story one console up. Separate from the PSP banner rather than
+       folded into it because the two need different files and different words:
+       a PS3 save is identified by its PARAM.PFD, and its key is filed under
+       the save folder's name. -->
+  <section class="psp-banner" aria-label="PS3 savedata">
+    <div class="psp-banner-text">
+      <h2>Have a PS3 save?</h2>
+      <p>
+        The PS3 encrypts saves itself too, listing what it protects in a file
+        called <code>PARAM.PFD</code> &mdash; unwrap that layer first, and then
+        the tools below, or <a href="./patcher.html">the full patcher</a>, can
+        read what is inside. Bring that <code>PARAM.PFD</code> as well as the
+        save file itself.
+      </p>
+    </div>
+    <button type="button" id="ps3-open" class="psp-banner-go">
+      <span class="action-label">Open the PS3 tool</span>
       <span class="action-hint">Decrypt &middot; re-encrypt &middot; resign</span>
     </button>
   </section>
@@ -158,24 +194,21 @@
        until every choice here has been made. -->
   <div id="options" class="options" hidden></div>
 
-  <!-- Shown only for a platform whose console encrypts saves itself: the PSP.
-       A patch's codes address the layer INSIDE that wrapper, so a file taken
-       straight off a Memory Stick has to be unwrapped before they mean
-       anything. Optional on purpose — someone who already unwrapped it (here,
-       or with the PSP tool on the front page) has a plain file and should not
-       be made to produce a PARAM.SFO for it. -->
+  <!-- Shown only for a platform whose console encrypts saves itself: the PSP
+       and the PS3. A patch's codes address the layer INSIDE that wrapper, so a
+       file taken straight off a Memory Stick or a hard drive has to be
+       unwrapped before they mean anything. Optional on purpose — someone who
+       already unwrapped it (here, or with the console tool on the front page)
+       has a plain file and should not be made to produce the metadata for it.
+       The wording is filled in per console by renderStage(). -->
   <div id="stage" class="psp-stage" hidden>
     <p class="psp-stage-head">
-      <span class="option-label">Straight off a PSP?</span>
+      <span id="stage-head-label" class="option-label"></span>
       <span id="stage-state" class="psp-key-state"></span>
     </p>
     <ul id="stage-slot" class="slots"></ul>
     <div id="stage-key" class="psp-key" hidden></div>
-    <p id="stage-why" class="psp-key-why">
-      The console encrypts saves under a per-game key, below anything this
-      patch does. Add the save folder&rsquo;s <code>PARAM.SFO</code> and that
-      layer is taken off before the patch runs, and put back after.
-    </p>
+    <p id="stage-why" class="psp-key-why"></p>
   </div>
 
   <!-- One row per file the patch needs. Most tools want one and this looks
@@ -243,6 +276,122 @@
     <summary>Engine output</summary>
     <pre id="psp-log" class="log"></pre>
   </details>
+</dialog>
+
+<dialog id="ps3" class="tool-dialog" aria-labelledby="ps3-title">
+  <form method="dialog" class="tool-close-form">
+    <button class="tool-close" value="close" aria-label="Close">&times;</button>
+  </form>
+
+  <div class="tool-head">
+    <div>
+      <h2 id="ps3-title">PS3 savedata</h2>
+      <p class="tool-sub">
+        The console&rsquo;s own encryption &mdash; the layer under the game&rsquo;s.
+        Everything runs in this tab.
+      </p>
+    </div>
+  </div>
+
+  <div id="ps3-busy" class="busy" hidden>
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="ps3-busy-text">Working&hellip;</span>
+  </div>
+
+  <div id="ps3-drop" class="drop" tabindex="0" role="button">
+    <input id="ps3-file" type="file" multiple hidden>
+    <p class="drop-main">Drop <code>PARAM.PFD</code> and your save file here</p>
+    <p class="drop-sub">or the whole save folder &middot; nothing is uploaded</p>
+  </div>
+
+  <ul id="ps3-slots" class="slots" hidden></ul>
+
+  <!-- What the PARAM.PFD turned out to say: which files it protects, and
+       whether the one loaded still matches the hash recorded for it. Also
+       where the save folder is named, because that is what the key database
+       is filed under and PARAM.PFD does not carry it. -->
+  <div id="ps3-info" class="psp-info" hidden></div>
+
+  <!-- The secure file ID. Looked up from the Apollo database by save folder
+       and file name first; 32 typed hex digits otherwise. Hidden entirely for
+       an entry that carries a built-in key. -->
+  <div id="ps3-key" class="psp-key" hidden></div>
+
+  <div id="ps3-outputs" class="outputs" hidden></div>
+  <div id="ps3-actions" class="actions" hidden></div>
+
+  <p id="ps3-status" class="status" role="status" aria-live="polite"></p>
+
+  <details id="ps3-log-wrap" class="log-wrap" hidden>
+    <summary>Engine output</summary>
+    <pre id="ps3-log" class="log"></pre>
+  </details>
+</dialog>
+
+<!-- Which console a save is being written FOR. Both values change what gets
+     WRITTEN and neither affects reading, which is why both are safe to leave
+     empty: blank means "keep whatever the save already says". -->
+<dialog id="settings" class="tool-dialog" aria-labelledby="settings-title">
+  <form method="dialog" class="tool-close-form">
+    <button class="tool-close" value="close" aria-label="Close">&times;</button>
+  </form>
+
+  <div class="tool-head">
+    <div>
+      <h2 id="settings-title">Settings</h2>
+      <p class="tool-sub">
+        Which console Apollo writes saves <em>for</em>. Both are optional, and
+        neither changes how a save is read &mdash; only what is written back.
+      </p>
+    </div>
+  </div>
+
+  <div class="set-group">
+    <p class="psp-key-head"><span class="option-label">PSP &mdash; Fuse ID</span></p>
+    <div class="psp-key-inputs">
+      <input id="set-fuse" type="text" inputmode="latin" spellcheck="false"
+             autocomplete="off" maxlength="16" placeholder="16 hex digits"
+             aria-label="PSP Fuse ID, as 16 hex digits">
+    </div>
+    <p class="psp-key-why">
+      Savedata modes 4 and 6 derive two of a <code>PARAM.SFO</code>&rsquo;s
+      hashes from the console&rsquo;s own fuse. A PSP loads a save whose values
+      differ, so this is only needed to reproduce one console&rsquo;s output
+      byte for byte. Leave it blank for <code>FFFFFFFFFFFFFFFF</code>, which is
+      what Apollo falls back to on a console too.
+    </p>
+  </div>
+
+  <div class="set-group">
+    <p class="psp-key-head"><span class="option-label">PS3 &mdash; console ID (IDPS)</span></p>
+    <div class="psp-key-inputs">
+      <input id="set-cid" type="text" inputmode="latin" spellcheck="false"
+             autocomplete="off" maxlength="32" placeholder="32 hex digits"
+             aria-label="PS3 console ID, as 32 hex digits">
+      <input id="set-user" type="number" min="1" max="99" step="1"
+             aria-label="PS3 user number" title="User number">
+    </div>
+    <p class="psp-key-why">
+      Inside <code>PARAM.PFD</code>, one of <code>PARAM.SFO</code>&rsquo;s four
+      hashes is keyed by the IDPS of a single machine &mdash; that is what binds
+      a save to a console. Name yours and the PS3 tool offers to re-bind a save
+      to it; leave it blank and every save keeps the binding it arrived with,
+      which is what patching one in place wants. The user number reaches only a
+      trophy folder&rsquo;s hashes.
+    </p>
+    <p class="psp-key-why">
+      Re-binding is the <code>PARAM.PFD</code> half of moving a save. A save
+      also carries account fields in its own <code>PARAM.SFO</code>, and those
+      are not touched here.
+    </p>
+  </div>
+
+  <div class="set-actions">
+    <button type="button" id="settings-save" class="gh-button">Save</button>
+    <button type="button" id="settings-clear" class="linkish">Clear both</button>
+  </div>
+
+  <p id="settings-status" class="status" role="status" aria-live="polite"></p>
 </dialog>
 
 <script type="module" src="./tools.js"></script>

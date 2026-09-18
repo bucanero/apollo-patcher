@@ -179,14 +179,28 @@ function heapCopy(ptr, len) {
     return new Uint8Array(M.HEAPU8.subarray(ptr, ptr + len));
 }
 
-/* Whatever the last PSP call produced, or null. */
-function pspOut() {
-    const ptr = M._apw_psp_out();
-    const len = M._apw_psp_out_size();
+/*
+ * Whatever the last PSP or PS3 savedata call produced, or null.
+ *
+ * One buffer serves both consoles, and that is safe because of how these
+ * handlers are shaped: each awaits ready() once and then runs straight through
+ * -- allocate, call, read the result -- with no further await. Two messages
+ * arriving together therefore cannot interleave between a call filling this
+ * buffer and its handler reading it.
+ */
+function savedataOut() {
+    const ptr = M._apw_savedata_out();
+    const len = M._apw_savedata_out_size();
     return ptr && len > 0 ? heapCopy(ptr, len) : null;
 }
 
 const pspError = (rc) => M.UTF8ToString(M._apw_psp_error(rc));
+const ps3Error = (rc) => M.UTF8ToString(M._apw_ps3_error(rc));
+
+const toHex = (bytes) =>
+    [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+
+
 
 const handlers = {
     async version() {
@@ -226,8 +240,7 @@ const handlers = {
             return {
                 ok: true,
                 key,
-                hex: [...key].map((b) => b.toString(16).padStart(2, '0'))
-                             .join('').toUpperCase(),
+                hex: toHex(key),
             };
         } finally {
             M._free(src);
@@ -261,8 +274,7 @@ const handlers = {
                 ok: true,
                 key,
                 entry: M.UTF8ToString(ip),
-                hex: [...key].map((b) => b.toString(16).padStart(2, '0'))
-                             .join('').toUpperCase(),
+                hex: toHex(key),
             };
         } finally {
             M._free(tp); M._free(dp); M._free(kp); M._free(ip);
@@ -278,7 +290,7 @@ const handlers = {
         try {
             const rc = M._apw_psp_decrypt(sp, s.length, dp, d.length, kp);
             if (rc !== 0) return { ok: false, error: pspError(rc) };
-            return { ok: true, files: [{ name, bytes: pspOut(), changed: true }] };
+            return { ok: true, files: [{ name, bytes: savedataOut(), changed: true }] };
         } finally {
             M._free(sp); M._free(dp); M._free(kp);
         }
@@ -307,7 +319,7 @@ const handlers = {
             return {
                 ok: true,
                 files: [
-                    { name, bytes: pspOut(), changed: true },
+                    { name, bytes: savedataOut(), changed: true },
                     { name: 'PARAM.SFO', bytes: heapCopy(sp, s.length), changed: true },
                 ],
             };
@@ -332,6 +344,264 @@ const handlers = {
             };
         } finally {
             M._free(sp);
+        }
+    },
+
+    /* ---- PS3 savedata --------------------------------------------------
+     *
+     * Same shape as the PSP handlers above, one console up. Two differences
+     * show up in every signature: the metadata file is PARAM.PFD rather than
+     * PARAM.SFO, and the key is per file as well as per game, so `sfid` rides
+     * along with the name. A null `sfid` is passed to C as a null pointer and
+     * means "this entry has a built-in key" -- PARAM.SFO and the trophy files.
+     *
+     * Names cross as C strings rather than JS ones: they are looked up against
+     * the PFD's own 65-byte name fields.
+     */
+
+    /*
+     * What a PARAM.PFD says about its save: version, whether it is a trophy
+     * folder, and the entries. That entry list IS the answer to what is
+     * protected, so the panel offers exactly those files and no others.
+     */
+    async ps3Info({ pfd }) {
+        await ready();
+        const bytes = new Uint8Array(pfd);
+        const ptr = alloc(bytes);
+        try {
+            const info = JSON.parse(
+                M.UTF8ToString(M._apw_ps3_pfd_json(ptr, bytes.length)));
+            return info.ok ? info : { ok: false, error: info.error };
+        } finally {
+            M._free(ptr);
+        }
+    },
+
+    /*
+     * A secure file ID out of apollo-patches' PS3/games.conf.
+     *
+     * The page fetches the file; the matching happens in C, so both rules the
+     * database needs live with the desktop app rather than being reimplemented
+     * here: the section is the LONGEST directory prefix (DiRT 3 files
+     * BLUS30724 and BLUS30724PROFILE separately, with different keys), and the
+     * file pattern is the FIRST match in file order (Devil May Cry lists DATA
+     * before *).
+     */
+    async ps3KeyFromDb({ text, directory, file }) {
+        await ready();
+        const bytes = new TextEncoder().encode(text);
+        const tp = alloc(bytes);
+        const dp = M.stringToNewUTF8(directory || '');
+        const fp = M.stringToNewUTF8(file || '');
+        const kp = M._malloc(16);
+        const ip = M._malloc(80);
+        try {
+            const rc = M._apw_ps3_key_from_db(tp, bytes.length, dp, fp, kp, ip, 80);
+            if (rc !== 0) return { ok: false, error: ps3Error(rc) };
+            const key = heapCopy(kp, 16);
+            /* `entry`, not `id`: the reply envelope is {id, ok, ...result}. */
+            return { ok: true, key, entry: M.UTF8ToString(ip), hex: toHex(key) };
+        } finally {
+            M._free(tp); M._free(dp); M._free(fp); M._free(kp); M._free(ip);
+        }
+    },
+
+    /*
+     * SAVEDATA_DIRECTORY out of a PS3 PARAM.SFO, which is what games.conf
+     * files its sections under. PARAM.PFD does not carry it, so a save folder
+     * that is not simply its title id -- DiRT 3's profile saves -- can only be
+     * identified from the SFO, or by the user saying so.
+     */
+    async ps3Folder({ sfo }) {
+        await ready();
+        const bytes = new Uint8Array(sfo);
+        const ptr = alloc(bytes);
+        try {
+            return { ok: true, folder: M.UTF8ToString(M._apw_ps3_sfo_directory(ptr, bytes.length)) };
+        } finally {
+            M._free(ptr);
+        }
+    },
+
+    /* 32 hex digits the user typed, validated by the same parser the database
+     * lookup uses. */
+    async ps3KeyFromHex({ hex }) {
+        await ready();
+        const hp = M.stringToNewUTF8((hex || '').trim());
+        const kp = M._malloc(16);
+        try {
+            const rc = M._apw_ps3_key_from_hex(hp, kp);
+            if (rc !== 0) return { ok: false, error: ps3Error(rc) };
+            const key = heapCopy(kp, 16);
+            return { ok: true, key, hex: toHex(key) };
+        } finally {
+            M._free(hp); M._free(kp);
+        }
+    },
+
+    /*
+     * Does the PARAM.PFD's recorded hash match this file? Offered before
+     * anything else touches the save: one that already disagrees was damaged
+     * before it got here, and patching would sign the damage into place.
+     */
+    async ps3Verify({ pfd, data, name, sfid }) {
+        await ready();
+        const p = new Uint8Array(pfd);
+        const d = new Uint8Array(data);
+        const pp = alloc(p), dp = alloc(d);
+        const kp = sfid ? alloc(new Uint8Array(sfid)) : 0;
+        const np = M.stringToNewUTF8(name || '');
+        try {
+            const rc = M._apw_ps3_verify(pp, p.length, np, dp, d.length, kp);
+            return rc === 0 ? { ok: true } : { ok: false, error: ps3Error(rc) };
+        } finally {
+            M._free(pp); M._free(dp); M._free(np); if (kp) M._free(kp);
+        }
+    },
+
+    async ps3Decrypt({ pfd, data, name, sfid }) {
+        await ready();
+        const p = new Uint8Array(pfd);
+        const d = new Uint8Array(data);
+        const pp = alloc(p), dp = alloc(d);
+        const kp = sfid ? alloc(new Uint8Array(sfid)) : 0;
+        const np = M.stringToNewUTF8(name || '');
+        try {
+            const rc = M._apw_ps3_decrypt(pp, p.length, np, dp, d.length, kp);
+            if (rc !== 0) return { ok: false, error: ps3Error(rc) };
+            return { ok: true, files: [{ name, bytes: savedataOut(), changed: true }] };
+        } finally {
+            M._free(pp); M._free(dp); M._free(np); if (kp) M._free(kp);
+        }
+    },
+
+    /*
+     * Encryption rewrites PARAM.PFD as well as producing the data file -- the
+     * entry's size and hash change, and the signatures over the whole table
+     * are regenerated to match. Both come back, in the same `files` shape
+     * apply() uses, because a save put back with a stale PARAM.PFD does not
+     * load and the page must not offer only one of them.
+     */
+    async ps3Encrypt({ pfd, data, name, sfid }) {
+        await ready();
+        const p = new Uint8Array(pfd);
+        const d = new Uint8Array(data);
+        const pp = alloc(p), dp = alloc(d);
+        const kp = sfid ? alloc(new Uint8Array(sfid)) : 0;
+        const np = M.stringToNewUTF8(name || '');
+        try {
+            const rc = M._apw_ps3_encrypt(pp, p.length, np, dp, d.length, kp);
+            if (rc !== 0) return { ok: false, error: ps3Error(rc) };
+            /* The PFD was rewritten in place, at the pointer we passed in. */
+            return {
+                ok: true,
+                files: [
+                    { name, bytes: savedataOut(), changed: true },
+                    { name: 'PARAM.PFD', bytes: heapCopy(pp, p.length), changed: true },
+                ],
+            };
+        } finally {
+            M._free(pp); M._free(dp); M._free(np); if (kp) M._free(kp);
+        }
+    },
+
+    /* Regenerate the PARAM.PFD signatures alone -- what a PFD whose entries
+     * something else edited needs before the console will accept it. */
+    async ps3Resign({ pfd }) {
+        await ready();
+        const p = new Uint8Array(pfd);
+        const pp = alloc(p);
+        try {
+            const rc = M._apw_ps3_resign(pp, p.length);
+            if (rc !== 0) return { ok: false, error: ps3Error(rc) };
+            const bytes = heapCopy(pp, p.length);
+            return {
+                ok: true,
+                files: [{ name: 'PARAM.PFD', bytes, changed: !sameBytes(bytes, p) }],
+            };
+        } finally {
+            M._free(pp);
+        }
+    },
+
+    /* ---- which console a save is for ------------------------------------
+     *
+     * Two settings, one per console, both of which change what the wrapping
+     * side WRITES and neither of which affects unwrapping:
+     *
+     *   the PSP's Fuse ID    reaches the two PARAM.SFO hashes that savedata
+     *                        modes 4 and 6 derive from the console's own fuse
+     *   the PS3's console ID reaches PARAM.SFO's second hash in PARAM.PFD,
+     *                        which is what binds a save to one machine
+     *
+     * They live in the wasm module, which is this worker's alone, so the page
+     * pushes them here whenever they change and at start-up. Sending an empty
+     * string for either clears it back to the default.
+     */
+    async settings({ pspFuseId, ps3ConsoleId, ps3UserId }) {
+        await ready();
+        const errors = [];
+
+        if (pspFuseId !== undefined) {
+            const hp = M.stringToNewUTF8(pspFuseId || '');
+            const rc = M._apw_psp_set_fuse_id(hp);
+            M._free(hp);
+            if (rc !== 0) errors.push(`Fuse ID: ${pspError(rc)}`);
+        }
+
+        if (ps3ConsoleId !== undefined) {
+            const cp = M.stringToNewUTF8(ps3ConsoleId || '');
+            const rc = M._apw_ps3_set_console(cp, ps3UserId | 0);
+            M._free(cp);
+            if (rc !== 0) errors.push(`Console ID: ${ps3Error(rc)}`);
+        }
+
+        /* Report what is actually in effect rather than what was asked for, so
+         * the page shows the truth after a rejected value. */
+        return {
+            ok: errors.length === 0,
+            error: errors.join('; ') || undefined,
+            pspFuseId: M.UTF8ToString(M._apw_psp_fuse_id()),
+            ps3: JSON.parse(M.UTF8ToString(M._apw_ps3_console())),
+        };
+    },
+
+    /* The disc hash key a games.conf section names, '' when it names none. */
+    async ps3Dhk({ text, directory }) {
+        await ready();
+        const bytes = new TextEncoder().encode(text);
+        const tp = alloc(bytes);
+        const dp = M.stringToNewUTF8(directory || '');
+        try {
+            return { ok: true, hex: M.UTF8ToString(M._apw_ps3_dhk_from_db(tp, bytes.length, dp)) };
+        } finally {
+            M._free(tp); M._free(dp);
+        }
+    },
+
+    /*
+     * Re-bind a save to the console in Settings: rewrite the three PARAM.SFO
+     * hashes that name a machine, and resign the PARAM.PFD around them.
+     *
+     * Only PARAM.PFD comes back. PARAM.SFO is read, not written -- its own
+     * account fields are a separate binding this does not touch.
+     */
+    async ps3Rebind({ pfd, sfo, dhk }) {
+        await ready();
+        const p = new Uint8Array(pfd);
+        const f = new Uint8Array(sfo);
+        const pp = alloc(p), fp = alloc(f);
+        const dp = M.stringToNewUTF8(dhk || '');
+        try {
+            const rc = M._apw_ps3_rebind(pp, p.length, fp, f.length, dp);
+            if (rc !== 0) return { ok: false, error: ps3Error(rc) };
+            const bytes = heapCopy(pp, p.length);
+            return {
+                ok: true,
+                files: [{ name: 'PARAM.PFD', bytes, changed: !sameBytes(bytes, p) }],
+            };
+        } finally {
+            M._free(pp); M._free(fp); M._free(dp);
         }
     },
 

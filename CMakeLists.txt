@@ -64,12 +64,13 @@ set(MBEDTLS_DIR "${APOLLO_ROOT}/mbedtls-2.16.12")
 # build does not use it — the page fetches patches over the network instead —
 # but it costs nothing to carry in the shared library.
 #
-# core/psp/ is the PSP's own savedata encryption — the layer BELOW anything a
-# .savepatch does, and the reason a save taken straight off a Memory Stick used
-# to come out of the patch engine as garbage. Vendored from apollo-psp; see the
-# note at the top of core/psp/psp_savedata.c for why it lives here rather than
-# in apollo-lib, and what would move it there. It needs only mbedTLS's AES and
-# SHA1, both of which the engine already links.
+# core/psp/ and core/ps3/ are the consoles' own savedata encryption — the layer
+# BELOW anything a .savepatch does, and the reason a save taken straight off a
+# Memory Stick or a PS3 hard drive comes out of the patch engine as garbage.
+# Derived from apollo-psp and pfdtool respectively; see the note at the top of
+# core/psp/psp_savedata.c for why they live here rather than in apollo-lib, and
+# what would move them there. They need only mbedTLS's AES and SHA1, both of
+# which the engine already links.
 # ---------------------------------------------------------------------------
 set(ENGINE_SRCS
     ${APOLLO_ROOT}/source/crc_util.c
@@ -86,14 +87,18 @@ set(PSP_SRCS
     core/psp/kirk_engine.c
     core/psp/psp_savedata.c)
 
-add_library(apollo_engine STATIC ${ENGINE_SRCS} ${PSP_SRCS}
+set(PS3_SRCS
+    core/ps3/pfd_savedata.c)
+
+add_library(apollo_engine STATIC ${ENGINE_SRCS} ${PSP_SRCS} ${PS3_SRCS}
                                  core/apollo_ctrl.c core/patchdb.c)
 target_include_directories(apollo_engine PUBLIC
     ${APOLLO_ROOT}/include
     ${APOLLO_ROOT}/tools          # provides dbglogger.h prototype
     ${MBEDTLS_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/core
-    ${CMAKE_CURRENT_SOURCE_DIR}/core/psp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/psp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/ps3)
 target_compile_definitions(apollo_engine PRIVATE _GNU_SOURCE _USE_MBEDTLS)
 
 # mbedcrypto: prefer the prebuilt static lib (built by CI), else expect a
@@ -212,6 +217,14 @@ target_link_libraries(apollo_ctrl_test PRIVATE apollo_engine)
 # real one when you have it.
 add_executable(apollo_psp_test core/test_psp.c)
 target_link_libraries(apollo_psp_test PRIVATE apollo_engine)
+
+# PS3 savedata: bounds checks on the PARAM.PFD parser, known-answer vectors for
+# the file cipher, and the games.conf lookup rules. `--corpus DIR` walks a tree
+# of real saves and checks every hash the console wrote against one recomputed
+# here, which is what says the implementation is right rather than merely
+# self-consistent.
+add_executable(apollo_ps3_test core/test_ps3.c)
+target_link_libraries(apollo_ps3_test PRIVATE apollo_engine)
 
 # ---------------------------------------------------------------------------
 # Front-ends.

@@ -10,7 +10,7 @@ Contents:
     PS2/ PS3/ ...       the .savepatch files themselves
     python/             helper modules Python patches import
     PSP/gamekeys.txt    the PSP game-key database, so the desktop app can
-                        unwrap a PSP save's console encryption offline
+    PS3/games.conf      unwrap a PSP or PS3 save's console encryption offline
 
 The GUI reads the .savepatch entries straight out of the zip, but the Python
 modules have to reach a real filesystem: MicroPython's import goes through
@@ -56,12 +56,14 @@ def collect(root):
         names += [f"python/{e}" for e in sorted(os.listdir(py_dir))
                   if e.endswith(".py")]
 
-    # The PSP game keys. 16KB, and the only way the desktop app can take the
-    # console's own encryption off a save without a network — the web page
-    # fetches the same file from the CDN. It rides in the .savepatch sweep
-    # above only by accident of extension, so name it explicitly.
-    if os.path.isfile(os.path.join(root, "PSP", "gamekeys.txt")):
-        names.append("PSP/gamekeys.txt")
+    # The console key databases: PSP game keys (16KB) and PS3 secure file ids
+    # (280KB, ~80KB in the zip). They are the only way the desktop app can take
+    # a console's own encryption off a save without a network — the web page
+    # fetches the same files from the CDN. Neither has a .savepatch extension,
+    # so the sweep above misses them and they are named explicitly.
+    for key_db in ("PSP/gamekeys.txt", "PS3/games.conf"):
+        if os.path.isfile(os.path.join(root, key_db)):
+            names.append(key_db)
 
     return names
 

@@ -17,6 +17,9 @@
 #include <fstream>
 #include <mutex>
 #include <sys/stat.h>   // telling a save FOLDER from a save file (see open_path)
+#ifdef _WIN32
+#include <direct.h>     // _mkdir, for the settings directory
+#endif
 
 #include "imgui.h"
 #include "imgui_internal.h"   // PushItemFlag + ImGuiItemFlags_MixedValue (tri-state)
@@ -36,6 +39,8 @@
 #include "apollo_ctrl.h"   // manages its own C linkage (and apollo.h is C++-safe)
 #include "patchdb.h"       // bundled apollo-patches.zip (browsable database)
 #include "psp_savedata.h"  // the PSP's own savedata encryption, below any patch
+#include "pfd_savedata.h"  // ...and the PS3's, which works the same way
+#include "kirk_engine.h"   // KIRK_HOST_FUSE_ID, the Fuse ID default
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -124,6 +129,38 @@ struct AppState {
     };
     Psp psp;
 
+    // ---- the PS3's own savedata encryption -------------------------------
+    //
+    // The same story one console up, detected the same way. The differences
+    // that show up below:
+    //
+    //   PARAM.PFD, not PARAM.SFO   It lists the files that are protected, and
+    //                              it is REWRITTEN when one is re-encrypted.
+    //   the folder is the lookup   PS3/games.conf files its keys under SAVE
+    //                              DIRECTORY names, and PARAM.PFD carries no
+    //                              such string. The desktop app has the folder
+    //                              on disk, so this is one place the web page
+    //                              has to ask and this does not.
+    struct Ps3 {
+        bool        found = false;      // a PARAM.PFD beside the target lists it
+        bool        wrap  = true;       // unwrap before patching, re-wrap after
+        std::string pfd_path;           // the PARAM.PFD that was found
+        std::string sfo_path;           // its PARAM.SFO, when one sits beside it
+        std::string folder;             // the save directory, the key lookup
+        std::string listed;             // the PARAM.PFD entry to use
+        int         version = 0;        // 3 or 4
+        bool        trophy = false;
+        unsigned char sfid[APFD_SFID_LEN] = {0};
+        bool        have_key = false;
+        std::string key_note;           // where the key came from, for the UI
+        char        key_hex[33] = "";   // the editable field
+        bool        hash_ok = true;     // does PARAM.PFD still describe the file
+        bool        hash_checked = false;
+
+        void clear() { *this = Ps3(); }
+    };
+    Ps3 ps3;
+
     void append_log(const char* line) {
         std::lock_guard<std::mutex> lk(log_mtx);
         log += line;
@@ -202,6 +239,14 @@ static ImVec4 type_color(int t) {
 static bool psp_blocked() {
     return g_app.psp.found && g_app.psp.wrap && !g_app.psp.have_key;
 }
+
+// Same rule, same reason, for the PS3.
+static bool ps3_blocked() {
+    return g_app.ps3.found && g_app.ps3.wrap && !g_app.ps3.have_key;
+}
+
+// Either console's layer is in the way.
+static bool native_blocked() { return psp_blocked() || ps3_blocked(); }
 
 static bool code_options_ready(apctl_code_t* c) {
     for (int g = 0; g < apctl_opt_group_count(c); ++g)
@@ -433,12 +478,12 @@ static bool hex_write_back() {
     return true;
 }
 
-// ---- the PSP's own savedata encryption -------------------------------------
+// ---- the consoles' own savedata encryption ---------------------------------
 //
-// Everything here is buffer work; core/psp does the crypto. What the desktop
-// app adds over the web page is that it can look around: the save folder is
-// right there, so the PARAM.SFO, the file list and the game key are all found
-// rather than asked for.
+// Everything here is buffer work; core/psp and core/ps3 do the crypto. What
+// the desktop app adds over the web page is that it can look around: the save
+// folder is right there, so the metadata file, the file list, the folder name
+// and the key are all found rather than asked for.
 
 static bool read_all(const std::string& path, std::vector<unsigned char>& out) {
     std::ifstream in(path, std::ios::binary);
@@ -451,6 +496,112 @@ static bool write_all(const std::string& path, const unsigned char* data, size_t
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out) return false;
     out.write(reinterpret_cast<const char*>(data), (std::streamsize)len);
+    return (bool)out;
+}
+
+// ---- settings --------------------------------------------------------------
+//
+// Which console a save is written FOR. Both values change what gets WRITTEN
+// and neither affects reading one, which is why both are safe to leave empty:
+// blank means "keep whatever the save already says", and that is what patching
+// a save in place wants.
+//
+//   the PSP's Fuse ID    reaches the two PARAM.SFO hashes that savedata modes
+//                        4 and 6 derive from the console's own fuse
+//   the PS3's console ID reaches PARAM.SFO's second hash inside PARAM.PFD,
+//                        which is what binds a save to one machine
+//
+// Kept in the user's config directory rather than beside the app, because it
+// describes their console and not this copy of the program. ImGui's own ini is
+// deliberately off (see main), so this is the only thing written there.
+struct Settings {
+    char fuse_hex[17]    = "";     // 16 hex digits, or empty for the default
+    char console_hex[33] = "";     // 32 hex digits, or empty for "leave alone"
+    int  user_id         = 1;
+    std::string status;            // what the last save or load had to say
+};
+static Settings g_settings;
+static bool g_want_settings = false;
+
+static std::string config_dir() {
+#ifdef _WIN32
+    const char* base = getenv("APPDATA");
+    return base && *base ? std::string(base) + "\\apollo-patcher\\" : std::string();
+#elif defined(__APPLE__)
+    const char* home = getenv("HOME");
+    return home && *home
+        ? std::string(home) + "/Library/Application Support/apollo-patcher/"
+        : std::string();
+#else
+    const char* xdg = getenv("XDG_CONFIG_HOME");
+    if (xdg && *xdg) return std::string(xdg) + "/apollo-patcher/";
+    const char* home = getenv("HOME");
+    return home && *home ? std::string(home) + "/.config/apollo-patcher/" : std::string();
+#endif
+}
+
+static std::string settings_path() {
+    const std::string dir = config_dir();
+    return dir.empty() ? std::string() : dir + "settings.txt";
+}
+
+// Hand the values to the two engines. Called after a load and after every
+// edit, so what is on screen is what will be written.
+static void settings_apply() {
+    apsp_set_fuse_id(KIRK_HOST_FUSE_ID);
+    if (strlen(g_settings.fuse_hex) == 16) {
+        unsigned long long v = strtoull(g_settings.fuse_hex, nullptr, 16);
+        apsp_set_fuse_id((uint64_t)v);
+    }
+
+    apfd_console_t console;
+    memset(&console, 0, sizeof console);
+    if (strlen(g_settings.console_hex) == 32 &&
+        apfd_sfid_from_hex(g_settings.console_hex, console.console_id) == APFD_OK) {
+        console.user_id = (uint32_t)(g_settings.user_id > 0 ? g_settings.user_id : 1);
+        apfd_set_console(&console);
+    } else {
+        apfd_set_console(nullptr);
+    }
+}
+
+static void settings_load() {
+    const std::string path = settings_path();
+    std::ifstream in(path);
+    if (!in) { settings_apply(); return; }
+
+    std::string line;
+    while (std::getline(in, line)) {
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos || line.empty() || line[0] == '#') continue;
+        const std::string key = line.substr(0, eq);
+        const std::string val = line.substr(eq + 1);
+
+        if (key == "psp_fuse_id")    snprintf(g_settings.fuse_hex, sizeof g_settings.fuse_hex, "%s", val.c_str());
+        else if (key == "ps3_console_id") snprintf(g_settings.console_hex, sizeof g_settings.console_hex, "%s", val.c_str());
+        else if (key == "ps3_user_id")    g_settings.user_id = atoi(val.c_str());
+    }
+    settings_apply();
+}
+
+static bool settings_store() {
+    const std::string dir = config_dir();
+    if (dir.empty()) return false;
+
+#ifdef _WIN32
+    _mkdir(dir.c_str());
+#else
+    mkdir(dir.c_str(), 0777);
+#endif
+
+    std::ofstream out(settings_path(), std::ios::trunc);
+    if (!out) return false;
+
+    out << "# Apollo Save Patcher - which console saves are written FOR.\n"
+        << "# Both are optional; blank keeps whatever a save already says.\n"
+        << "psp_fuse_id=" << g_settings.fuse_hex << "\n"
+        << "ps3_console_id=" << g_settings.console_hex << "\n"
+        << "ps3_user_id=" << g_settings.user_id << "\n";
     return (bool)out;
 }
 
@@ -635,6 +786,281 @@ static bool psp_resign() {
     return true;
 }
 
+// ---- the PS3's own savedata encryption -------------------------------------
+
+// The secure file ID, from the database in the bundle. Offline by design, the
+// same way the PSP's game keys are: PS3/games.conf travels in
+// apollo-patches.zip, so the desktop app needs no network to open a save. The
+// MATCHING is C shared with the page (apfd_sfid_from_conf) -- longest save
+// directory prefix for the section, first pattern in file order for the file.
+static bool ps3_key_from_bundle(const std::string& folder, const std::string& file,
+                                unsigned char sfid[APFD_SFID_LEN], std::string& note) {
+    char*  text = nullptr;
+    size_t len  = 0;
+
+    if (!g_db.db || !patchdb_read_file(g_db.db, "PS3/games.conf", &text, &len)) {
+        note = "no key database in the bundle";
+        return false;
+    }
+
+    char entry[80] = "";
+    int rc = apfd_sfid_from_conf(text, len, folder.c_str(), file.c_str(),
+                                 sfid, entry, sizeof entry);
+    free(text);
+
+    if (rc != APFD_OK) { note = apfd_strerror(rc); return false; }
+    note = std::string("from the Apollo database (") + entry + ")";
+    return true;
+}
+
+// The disc hash key the same section names, for re-binding. Almost every game
+// names none and falls back to a built-in one, so a miss is the normal answer
+// and the caller carries on.
+static std::string ps3_dhk_from_bundle(const std::string& folder) {
+    char*  text = nullptr;
+    size_t len  = 0;
+    unsigned char dhk[APFD_DHK_LEN];
+    char hex[APFD_DHK_LEN * 2 + 1] = "";
+
+    if (!g_db.db || !patchdb_read_file(g_db.db, "PS3/games.conf", &text, &len))
+        return "";
+
+    int rc = apfd_dhk_from_conf(text, len, folder.c_str(), dhk);
+    free(text);
+    if (rc != APFD_OK)
+        return "";
+
+    for (int i = 0; i < APFD_DHK_LEN; i++)
+        snprintf(hex + i * 2, 3, "%02X", dhk[i]);
+    return hex;
+}
+
+// Is the chosen target a PS3 save the console encrypted? Answered by looking
+// for a PARAM.PFD beside it whose entry table LISTS it. That table is the
+// authoritative answer to what is protected -- a game that encrypts nothing
+// ships a PARAM.PFD holding only PARAM.SFO -- so no key database is consulted
+// to find out, and a stale one cannot make the answer wrong.
+static void ps3_detect() {
+    g_app.ps3.clear();
+    if (g_app.target_path.empty()) return;
+
+    const std::string folder_path = dir_of(g_app.target_path);
+    const std::string pfd_path = folder_path + "PARAM.PFD";
+    std::vector<unsigned char> pfd;
+    if (!read_all(pfd_path, pfd) || apfd_valid(pfd.data(), pfd.size()) != APFD_OK)
+        return;
+
+    const char* target = base_name(g_app.target_path);
+    int index = apfd_find(pfd.data(), pfd.size(), target);
+    if (index < 0) return;               // listed by nothing: not protected
+
+    char listed[APFD_NAME_LEN] = "";
+    apfd_entry_name(pfd.data(), pfd.size(), index, listed, sizeof listed);
+
+    // PARAM.SFO is listed in every PARAM.PFD and is never encrypted, so a
+    // target that IS the SFO is not something this offers to unwrap.
+    if (apfd_entry_has_builtin_key(listed)) return;
+
+    g_app.ps3.found    = true;
+    g_app.ps3.pfd_path = pfd_path;
+    g_app.ps3.listed   = listed;
+    g_app.ps3.version  = apfd_version(pfd.data(), pfd.size());
+    g_app.ps3.trophy   = apfd_is_trophy(pfd.data(), pfd.size()) != 0;
+
+    // The save folder, which is the key lookup. The folder on disk is the
+    // answer, and a PARAM.SFO beside it confirms it -- worth preferring,
+    // because a folder somebody renamed on the way off the console would
+    // otherwise look up nothing.
+    {
+        std::string dir = folder_path;
+        while (dir.size() > 1 && (dir.back() == '/' || dir.back() == '\\'))
+            dir.pop_back();
+        g_app.ps3.folder = base_name(dir);
+    }
+
+    std::vector<unsigned char> sfo;
+    const std::string sfo_path = folder_path + "PARAM.SFO";
+    if (read_all(sfo_path, sfo)) {
+        char named[64] = "";
+        g_app.ps3.sfo_path = sfo_path;
+        if (apsp_sfo_directory(sfo.data(), sfo.size(), named, sizeof named) == APSP_OK
+            && named[0])
+            g_app.ps3.folder = named;
+    }
+
+    if (ps3_key_from_bundle(g_app.ps3.folder, g_app.ps3.listed,
+                            g_app.ps3.sfid, g_app.ps3.key_note)) {
+        g_app.ps3.have_key = true;
+        for (int i = 0; i < APFD_SFID_LEN; i++)
+            snprintf(g_app.ps3.key_hex + i * 2, 3, "%02X", g_app.ps3.sfid[i]);
+    }
+
+    // Does PARAM.PFD still describe the file? A save that already disagrees
+    // was damaged before it got here, and patching would sign the damage into
+    // place. Only asked when the file is still the length the console left it:
+    // one somebody already decrypted cannot match, and saying so would be
+    // crying wolf.
+    std::vector<unsigned char> disk;
+    long long size = apfd_entry_size(pfd.data(), pfd.size(), index);
+    if (g_app.ps3.have_key && size >= 0 && read_all(g_app.target_path, disk)
+        && disk.size() == apfd_encrypted_size((size_t)size)) {
+        g_app.ps3.hash_checked = true;
+        g_app.ps3.hash_ok = apfd_verify_file(pfd.data(), pfd.size(),
+                                             g_app.ps3.listed.c_str(),
+                                             disk.data(), disk.size(),
+                                             g_app.ps3.sfid) == APFD_OK;
+    }
+
+    char msg[512];
+    snprintf(msg, sizeof msg, "PS3 save detected: %s in %s, PFD v%d, key %s",
+             g_app.ps3.listed.c_str(), g_app.ps3.folder.c_str(),
+             g_app.ps3.version, g_app.ps3.key_note.c_str());
+    g_app.append_log(msg);
+    if (g_app.ps3.hash_checked && !g_app.ps3.hash_ok)
+        g_app.append_log("[!] PS3: PARAM.PFD's recorded hash does not match this file");
+}
+
+// Take the console's layer off the target file, in place.
+static bool ps3_unwrap_target() {
+    std::vector<unsigned char> pfd, enc;
+    if (!read_all(g_app.ps3.pfd_path, pfd) || !read_all(g_app.target_path, enc)) {
+        g_app.append_log("[!] PS3: could not read the save or its PARAM.PFD");
+        return false;
+    }
+
+    long long want = apfd_decrypted_size(pfd.data(), pfd.size(), g_app.ps3.listed.c_str());
+    if (want < 0) {
+        g_app.append_log((std::string("[!] PS3 decrypt failed: ")
+                          + apfd_strerror((int)want)).c_str());
+        return false;
+    }
+
+    std::vector<unsigned char> out((size_t)want ? (size_t)want : 1);
+    size_t got = 0;
+    int rc = apfd_decrypt(pfd.data(), pfd.size(), g_app.ps3.listed.c_str(),
+                          enc.data(), enc.size(), g_app.ps3.sfid,
+                          out.data(), out.size(), &got);
+    if (rc != APFD_OK) {
+        g_app.append_log((std::string("[!] PS3 decrypt failed: ") + apfd_strerror(rc)).c_str());
+        return false;
+    }
+    if (!write_all(g_app.target_path, out.data(), got)) {
+        g_app.append_log("[!] PS3: could not write the decrypted save");
+        return false;
+    }
+
+    char msg[256];
+    snprintf(msg, sizeof msg, "PS3 layer removed: %zu -> %zu bytes", enc.size(), got);
+    g_app.append_log(msg);
+    return true;
+}
+
+// ...and put it back, rewriting PARAM.PFD with it. Both files are written or
+// neither is: a save whose PARAM.PFD does not match its data does not load, so
+// a half-done wrap is worse than none.
+static bool ps3_wrap_target() {
+    std::vector<unsigned char> pfd, plain;
+    if (!read_all(g_app.ps3.pfd_path, pfd) || !read_all(g_app.target_path, plain)) {
+        g_app.append_log("[!] PS3: could not read the save or its PARAM.PFD");
+        return false;
+    }
+
+    std::vector<unsigned char> out(apfd_encrypted_size(plain.size()));
+    size_t got = 0;
+    int rc = apfd_encrypt(pfd.data(), pfd.size(), g_app.ps3.listed.c_str(),
+                          plain.data(), plain.size(), g_app.ps3.sfid,
+                          out.data(), out.size(), &got);
+    if (rc != APFD_OK) {
+        g_app.append_log((std::string("[!] PS3 encrypt failed: ") + apfd_strerror(rc)).c_str());
+        return false;
+    }
+
+    // PARAM.PFD first, for the same reason the PSP path writes PARAM.SFO
+    // first: this order leaves the metadata describing bytes that CAN be
+    // produced again by re-running the wrap.
+    if (!write_all(g_app.ps3.pfd_path, pfd.data(), pfd.size())) {
+        g_app.append_log("[!] PS3: could not write PARAM.PFD");
+        return false;
+    }
+    if (!write_all(g_app.target_path, out.data(), got)) {
+        g_app.append_log("[!] PS3: could not write the encrypted save");
+        return false;
+    }
+
+    char msg[256];
+    snprintf(msg, sizeof msg, "PS3 layer restored: %zu -> %zu bytes, PARAM.PFD rewritten",
+             plain.size(), got);
+    g_app.append_log(msg);
+    return true;
+}
+
+// Regenerate the PARAM.PFD signatures alone, leaving every entry as it is.
+static bool ps3_resign() {
+    std::vector<unsigned char> pfd;
+    if (!read_all(g_app.ps3.pfd_path, pfd)) {
+        g_app.append_log("[!] PS3: could not read PARAM.PFD");
+        return false;
+    }
+    int rc = apfd_resign(pfd.data(), pfd.size());
+    if (rc != APFD_OK) {
+        g_app.append_log((std::string("[!] PS3 resign failed: ") + apfd_strerror(rc)).c_str());
+        return false;
+    }
+    if (!write_all(g_app.ps3.pfd_path, pfd.data(), pfd.size())) {
+        g_app.append_log("[!] PS3: could not write PARAM.PFD");
+        return false;
+    }
+    g_app.append_log("PARAM.PFD resigned");
+    return true;
+}
+
+// Re-bind the save to the console named in Settings: rewrite the three
+// PARAM.SFO hashes that name a machine, and resign PARAM.PFD around them.
+//
+// PARAM.SFO is read, not written. Its own account fields are a separate
+// binding, and this does not touch them.
+static bool ps3_rebind() {
+    std::vector<unsigned char> pfd, sfo;
+    apfd_console_t console, saved;
+
+    if (!apfd_get_console(&saved)) {
+        g_app.append_log("[!] PS3: no console ID in Settings, so there is nothing to bind to");
+        return false;
+    }
+    if (!read_all(g_app.ps3.pfd_path, pfd) || !read_all(g_app.ps3.sfo_path, sfo)) {
+        g_app.append_log("[!] PS3: could not read PARAM.PFD or PARAM.SFO");
+        return false;
+    }
+
+    // The disc hash key keys one of the three and is per GAME, so it rides
+    // with the call rather than living in Settings.
+    console = saved;
+    memset(console.disc_hash_key, 0, APFD_DHK_LEN);
+    const std::string dhk = ps3_dhk_from_bundle(g_app.ps3.folder);
+    if (dhk.size() == APFD_DHK_LEN * 2)
+        apfd_sfid_from_hex(dhk.c_str(), console.disc_hash_key);
+    apfd_set_console(&console);
+
+    int rc = apfd_update_file(pfd.data(), pfd.size(), "PARAM.SFO",
+                              sfo.data(), sfo.size(), nullptr);
+    apfd_set_console(&saved);
+
+    if (rc != APFD_OK) {
+        g_app.append_log((std::string("[!] PS3 re-bind failed: ") + apfd_strerror(rc)).c_str());
+        return false;
+    }
+    if (!write_all(g_app.ps3.pfd_path, pfd.data(), pfd.size())) {
+        g_app.append_log("[!] PS3: could not write PARAM.PFD");
+        return false;
+    }
+
+    const std::string note = "PARAM.PFD re-bound to the console in Settings ("
+                           + (dhk.empty() ? std::string("fallback disc hash key")
+                                          : "disc hash key " + dhk) + ")";
+    g_app.append_log(note.c_str());
+    return true;
+}
+
 static void load_patch(const std::string& path) {
     g_app.close();
     apctl_session_t* s = apctl_open_file(path.c_str());
@@ -783,9 +1209,11 @@ static void load_patch_from_db(int index);
 static void adopt_target(const std::string& path) {
     g_app.target_path = path;
 
-    // Look around the new target for a PARAM.SFO that lists it, so a PSP save
-    // announces itself instead of having to be declared.
+    // Look around the new target for the metadata that lists it, so a save the
+    // console encrypted announces itself instead of having to be declared. Only
+    // one can match: the two look for different files.
     psp_detect();
+    ps3_detect();
 
     // ...and for the patch its title ID names. Loaded outright only when
     // nothing is open: load_patch_from_db() closes the current session, and
@@ -820,20 +1248,36 @@ static void open_path(const std::string& path) {
     // The directory itself must never become the target: nothing can read it,
     // and the failure would surface much later with no explanation.
     if (is_dir(path)) {
-        std::vector<unsigned char> sfo;
-        char name[APSP_NAME_LEN + 1];
-        const std::string sfo_path = path + "/PARAM.SFO";
+        std::vector<unsigned char> meta;
+        char name[APFD_NAME_LEN] = "";
 
-        if (read_all(sfo_path, sfo) &&
-            apsp_sfo_valid(sfo.data(), sfo.size()) == APSP_OK &&
-            apsp_sfo_file_count(sfo.data(), sfo.size()) > 0 &&
-            apsp_sfo_file_name(sfo.data(), sfo.size(), 0, name, sizeof name) == APSP_OK) {
+        // A PSP save folder: PARAM.SFO names the files the console encrypted.
+        if (read_all(path + "/PARAM.SFO", meta) &&
+            apsp_sfo_valid(meta.data(), meta.size()) == APSP_OK &&
+            apsp_sfo_file_count(meta.data(), meta.size()) > 0 &&
+            apsp_sfo_file_name(meta.data(), meta.size(), 0, name, sizeof name) == APSP_OK) {
             adopt_target(path + "/" + name);
             return;
         }
-        g_app.append_log(("[!] " + path + " is a folder, and not a PSP save one "
-                          "(no PARAM.SFO listing an encrypted file). Pick the "
-                          "save file itself.").c_str());
+
+        // A PS3 one: PARAM.PFD's entry table does. PARAM.SFO is listed there
+        // too and is never encrypted, so it is skipped -- the first entry with
+        // a key of its own is what a patch is about.
+        if (read_all(path + "/PARAM.PFD", meta) &&
+            apfd_valid(meta.data(), meta.size()) == APFD_OK) {
+            const int n = apfd_entry_count(meta.data(), meta.size());
+            for (int i = 0; i < n; i++) {
+                if (apfd_entry_name(meta.data(), meta.size(), i, name, sizeof name) != APFD_OK)
+                    continue;
+                if (apfd_entry_has_builtin_key(name)) continue;
+                adopt_target(path + "/" + name);
+                return;
+            }
+        }
+
+        g_app.append_log(("[!] " + path + " is a folder, and not a save one "
+                          "(no PARAM.SFO or PARAM.PFD listing an encrypted file). "
+                          "Pick the save file itself.").c_str());
         return;
     }
 
@@ -900,21 +1344,33 @@ static void apply_selected() {
     // after — the reverse order, which is not negotiable: wrapping first would
     // encrypt the ciphertext. If it will not come off, stop: patching a file
     // that is still encrypted writes plausible-looking damage.
-    if (psp_blocked()) {
-        g_app.apply_msg = "This is a PSP save and its game key is not known yet, so "
-                          "nothing was patched.\nSupply the key, or untick the unwrap "
-                          "box if the file is already decrypted.";
+    if (native_blocked()) {
+        g_app.apply_msg = psp_blocked()
+            ? "This is a PSP save and its game key is not known yet, so nothing was "
+              "patched.\nSupply the key, or untick the unwrap box if the file is "
+              "already decrypted."
+            : "This is a PS3 save and its secure file ID is not known yet, so nothing "
+              "was patched.\nSupply the ID, or untick the unwrap box if the file is "
+              "already decrypted.";
         g_app.open_apply_popup = true;
         return;
     }
 
+    // Which console's layer is in play, if either. The two cannot both be: one
+    // looks for a PARAM.SFO that lists the target, the other for a PARAM.PFD.
     const bool psp = g_app.psp.found && g_app.psp.wrap && g_app.psp.have_key && target;
-    if (psp) {
-        g_app.append_log("=== Removing the PSP's own encryption");
-        if (!psp_unwrap_target()) {
+    const bool ps3 = g_app.ps3.found && g_app.ps3.wrap && g_app.ps3.have_key && target;
+    const bool native = psp || ps3;
+    const char* console = psp ? "PSP" : "PS3";
+    const char* meta    = psp ? "PARAM.SFO" : "PARAM.PFD";
+
+    if (native) {
+        g_app.append_log((std::string("=== Removing the ") + console
+                          + "'s own encryption").c_str());
+        if (!(psp ? psp_unwrap_target() : ps3_unwrap_target())) {
             g_app.show_log = true;
-            g_app.apply_msg = "The PSP layer would not come off, so nothing was patched.\n"
-                              "Check the log for details.";
+            g_app.apply_msg = std::string("The ") + console + " layer would not come off, "
+                              "so nothing was patched.\nCheck the log for details.";
             g_app.open_apply_popup = true;
             return;
         }
@@ -941,24 +1397,29 @@ static void apply_selected() {
     // either way, and leaving it that way would be leaving the user with
     // something the console cannot read and no obvious way back.
     bool rewrapped = true;
-    if (psp) {
-        g_app.append_log("=== Restoring the PSP's own encryption");
-        rewrapped = psp_wrap_target();
+    if (native) {
+        g_app.append_log((std::string("=== Restoring the ") + console
+                          + "'s own encryption").c_str());
+        rewrapped = psp ? psp_wrap_target() : ps3_wrap_target();
         if (!rewrapped) errors++;
     }
 
     // Result pop-up message.
-    char msg[256];
+    char msg[320];
     if (errors == 0) {
-        snprintf(msg, sizeof msg, "All done — %d code(s) applied successfully.%s", applied,
-                 psp ? "\nThe PSP layer was taken off and put back, and PARAM.SFO"
-                       " was rewritten with it." : "");
-    } else if (psp && !rewrapped) {
+        char tail[160] = "";
+        if (native)
+            snprintf(tail, sizeof tail,
+                     "\nThe %s layer was taken off and put back, and %s was "
+                     "rewritten with it.", console, meta);
+        snprintf(msg, sizeof msg, "All done — %d code(s) applied successfully.%s",
+                 applied, tail);
+    } else if (native && !rewrapped) {
         g_app.show_log = true;
         snprintf(msg, sizeof msg,
-                 "The PSP layer could not be put back, so the save on disk is "
+                 "The %s layer could not be put back, so the save on disk is "
                  "DECRYPTED.\nCheck the log, then use \"Re-encrypt\" below once the "
-                 "cause is fixed.");
+                 "cause is fixed.", console);
     } else {
         g_app.show_log = true;   // reveal the log so the user can inspect
         snprintf(msg, sizeof msg, "%d of %d code(s) failed to apply.\nCheck the log for details.",
@@ -1532,6 +1993,8 @@ static void draw_menu_bar(bool* want_quit) {
                                 false, g_app.session != nullptr)) do_save_patch();
             if (ImGui::MenuItem("Choose target file...")) do_choose_target();
             ImGui::Separator();
+            if (ImGui::MenuItem("Settings...")) g_want_settings = true;
+            ImGui::Separator();
             if (ImGui::MenuItem("Quit", "Ctrl+Q")) *want_quit = true;
             ImGui::EndMenu();
         }
@@ -1634,6 +2097,196 @@ static void draw_psp_section() {
     ImGui::Spacing();
 }
 
+// The PS3 savedata section, shown on the same terms as the PSP one above: only
+// when ps3_detect() found a PARAM.PFD beside the target that lists it.
+static void draw_ps3_section() {
+    if (!g_app.ps3.found) return;
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("PS3 save");
+
+    ImGui::Checkbox("Unwrap the console's encryption before patching, and put it back after##ps3",
+                    &g_app.ps3.wrap);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The PS3 encrypts the files it lists in PARAM.PFD, underneath\n"
+                          "whatever the game does, and a .savepatch only ever addresses\n"
+                          "the inner layer. Leave this on unless the file is already\n"
+                          "decrypted.");
+
+    ImGui::TextDisabled("%s in %s - PARAM.PFD v%d%s", g_app.ps3.listed.c_str(),
+                        g_app.ps3.folder.c_str(), g_app.ps3.version,
+                        g_app.ps3.trophy ? ", trophy folder" : "");
+
+    // The secure file ID. Found in the bundled database for a game Apollo
+    // knows; otherwise typed. Never guessed: without one, everything here
+    // stays disabled rather than handing back noise.
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
+    if (ImGui::InputText("Secure file ID", g_app.ps3.key_hex, sizeof g_app.ps3.key_hex,
+                         ImGuiInputTextFlags_CharsHexadecimal |
+                         ImGuiInputTextFlags_CharsUppercase)) {
+        g_app.ps3.have_key =
+            apfd_sfid_from_hex(g_app.ps3.key_hex, g_app.ps3.sfid) == APFD_OK;
+        g_app.ps3.key_note = g_app.ps3.have_key
+            ? "entered by hand"
+            : (g_app.ps3.key_hex[0] ? "needs 32 hex digits" : "");
+        g_app.ps3.hash_checked = false;      // a new key, an unanswered question
+    }
+    ImGui::SameLine();
+    if (g_app.ps3.have_key)
+        ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.55f, 1.0f), "%s", g_app.ps3.key_note.c_str());
+    else
+        ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f), "%s",
+                           g_app.ps3.key_note.empty() ? "no key yet"
+                                                      : g_app.ps3.key_note.c_str());
+
+    // Whether PARAM.PFD still describes the file on disk. Worth saying plainly:
+    // a save that already disagrees was damaged before it got here, and
+    // patching it would sign the damage into place.
+    if (g_app.ps3.hash_checked && !g_app.ps3.hash_ok) {
+        ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.45f, 1.0f),
+                           "PARAM.PFD's recorded hash does not match this file.");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Either the secure file ID is wrong for this game, or the\n"
+                              "save was edited without its PARAM.PFD being updated.\n"
+                              "Patching would re-sign it as it is.");
+    }
+
+    ImGui::BeginDisabled(!g_app.ps3.have_key);
+    if (ImGui::Button("Decrypt only##ps3")) {
+        if (ps3_unwrap_target()) {
+            g_app.ps3.wrap = false;   // it is plaintext now; do not unwrap twice
+            g_app.ps3.hash_checked = false;
+            g_app.show_log = true;
+        }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Take the console's layer off and leave it off, for editing\n"
+                          "the file by hand. Turns the checkbox above off.");
+    ImGui::SameLine();
+    if (ImGui::Button("Re-encrypt##ps3")) {
+        if (ps3_wrap_target()) {
+            g_app.ps3.wrap = true;
+            g_app.ps3.hash_checked = false;
+            g_app.show_log = true;
+        }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Put the console's layer back on, and rewrite PARAM.PFD\n"
+                          "with the file's new size and hash.");
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    if (ImGui::Button("Resign PARAM.PFD")) { ps3_resign(); g_app.show_log = true; }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Recompute the PARAM.PFD signatures alone. Needs no key -\n"
+                          "for a database whose entries something else edited.");
+
+    // Offered only once a console has been named in Settings, because without
+    // one there is nothing to bind TO.
+    if (apfd_get_console(nullptr)) {
+        ImGui::SameLine();
+        ImGui::BeginDisabled(g_app.ps3.sfo_path.empty());
+        if (ImGui::Button("Re-bind to your console")) { ps3_rebind(); g_app.show_log = true; }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(g_app.ps3.sfo_path.empty()
+                ? "No PARAM.SFO beside this save - the hashes are taken over it."
+                : "Rewrite the PARAM.SFO hashes that name a console, so the save\n"
+                  "belongs to the one in Settings instead of the one it came from.");
+    }
+
+    ImGui::Spacing();
+}
+
+// Which console saves are written FOR. A window rather than a modal: somebody
+// checking a value against their console's dumper wants to see the save behind
+// it.
+static void draw_settings_window() {
+    if (!g_want_settings) return;
+
+    ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 34.0f, 0.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Settings", &g_want_settings, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextWrapped("Which console Apollo writes saves FOR. Both are optional, "
+                       "and neither changes how a save is READ - only what is "
+                       "written back. Left blank, a save keeps whatever it "
+                       "already says.");
+
+    ImGui::SeparatorText("PSP");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+    bool changed = ImGui::InputText("Fuse ID", g_settings.fuse_hex, sizeof g_settings.fuse_hex,
+                                    ImGuiInputTextFlags_CharsHexadecimal |
+                                    ImGuiInputTextFlags_CharsUppercase);
+    ImGui::TextDisabled("16 hex digits. Savedata modes 4 and 6 derive two PARAM.SFO");
+    ImGui::TextDisabled("hashes from the console's own fuse. A PSP loads a save whose");
+    ImGui::TextDisabled("values differ, so this only matters for reproducing one");
+    ImGui::TextDisabled("console's output byte for byte. Blank = FFFFFFFFFFFFFFFF.");
+
+    ImGui::SeparatorText("PS3");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
+    changed |= ImGui::InputText("Console ID (IDPS)", g_settings.console_hex,
+                                sizeof g_settings.console_hex,
+                                ImGuiInputTextFlags_CharsHexadecimal |
+                                ImGuiInputTextFlags_CharsUppercase);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+    changed |= ImGui::InputInt("User number", &g_settings.user_id);
+    if (g_settings.user_id < 1) g_settings.user_id = 1;
+
+    ImGui::TextDisabled("32 hex digits. Inside PARAM.PFD, one of PARAM.SFO's four");
+    ImGui::TextDisabled("hashes is keyed by the IDPS of a single machine - that is");
+    ImGui::TextDisabled("what binds a save to a console. Name yours and the PS3");
+    ImGui::TextDisabled("section offers to re-bind a save to it. The user number");
+    ImGui::TextDisabled("reaches only a trophy folder's hashes.");
+    ImGui::Spacing();
+    ImGui::TextDisabled("Re-binding is the PARAM.PFD half of moving a save. A save");
+    ImGui::TextDisabled("also carries account fields in its own PARAM.SFO, and those");
+    ImGui::TextDisabled("are not touched here.");
+
+    // The fields are all-or-nothing: a half-typed value is not "no value", it
+    // is one that would bind a save to the wrong machine.
+    const size_t fuse_len = strlen(g_settings.fuse_hex);
+    const size_t cid_len  = strlen(g_settings.console_hex);
+    const bool   ok = (fuse_len == 0 || fuse_len == 16) && (cid_len == 0 || cid_len == 32);
+
+    if (changed) g_settings.status.clear();
+
+    ImGui::Separator();
+    ImGui::BeginDisabled(!ok);
+    if (ImGui::Button("Save")) {
+        settings_apply();
+        g_settings.status = settings_store()
+            ? (cid_len == 32 ? "Saved. PS3 saves will be re-bound to this console."
+                             : "Saved. Saves keep whatever console they are bound to.")
+            : "Applied, but the settings file could not be written.";
+        g_app.append_log(("Settings: " + g_settings.status).c_str());
+    }
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    if (ImGui::Button("Clear both")) {
+        g_settings.fuse_hex[0] = g_settings.console_hex[0] = '\0';
+        g_settings.user_id = 1;
+        settings_apply();
+        settings_store();
+        g_settings.status = "Cleared. Saves keep whatever console they are bound to.";
+    }
+
+    if (!ok) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f), "%s",
+                           fuse_len && fuse_len != 16 ? "the Fuse ID needs 16 hex digits"
+                                                      : "the console ID needs 32 hex digits");
+    } else if (!g_settings.status.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.55f, 1.0f), "%s", g_settings.status.c_str());
+    }
+
+    ImGui::End();
+}
+
 static void draw_main_window(bool* want_quit) {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
@@ -1707,6 +2360,7 @@ static void draw_main_window(bool* want_quit) {
     }
 
     draw_psp_section();
+    draw_ps3_section();
 
     ImGui::Checkbox("Back up target (.bak) before patching", &g_app.backup);
 
@@ -1735,8 +2389,8 @@ static void draw_main_window(bool* want_quit) {
 
     // --- action row ---
     bool blocked = has_unfilled_selection();
-    bool psp_wait = psp_blocked();
-    ImGui::BeginDisabled(blocked || psp_wait || !g_app.session || count_selected() == 0);
+    bool key_wait = native_blocked();
+    ImGui::BeginDisabled(blocked || key_wait || !g_app.session || count_selected() == 0);
     if (ImGui::Button("Apply selected", ImVec2(140, 0))) apply_selected();
     ImGui::EndDisabled();
     ImGui::SameLine();
@@ -1745,10 +2399,12 @@ static void draw_main_window(bool* want_quit) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f),
                            "Fill the required options on the highlighted codes first.");
-    } else if (psp_wait) {
+    } else if (key_wait) {
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f),
-                           "This PSP save needs its game key, or untick the unwrap box.");
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "%s",
+                           psp_blocked()
+                               ? "This PSP save needs its game key, or untick the unwrap box."
+                               : "This PS3 save needs its secure file ID, or untick the unwrap box.");
     }
 
     // --- collapsible log ---
@@ -1916,6 +2572,11 @@ int main(int argc, char** argv) {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL2_Init();
 
+    // Which console saves are written FOR, from the user's config directory.
+    // Applied before anything can use it -- a save patched in the first second
+    // has to be written for the same console as one patched in the tenth.
+    settings_load();
+
     bool want_quit = false;
     while (!glfwWindowShouldClose(window) && !want_quit) {
         glfwPollEvents();
@@ -1932,6 +2593,7 @@ int main(int argc, char** argv) {
 
         draw_main_window(&want_quit);
         draw_code_viewers();
+        draw_settings_window();
 
         ImGui::Render();
         int w, h; glfwGetFramebufferSize(window, &w, &h);

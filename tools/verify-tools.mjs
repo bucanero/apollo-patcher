@@ -96,7 +96,22 @@ const rows = fs.readFileSync(path.join(HERE, 'verify-manifest.tsv'), 'utf8')
                  checksumOnly: dec === '-' };
     });
 
-const M = await (await import(modulePath)).default();
+/*
+ * The module is built with -sENVIRONMENT=worker, so its own loader reaches for
+ * the .wasm with fetch() and falls back to XMLHttpRequest. Node has neither
+ * for a file:// URL -- fetch refused those as of Node 22 and there is no XHR
+ * at all -- so the binary is handed over directly instead. instantiateWasm is
+ * emscripten's documented hook for exactly this and runs before either path is
+ * tried.
+ */
+const M = await (await import(modulePath)).default({
+    instantiateWasm(imports, done) {
+        const wasm = fs.readFileSync(modulePath.replace(/\.mjs$/, '.wasm'));
+        const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm), imports);
+        done(instance);
+        return instance.exports;
+    },
+});
 
 /* The Python helper modules, exactly as the worker stages them. */
 const pyDir = path.join(patchesDir, 'python');
@@ -215,8 +230,8 @@ const heapCopy = (p, n) => Buffer.from(M.HEAPU8.subarray(p, p + n));
 const pspError = (rc) => M.UTF8ToString(M._apw_psp_error(rc));
 
 const pspOut = () => {
-    const p = M._apw_psp_out();
-    const n = M._apw_psp_out_size();
+    const p = M._apw_savedata_out();
+    const n = M._apw_savedata_out_size();
     return p && n > 0 ? heapCopy(p, n) : null;
 };
 

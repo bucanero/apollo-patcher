@@ -535,3 +535,25 @@
     border: 1px solid var(--line);
     border-radius: 4px;
 }
+
+/* ---- Settings ----------------------------------------------------------
+ *
+ * Reuses the key-entry pieces from the console panels (.psp-key-head,
+ * .psp-key-inputs, .psp-key-why) so the two fields look like the key fields
+ * they sit beside in the mind: same shape, same question.
+ */
+.set-group {
+    border-top: 1px solid var(--line);
+    padding-top: 1rem;
+    margin-top: 1rem;
+}
+.set-group:first-of-type { border-top: 0; margin-top: 0; }
+
+#set-user { width: 5rem; flex: 0 0 auto; }
+
+.set-actions {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-top: 1.25rem;
+}
