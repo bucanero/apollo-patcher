@@ -70,8 +70,16 @@ const rows = fs.readFileSync(path.join(HERE, 'verify-manifest.tsv'), 'utf8')
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#'))
     .map((l) => {
-        const [platform, titleId, enc, dec, be, variant, options] = l.split('\t');
+        const [platform, titleId, enc, dec, be, variant, options, native] = l.split('\t');
         return { platform, titleId, enc, dec, bigEndian: be === '1',
+                 /* Optional 8th field: `psp=<32 hex digits>`, or `psp=-` for a
+                  * game the console stores unkeyed. It says this platform
+                  * wraps saves in ITS OWN encryption under whatever the patch
+                  * does, and asks for the whole composition to be proved --
+                  * see "THE CONSOLE'S OWN LAYER" below. */
+                 native: /^psp=/i.test(native || '')
+                     ? { kind: 'psp', key: native.slice(4).trim() }
+                     : null,
                  /* Optional 6th field: which of a multi-tool patch's variants
                   * this row is about. MGS HD holds Metal Gear Solid 2's whole
                   * chain and then Metal Gear Solid 3's. */
@@ -174,6 +182,135 @@ function resolveOptions(groups, wanted) {
     return { chosen };
 }
 
+/* ---- the console's own encryption layer ---------------------------------
+ *
+ * THE CONSOLE'S OWN LAYER.
+ *
+ * A PSP save is wrapped twice: the console encrypts it with a per-title game
+ * key, and the game encrypts what is inside that. Every sample in
+ * save-decrypters is the INNER form -- the reference decrypters start there --
+ * so a row marked `psp=` has this suite put the outer wrapper back on first,
+ * and then requires the page's full two-stage chain to come out at the same
+ * plaintext as a one-stage row would.
+ *
+ * What that proves is the COMPOSITION: that the two stages run in the right
+ * order, on the right files, with the right routing, in both directions. It
+ * deliberately does not re-prove the console layer itself -- core/test_psp.c
+ * does that, against known-answer vectors taken from the unmodified apollo-psp
+ * implementation and against real console-written saves. Here the wrap is a
+ * fixture, and the assertion that unwrapping it returns the sample byte for
+ * byte is what makes the rest of the row's comparisons mean anything.
+ */
+
+const alloc = (bytes) => {
+    const p = M._malloc(bytes.length || 1);
+    M.HEAPU8.set(bytes, p);
+    return p;
+};
+
+/* Always a copy: the wasm side frees its result on the next PSP call, and
+ * ALLOW_MEMORY_GROWTH can detach a view before then anyway. */
+const heapCopy = (p, n) => Buffer.from(M.HEAPU8.subarray(p, p + n));
+
+const pspError = (rc) => M.UTF8ToString(M._apw_psp_error(rc));
+
+const pspOut = () => {
+    const p = M._apw_psp_out();
+    const n = M._apw_psp_out_size();
+    return p && n > 0 ? heapCopy(p, n) : null;
+};
+
+/*
+ * A PARAM.SFO shaped like a real one, listing exactly `names`.
+ *
+ * Mirrors build_sfo() in core/test_psp.c; kept here rather than shared because
+ * nothing that ships ever BUILDS one of these -- the page and the engine only
+ * ever read them.
+ */
+function pspSfoFixture(names, params0, directory = 'ULUS00000') {
+    const KEYS = ['SAVEDATA_DIRECTORY', 'SAVEDATA_FILE_LIST', 'SAVEDATA_PARAMS'];
+    const FLIST_MAX = 0xC60, PARAMS_MAX = 0x80, ENTRY = 0x20, NAME_MAX = 0x0D;
+    const maxes = [64, FLIST_MAX, PARAMS_MAX];
+    const lens = [directory.length + 1, FLIST_MAX, PARAMS_MAX];
+
+    const keysAt = 0x14 + KEYS.length * 0x10;
+    const keyOff = [];
+    let at = 0;
+    for (const k of KEYS) { keyOff.push(at); at += Buffer.byteLength(k) + 1; }
+    const dataAt = keysAt + ((at + 3) & ~3);
+
+    const dataOff = [];
+    at = 0;
+    for (const m of maxes) { dataOff.push(at); at += m; }
+
+    const out = Buffer.alloc(dataAt + at);
+    out.writeUInt32LE(0x46535000, 0x00);      /* "\0PSF" */
+    out.writeUInt32LE(0x00000101, 0x04);
+    out.writeUInt32LE(keysAt, 0x08);
+    out.writeUInt32LE(dataAt, 0x0C);
+    out.writeUInt32LE(KEYS.length, 0x10);
+
+    KEYS.forEach((k, i) => {
+        const e = 0x14 + 0x10 * i;
+        out.writeUInt16LE(keyOff[i], e);
+        out.writeUInt16LE(0x0204, e + 0x02);
+        out.writeUInt32LE(lens[i], e + 0x04);
+        out.writeUInt32LE(maxes[i], e + 0x08);
+        out.writeUInt32LE(dataOff[i], e + 0x0C);
+        out.write(k, keysAt + keyOff[i], 'latin1');
+    });
+
+    out.write(directory, dataAt + dataOff[0], 'latin1');
+    names.forEach((n, i) => {
+        if (Buffer.byteLength(n) > NAME_MAX - 1)
+            throw new Error(`"${n}" is too long for a SAVEDATA_FILE_LIST entry`);
+        out.write(n, dataAt + dataOff[1] + i * ENTRY, 'latin1');
+    });
+    out[dataAt + dataOff[2]] = params0;
+    return out;
+}
+
+/* Put the console's wrapper ON. Returns the wrapped bytes and the PARAM.SFO
+ * as it stands afterwards -- encryption rewrites it, and each successive file
+ * has to build on the last so one SFO ends up carrying every file's hash. */
+function pspWrap(sfo, name, plain, key) {
+    const sp = alloc(sfo), dp = alloc(plain), kp = alloc(key);
+    const np = M.stringToNewUTF8(name);
+    try {
+        const rc = M._apw_psp_encrypt(sp, sfo.length, np, dp, plain.length, kp);
+        if (rc !== 0) return { error: pspError(rc) };
+        return { bytes: pspOut(), sfo: heapCopy(sp, sfo.length) };
+    } finally {
+        M._free(sp); M._free(dp); M._free(kp); M._free(np);
+    }
+}
+
+/* ...and take it off again. */
+function pspUnwrap(sfo, enc, key) {
+    const sp = alloc(sfo), dp = alloc(enc), kp = alloc(key);
+    try {
+        const rc = M._apw_psp_decrypt(sp, sfo.length, dp, enc.length, kp);
+        return rc !== 0 ? { error: pspError(rc) } : { bytes: pspOut() };
+    } finally {
+        M._free(sp); M._free(dp); M._free(kp);
+    }
+}
+
+const NULL_KEY = Buffer.alloc(16);
+
+/*
+ * The name a console would have filed this sample under.
+ *
+ * The patch's own `:file` target first, because that IS the console's name for
+ * it and the sample's name often is not: save-decrypters files three
+ * Invizimals samples as GAMEDATA.UCES01241 and siblings, disambiguating by
+ * title ID for a game whose save is just "GAMEDATA". Falling back to the
+ * basename, minus the .ENC/.DEC the reference tools append, covers a patch
+ * that declares no target.
+ */
+const pspSaveName = (target, rel) =>
+    (target || '').trim() || path.basename(rel).replace(/\.(enc|dec)$/i, '');
+
 function openPatch(file) {
     const bytes = fs.readFileSync(file);
     const buf = M._malloc(bytes.length);
@@ -261,6 +398,63 @@ for (const row of rows) {
     };
     const runChain = (bufs) => runSteps(steps, routes, bufs);
 
+    /*
+     * The console's own layer, for a row that asks for it.
+     *
+     * Wrap each sample as a PSP would have stored it, then take the wrapper
+     * off exactly the way the page's Decrypt does, and require the sample
+     * back. From there the row proceeds unchanged -- so everything below is
+     * comparing the SAME plaintexts it would for a one-stage row, and a
+     * failure here is unambiguously the console layer or its ordering.
+     */
+    let native = null;
+    if (row.native) {
+        const key = row.native.key === '-' ? NULL_KEY
+                                           : Buffer.from(row.native.key, 'hex');
+        if (key.length !== 16) {
+            console.log(`FAIL  ${label}  psp= needs 32 hex digits or "-"`);
+            M._apw_close(); fail++; continue;
+        }
+        /* 0x41 is what a save written by firmware 2.5.2 or later carries;
+         * 0x01 is the unkeyed form. Both are exercised by core/test_psp.c. */
+        const names = encs.map((rel, i) => pspSaveName(targets[i] ?? targets[0], rel));
+        const wrapped = [];
+        let bad = null;
+        let sfo = null;
+
+        try {
+            sfo = pspSfoFixture(names, key.equals(NULL_KEY) ? 0x01 : 0x41);
+        } catch (err) {
+            console.log(`FAIL  ${label}  console layer: ${err.message}`);
+            M._apw_close(); fail++; continue;
+        }
+
+        for (let i = 0; i < inputs.length; i++) {
+            const w = pspWrap(sfo, names[i], Buffer.from(inputs[i].bytes), key);
+            if (w.error) { bad = `wrapping ${names[i]}: ${w.error}`; break; }
+            sfo = w.sfo;
+            wrapped.push(w.bytes);
+        }
+        /* The wrapper has to be invertible before anything downstream means
+         * anything. Checked against the sample, not against itself. */
+        if (!bad) {
+            for (let i = 0; i < wrapped.length; i++) {
+                const u = pspUnwrap(sfo, wrapped[i], key);
+                if (u.error) { bad = `unwrapping ${names[i]}: ${u.error}`; break; }
+                if (!u.bytes.equals(Buffer.from(inputs[i].bytes))) {
+                    bad = `unwrapping ${names[i]} did not return the sample`;
+                    break;
+                }
+                inputs[i].bytes = u.bytes;   /* what the patch's codes see */
+            }
+        }
+        if (bad) {
+            console.log(`FAIL  ${label}  console layer: ${bad}`);
+            M._apw_close(); fail++; continue;
+        }
+        native = { key, names, sfo, wrapped };
+    }
+
     const save = inputs[0].bytes;
     const first = runChain(inputs.map((f) => f.bytes));
     const applied = first.ok;
@@ -306,15 +500,14 @@ for (const row of rows) {
      * ROUND TRIP -- re-encrypt what the decrypt just produced and require the
      * original encrypted sample back, byte for byte.
      *
-     * Without this the whole re-encrypt half of the database is unproven. A
-     * sweep of every BSD opcode in apollo-patches against what the suite
-     * actually exercises found that of 107 applied codes, exactly TWO contained
-     * an `encrypt` line -- and both were Resident Evil Remake DECRYPT codes that
-     * run `encrypt blowfish_cbc` over a header while unwrapping it. So
-     * `encrypt ffxiii`, `encrypt mgs`, `encrypt mgs_base64`,
-     * `encrypt monster_hunter` and `encrypt diablo3` were all shipping behind a
-     * Re-encrypt button that nothing had ever checked. The forward run proves
-     * the key and the algorithm; this proves the way back.
+     * Without this the whole re-encrypt half of the database is unproven, and
+     * a decrypt row proves almost none of it by accident: across the codes
+     * this suite applies, the only `encrypt` lines that run are the two
+     * Resident Evil Remake DECRYPT codes that `encrypt blowfish_cbc` over a
+     * header while unwrapping it. `encrypt ffxiii`, `encrypt mgs`,
+     * `encrypt mgs_base64`, `encrypt monster_hunter` and `encrypt diablo3` sit
+     * behind the Re-encrypt button and are reached only from here. The forward
+     * run proves the key and the algorithm; this proves the way back.
      *
      * Fed from the ENGINE's own decrypt output rather than from the .dec file
      * on disk. That is the property a user depends on -- press Decrypt, edit,
@@ -331,10 +524,40 @@ for (const row of rows) {
     if (!row.checksumOnly && chain.rest.length && applied.every(Boolean) && allHeld
         && !row.noRoundTrip) {
         const back = runSteps(chain.rest, routeChain(codes, chain.rest, assign), first.out);
-        const wrong = back.out
-            .map((b, i) => (i < inputs.length && !b.equals(Buffer.from(inputs[i].bytes))) ? i : -1)
+
+        /*
+         * ...and for a console-wrapped row the wrapper goes back ON, after the
+         * patch's encrypt and not before -- the reverse of the order above.
+         * The bar is the wrapped sample byte for byte, which is reachable only
+         * because Apollo's savedata IV is fixed (a console picks a random one;
+         * see EncryptSavedata in core/psp/psp_savedata.c).
+         */
+        let outs = back.out;
+        let rewrapFailed = null;
+        if (native) {
+            let sfo = pspSfoFixture(native.names,
+                                    native.key.equals(NULL_KEY) ? 0x01 : 0x41);
+            const again = [];
+            for (let i = 0; i < outs.length && i < native.names.length; i++) {
+                const w = pspWrap(sfo, native.names[i], outs[i], native.key);
+                if (w.error) { rewrapFailed = w.error; break; }
+                sfo = w.sfo;
+                again.push(w.bytes);
+            }
+            if (!rewrapFailed && !sfo.equals(native.sfo))
+                rewrapFailed = 'the rewritten PARAM.SFO does not match the one '
+                             + 'wrapping produced';
+            outs = again;
+        }
+
+        const wrong = rewrapFailed ? [-1] : outs
+            .map((b, i) => {
+                const want = native ? native.wrapped[i] : Buffer.from(inputs[i].bytes);
+                return (i < (native ? native.wrapped : inputs).length && !b.equals(want)) ? i : -1;
+            })
             .filter((i) => i >= 0);
-        trip = { applied: back.ok.every(Boolean), wrong };
+        trip = { applied: back.ok.every(Boolean) && !rewrapFailed, wrong,
+                 why: rewrapFailed };
     }
 
     /* Liveness, for checksum rows only.
@@ -399,14 +622,18 @@ for (const row of rows) {
         const sizes = first.out.map((b) => b.length).join(' + ');
         console.log(`ok    ${label}  ${doc.game || ''} (${steps.length} ${row.checksumOnly ? 'checksum' : 'decrypt'} code(s), ${sizes} bytes${
             slack ? `, payload matched with ${slack} trailing byte(s) ignored` : ''}${
-            trip ? ` + ${chain.rest.length}-code round trip` : ''})`);
+            trip ? ` + ${chain.rest.length}-code round trip` : ''}${
+            native ? (trip ? ', through the console\'s own layer both ways'
+                            : ', through the console\'s own layer') : ''})`);
     } else {
         fail++;
         let why = !tripOk
-            ? (!trip.applied
+            ? (trip.why
+                ? `putting the console's layer back: ${trip.why}`
+                : !trip.applied
                 ? 'the re-encrypt chain failed to apply'
                 : `re-encrypting the decrypt output did not restore the original (${
-                    trip.wrong.map((i) => encs[i]).join(', ')})`)
+                    trip.wrong.map((i) => encs[i] ?? 'output').join(', ')})`)
             : !applied.every(Boolean) ? 'a code failed to apply'
             : !live ? 'the checksum code is inert — it did not react to changed data'
             : !allHeld ? (row.checksumOnly

@@ -47,6 +47,27 @@
 
 <main class="tools-main">
 
+  <!-- The PSP's own encryption wraps a save below anything a patch does, so
+       for a file straight off a Memory Stick this comes first and the grid
+       below is useless until it has run. Not a card in that grid: it is not a
+       game tool, it works for every PSP save, including the ~60 PSP titles
+       the patch database covers but this page's catalog does not. -->
+  <section class="psp-banner" aria-label="PSP savedata">
+    <div class="psp-banner-text">
+      <h2>Have a PSP save?</h2>
+      <p>
+        The PSP encrypts saves itself, underneath whatever the game does.
+        Unwrap that layer first &mdash; then the tools below, or
+        <a href="./patcher.html">the full patcher</a>, can read what is inside.
+        You will need the save&rsquo;s <code>PARAM.SFO</code> as well as the file itself.
+      </p>
+    </div>
+    <button type="button" id="psp-open" class="psp-banner-go">
+      <span class="action-label">Open the PSP tool</span>
+      <span class="action-hint">Decrypt &middot; re-encrypt &middot; resign</span>
+    </button>
+  </section>
+
   <section class="filters" aria-label="Find a game">
     <input id="search" type="search" placeholder="Search by game or title ID…"
            autocomplete="off" spellcheck="false" aria-label="Search games">
@@ -137,6 +158,26 @@
        until every choice here has been made. -->
   <div id="options" class="options" hidden></div>
 
+  <!-- Shown only for a platform whose console encrypts saves itself: the PSP.
+       A patch's codes address the layer INSIDE that wrapper, so a file taken
+       straight off a Memory Stick has to be unwrapped before they mean
+       anything. Optional on purpose — someone who already unwrapped it (here,
+       or with the PSP tool on the front page) has a plain file and should not
+       be made to produce a PARAM.SFO for it. -->
+  <div id="stage" class="psp-stage" hidden>
+    <p class="psp-stage-head">
+      <span class="option-label">Straight off a PSP?</span>
+      <span id="stage-state" class="psp-key-state"></span>
+    </p>
+    <ul id="stage-slot" class="slots"></ul>
+    <div id="stage-key" class="psp-key" hidden></div>
+    <p id="stage-why" class="psp-key-why">
+      The console encrypts saves under a per-game key, below anything this
+      patch does. Add the save folder&rsquo;s <code>PARAM.SFO</code> and that
+      layer is taken off before the patch runs, and put back after.
+    </p>
+  </div>
+
   <!-- One row per file the patch needs. Most tools want one and this looks
        like the old "loaded" line; the handful whose required codes span two
        targets (Dead Space, LUNAR, Kingdom Hearts 2.5) show a row each. -->
@@ -153,6 +194,54 @@
   <details id="log-wrap" class="log-wrap" hidden>
     <summary>Engine output</summary>
     <pre id="log" class="log"></pre>
+  </details>
+</dialog>
+
+<dialog id="psp" class="tool-dialog" aria-labelledby="psp-title">
+  <form method="dialog" class="tool-close-form">
+    <button class="tool-close" value="close" aria-label="Close">&times;</button>
+  </form>
+
+  <div class="tool-head">
+    <div>
+      <h2 id="psp-title">PSP savedata</h2>
+      <p class="tool-sub">
+        The console&rsquo;s own encryption &mdash; the layer under the game&rsquo;s.
+        Everything runs in this tab.
+      </p>
+    </div>
+  </div>
+
+  <div id="psp-busy" class="busy" hidden>
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="psp-busy-text">Working&hellip;</span>
+  </div>
+
+  <div id="psp-drop" class="drop" tabindex="0" role="button">
+    <input id="psp-file" type="file" multiple hidden>
+    <p class="drop-main">Drop <code>PARAM.SFO</code> and your save file here</p>
+    <p class="drop-sub">or click to choose &middot; nothing is uploaded</p>
+  </div>
+
+  <ul id="psp-slots" class="slots" hidden></ul>
+
+  <!-- What the PARAM.SFO turned out to say: the save directory, and which
+       files in it are encrypted at all. -->
+  <div id="psp-info" class="psp-info" hidden></div>
+
+  <!-- The game key. Looked up from the Apollo database by save directory
+       first; a dumper's file or 32 typed hex digits otherwise. Hidden
+       entirely for a save whose PARAM.SFO says it is unkeyed. -->
+  <div id="psp-key" class="psp-key" hidden></div>
+
+  <div id="psp-outputs" class="outputs" hidden></div>
+  <div id="psp-actions" class="actions" hidden></div>
+
+  <p id="psp-status" class="status" role="status" aria-live="polite"></p>
+
+  <details id="psp-log-wrap" class="log-wrap" hidden>
+    <summary>Engine output</summary>
+    <pre id="psp-log" class="log"></pre>
   </details>
 </dialog>
 

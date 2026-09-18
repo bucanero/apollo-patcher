@@ -22,6 +22,7 @@
 
 #include "apollo.h"
 #include "apollo_ctrl.h"
+#include "psp_savedata.h"
 
 static apctl_session_t *g_session = NULL;
 
@@ -390,4 +391,222 @@ EMSCRIPTEN_KEEPALIVE
 void apw_reset_vars(void)
 {
     apctl_reset_vars();
+}
+
+/* ---------------------------------------------------------------------------
+ * PSP savedata
+ *
+ * The PSP's own encryption, which wraps a save BELOW anything a .savepatch
+ * touches -- see core/psp/psp_savedata.h. Separate from everything above: it
+ * holds no session, needs no patch, and a page can drive it for any PSP save
+ * at all, including the ~60 PSP titles the patch database covers but the tool
+ * catalog does not.
+ *
+ * Buffers cross the boundary the way the worker's withBytes() already does:
+ * JS mallocs, copies in, calls, reads back out. Output lands in a buffer owned
+ * here and read through apw_psp_out()/apw_psp_out_size(), the same shape as
+ * apw_export_patch(). Encryption additionally rewrites the PARAM.SFO IN PLACE,
+ * at the pointer JS passed in, so the caller reads its updated bytes back from
+ * where it put them and there is no second output buffer to manage.
+ * ------------------------------------------------------------------------- */
+
+
+static unsigned char *g_psp_out = NULL;
+static size_t         g_psp_out_len = 0;
+
+static void psp_out_free(void)
+{
+    free(g_psp_out);
+    g_psp_out = NULL;
+    g_psp_out_len = 0;
+}
+
+/* Allocate the result buffer for a call about to run. Returns NULL on OOM,
+ * having already cleared any previous result. */
+static unsigned char *psp_out_alloc(size_t len)
+{
+    psp_out_free();
+    if (!len) return NULL;
+    g_psp_out = malloc(len);
+    if (g_psp_out) g_psp_out_len = len;
+    return g_psp_out;
+}
+
+EMSCRIPTEN_KEEPALIVE
+const char *apw_psp_out(void)
+{
+    return (const char *)g_psp_out;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int apw_psp_out_size(void)
+{
+    return (int)g_psp_out_len;
+}
+
+/* A result code as something a user can read. */
+EMSCRIPTEN_KEEPALIVE
+const char *apw_psp_error(int rc)
+{
+    return apsp_strerror(rc);
+}
+
+/*
+ * What a PARAM.SFO says about the save it belongs to, as one JSON crossing:
+ *
+ *   {"ok":true,"directory":"ULUS10391","mode":65,"files":["MHP2NDG.BIN"]}
+ *   {"ok":false,"error":"PARAM.SFO is missing, truncated or malformed"}
+ *
+ * `directory` is the game-key lookup: apollo-patches' gamekeys.txt matches
+ * against the start of it. `files` is the authoritative list of what in the
+ * folder is encrypted at all -- the page offers exactly those and no others,
+ * rather than letting someone feed it an ICON0.PNG.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *apw_psp_sfo_json(const char *sfo, int sfo_len)
+{
+    sbuf_t b = {0};
+    char name[APSP_NAME_LEN + 1];
+    char dir[64];
+    int rc, n, i;
+
+    apctl_set_log_sink(log_sink, NULL);
+
+    if (!sfo || sfo_len <= 0) rc = APSP_ERR_ARG;
+    else rc = apsp_sfo_valid((const unsigned char *)sfo, (size_t)sfo_len);
+
+    if (rc != APSP_OK) {
+        sb_puts(&b, "{\"ok\":false,\"error\":");
+        sb_json_str(&b, apsp_strerror(rc));
+        sb_puts(&b, "}");
+        return publish(&b);
+    }
+
+    sb_puts(&b, "{\"ok\":true,\"directory\":");
+    if (apsp_sfo_directory((const unsigned char *)sfo, (size_t)sfo_len,
+                           dir, sizeof dir) != APSP_OK)
+        dir[0] = 0;
+    sb_json_str(&b, dir);
+
+    /* The raw SAVEDATA_PARAMS mode byte, so the page can say WHY a save needs
+     * a key (0x01 is the unkeyed form and does not). */
+    sb_printf(&b, ",\"mode\":%d,\"files\":[",
+              apsp_sfo_mode((const unsigned char *)sfo, (size_t)sfo_len));
+
+    n = apsp_sfo_file_count((const unsigned char *)sfo, (size_t)sfo_len);
+    for (i = 0; i < n; i++) {
+        if (apsp_sfo_file_name((const unsigned char *)sfo, (size_t)sfo_len,
+                               i, name, sizeof name) != APSP_OK)
+            continue;
+        if (i) sb_puts(&b, ",");
+        sb_json_str(&b, name);
+    }
+    sb_puts(&b, "]}");
+    return publish(&b);
+}
+
+/*
+ * A game key out of a dumper's file: SGKeyDumper's bare 0x10 bytes, or
+ * SGDeemer's 0x600. Writes 16 bytes to `out16` and returns 0, or a negative
+ * result code. Kept in C rather than reimplemented in JS so the page and the
+ * desktop app recognise exactly the same files.
+ */
+EMSCRIPTEN_KEEPALIVE
+int apw_psp_key_from_file(const char *buf, int len, char *out16)
+{
+    if (!buf || len < 0 || !out16) return APSP_ERR_ARG;
+    return apsp_key_from_buffer((const unsigned char *)buf, (size_t)len,
+                                (unsigned char *)out16);
+}
+
+/*
+ * A game key out of apollo-patches' PSP/gamekeys.txt, by save directory.
+ *
+ * The page fetches the file and hands the text straight over rather than
+ * parsing it in JS, so the prefix rule -- and the longest-match tie-break that
+ * the NPJJ30022 / NPJJ30022GAME1 pair depends on -- lives in exactly one
+ * place, shared with the desktop app.
+ *
+ * Writes 16 bytes to `out16` and returns 0, or a negative result code. `id`,
+ * when given, receives the entry that matched.
+ */
+EMSCRIPTEN_KEEPALIVE
+int apw_psp_key_from_db(const char *text, int len, const char *directory,
+                        char *out16, char *id, int id_cap)
+{
+    if (!text || len < 0 || !directory || !out16) return APSP_ERR_ARG;
+    return apsp_key_from_db(text, (size_t)len, directory,
+                            (unsigned char *)out16, id, (size_t)(id_cap > 0 ? id_cap : 0));
+}
+
+/* Unwrap one savedata file. The plaintext is in apw_psp_out(). */
+EMSCRIPTEN_KEEPALIVE
+int apw_psp_decrypt(const char *sfo, int sfo_len,
+                    const char *in, int in_len, const char *key)
+{
+    unsigned char *out;
+    size_t want, got = 0;
+    int rc;
+
+    apctl_set_log_sink(log_sink, NULL);
+    psp_out_free();
+
+    if (!sfo || sfo_len <= 0 || !in || in_len <= 0 || !key) return APSP_ERR_ARG;
+
+    want = apsp_decrypted_size((size_t)in_len);
+    if (!want) return APSP_ERR_SIZE;
+
+    out = psp_out_alloc(want);
+    if (!out) return APSP_ERR_MEM;
+
+    rc = apsp_decrypt((const unsigned char *)sfo, (size_t)sfo_len,
+                      (const unsigned char *)in, (size_t)in_len,
+                      (const unsigned char *)key, out, want, &got);
+    if (rc != APSP_OK) psp_out_free();
+    else g_psp_out_len = got;
+    return rc;
+}
+
+/*
+ * Wrap one back up. The ciphertext is in apw_psp_out(); the PARAM.SFO at `sfo`
+ * has been REWRITTEN in place and the caller must keep both -- a save put back
+ * with a stale PARAM.SFO does not load.
+ */
+EMSCRIPTEN_KEEPALIVE
+int apw_psp_encrypt(char *sfo, int sfo_len, const char *name,
+                    const char *in, int in_len, const char *key)
+{
+    unsigned char *out;
+    size_t want, got = 0;
+    int rc;
+
+    apctl_set_log_sink(log_sink, NULL);
+    psp_out_free();
+
+    if (!sfo || sfo_len <= 0 || !name || !in || in_len <= 0 || !key)
+        return APSP_ERR_ARG;
+
+    want = apsp_encrypted_size((size_t)in_len);
+    if (!want) return APSP_ERR_SIZE;
+
+    out = psp_out_alloc(want);
+    if (!out) return APSP_ERR_MEM;
+
+    rc = apsp_encrypt((unsigned char *)sfo, (size_t)sfo_len, name,
+                      (const unsigned char *)in, (size_t)in_len,
+                      (const unsigned char *)key, out, want, &got);
+    if (rc != APSP_OK) psp_out_free();
+    else g_psp_out_len = got;
+    return rc;
+}
+
+/* Regenerate the PARAM.SFO hashes in place, touching no data file. */
+EMSCRIPTEN_KEEPALIVE
+int apw_psp_resign(char *sfo, int sfo_len)
+{
+    apctl_set_log_sink(log_sink, NULL);
+    psp_out_free();
+
+    if (!sfo || sfo_len <= 0) return APSP_ERR_ARG;
+    return apsp_resign((unsigned char *)sfo, (size_t)sfo_len);
 }

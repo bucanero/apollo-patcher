@@ -2,7 +2,7 @@
 """
 Build the patch-database index that both front-ends browse.
 
-The database (bucanero/apollo-patches) is ~2200 .savepatch files whose game
+The database (bucanero/apollo-patches) is ~2250 .savepatch files whose game
 name lives on the second line. Reading them all is fine at build time and
 unreasonable at run time, so the index is generated here.
 
@@ -90,10 +90,9 @@ def read_game_name(path):
 
     # Some patches cover several games and say so on the lines that follow:
     # the Metal Gear Solid HD Collection declares "Metal Gear Solid 2 HD" and
-    # then "Metal Gear Solid 3 HD". Taking only the first line hid the second
-    # game completely — a search for it found nothing, even though the patch
-    # handles it. Keep the rest as alternative titles so the card is findable
-    # by any of them.
+    # then "Metal Gear Solid 3 HD". Only the first line is the card's name, so
+    # the rest are kept as alternative titles — otherwise a search for the
+    # second game finds nothing, even though the patch handles it.
     #
     # Only the unbroken run of ';' lines right after the name counts, and
     # credit lines are dropped: those are people, not games.
@@ -152,7 +151,7 @@ def _group_text(raw):
 # A leading marker is stripped first ([PYTHON:...], DEFAULT:, and friends),
 # and the checksum pattern is deliberately wide: the database spells that step
 # "Update ADD", "Init SDBM", "Update XOR", "Update MD2", "Get EAChecksum",
-# "Update csum" and plain "Update" among others. Across all 2240 patches this
+# "Update csum" and plain "Update" among others. Across all 2247 patches this
 # leaves exactly one title unclassified ("Read Encryption KEY.DAT", a setup
 # step that loads a key into a variable), which is harmless: unclassified
 # codes are still required, and still run in their place in the chain.
@@ -353,7 +352,7 @@ def main(argv):
             found += 1
 
             # Only the tools catalog needs the file bodies; the other formats
-            # get away with the second line, so do not read 2240 files twice.
+            # get away with the second line, so do not read 2247 files twice.
             if fmt == "tools":
                 kinds, files = scan_tool_codes(os.path.join(directory, entry))
                 group = verified.get((platform, title_id))

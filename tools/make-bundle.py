@@ -5,10 +5,12 @@ Build apollo-patches.zip — the patch database the desktop GUI browses.
     make-bundle.py <apollo-patches-dir> <output.zip>
 
 Contents:
-    index.tsv       generated here; the GUI reads this one entry to build its
-                    browsable list instead of inflating 2200 files
-    PS2/ PS3/ ...   the .savepatch files themselves
-    python/         helper modules Python patches import
+    index.tsv           generated here; the GUI reads this one entry to build
+                        its browsable list instead of inflating 2200 files
+    PS2/ PS3/ ...       the .savepatch files themselves
+    python/             helper modules Python patches import
+    PSP/gamekeys.txt    the PSP game-key database, so the desktop app can
+                        unwrap a PSP save's console encryption offline
 
 The GUI reads the .savepatch entries straight out of the zip, but the Python
 modules have to reach a real filesystem: MicroPython's import goes through
@@ -16,7 +18,7 @@ stat()/open() (see micropy_import_stat in apollo-lib), so the app extracts
 python/ to a cache directory on first use. They travel in the same zip so there
 is only ever one file to ship.
 
-~2240 patches, 9MB of text, ~2.8MB zipped.
+~2250 patches, 8.9MB of text, ~2.7MB zipped.
 
 This is Python rather than shell because the shell version needed `zip`,
 `unzip`, `du` and a `python3` on PATH, and MSYS2 (the Windows CI job) does not
@@ -33,7 +35,7 @@ PLATFORMS = ["PS2", "PS3", "PS4", "PSP", "PSV"]
 # stamps them with the checkout time, so without this every CI run would produce
 # a different archive for identical content. The archive is still not quite
 # byte-reproducible — index.tsv carries its own build timestamp, so exactly one
-# of the 2259 entries varies between runs — but the other 2258 do not, which is
+# of the 2267 entries varies between runs — but the other 2266 do not, which is
 # what makes two bundles worth diffing.
 FIXED_DATE = (2020, 1, 1, 0, 0, 0)
 
@@ -53,6 +55,13 @@ def collect(root):
     if os.path.isdir(py_dir):
         names += [f"python/{e}" for e in sorted(os.listdir(py_dir))
                   if e.endswith(".py")]
+
+    # The PSP game keys. 16KB, and the only way the desktop app can take the
+    # console's own encryption off a save without a network — the web page
+    # fetches the same file from the CDN. It rides in the .savepatch sweep
+    # above only by accident of extension, so name it explicitly.
+    if os.path.isfile(os.path.join(root, "PSP", "gamekeys.txt")):
+        names.append("PSP/gamekeys.txt")
 
     return names
 

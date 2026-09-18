@@ -389,3 +389,149 @@
     border: 1px solid var(--line);
     border-radius: var(--radius);
 }
+
+/* ---- PSP savedata ------------------------------------------------------ *
+ *
+ * The banner sits above the game grid because for a save straight off a
+ * Memory Stick the grid cannot help until the console's own layer is off.
+ * Styled as a notice rather than a card, so it does not read as one more game.
+ */
+.psp-banner {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 0 22px;
+    padding: 16px 18px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
+}
+.psp-banner-text { flex: 1 1 320px; min-width: 0; }
+.psp-banner h2 { margin: 0 0 4px; font-size: 16px; }
+.psp-banner p { margin: 0; font-size: 13px; color: var(--ink-dim); max-width: 62ch; }
+.psp-banner code {
+    padding: 1px 4px;
+    font-size: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+}
+.psp-banner a { color: var(--accent); }
+
+.psp-banner-go {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: none;
+    padding: 10px 16px;
+    text-align: left;
+    font: inherit;
+    color: var(--accent-ink);
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    cursor: pointer;
+}
+.psp-banner-go:hover { filter: brightness(1.08); }
+.psp-banner-go .action-hint { color: var(--accent-ink); opacity: .82; }
+
+/* What PARAM.SFO turned out to say. A definition list because each row is a
+ * fact about the save, not a control -- except the file picker, which has to
+ * live next to the list it is picking from. */
+.psp-info { margin-top: 12px; }
+.psp-facts {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 6px 14px;
+    margin: 0;
+    padding: 12px 14px;
+    font-size: 13px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+}
+.psp-facts dt { color: var(--ink-dim); }
+.psp-facts dd { margin: 0; overflow-wrap: anywhere; }
+.psp-facts select {
+    max-width: 100%;
+    padding: 3px 6px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+}
+.psp-note {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--ink-dim);
+}
+.good-text { color: var(--good); }
+
+.psp-key { margin-top: 12px; }
+.psp-key-head {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    justify-content: space-between;
+    margin: 0 0 6px;
+    font-size: 13px;
+}
+.psp-key-state { color: var(--ink-dim); font-size: 12px; text-align: right; }
+.psp-key-inputs { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+#psp-key-hex {
+    flex: 1 1 22ch;
+    min-width: 0;
+    padding: 8px 10px;
+    font: inherit;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+    letter-spacing: .04em;
+    color: var(--ink);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+}
+#psp-key-hex:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.psp-key-why { margin: 6px 0 0; font-size: 12px; color: var(--ink-dim); }
+
+/* At phone width "Game key" and its state line fight over one row, wrapping
+   the label to two lines. Stack them instead. */
+@media (max-width: 480px) {
+    .psp-key-head { display: block; }
+    .psp-key-state { display: block; margin-top: 2px; text-align: left; }
+}
+
+/* The console-encryption stage inside a per-game tool dialog. Set apart from
+   the patch's own file slots with a rule and a tint, because it is a stage
+   wrapped around the run rather than another target the patch asked for. */
+.psp-stage {
+    margin: 12px 0 0;
+    padding: 12px 14px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
+}
+.psp-stage-head {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    justify-content: space-between;
+    margin: 0;
+    font-size: 13px;
+}
+.psp-stage .slots { margin-top: 8px; }
+.psp-stage .slot { background: var(--panel); }
+.psp-stage .psp-key { margin-top: 10px; }
+.psp-stage code {
+    padding: 1px 4px;
+    font-size: 12px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+}

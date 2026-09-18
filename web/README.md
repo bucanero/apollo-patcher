@@ -17,6 +17,8 @@ public/index.html    the patcher page
 public/app.js        UI: state + DOM, no framework
 public/tools.html    the tools page — one decrypt/re-encrypt pair per game
 public/tools.js      its UI, on the same worker
+public/psp.js        the PSP savedata panel on that page — the console's own
+                     encryption, which wraps a save below the game's
 public/tools.css     its layout, on style.css's tokens
 public/toolkit.js    which codes each action runs; shared with verify-tools.mjs
 public/worker.js     owns the wasm module, runs every engine call
@@ -61,6 +63,71 @@ run time, by title ID. Coverage is partial, so the image removes itself when it
 404s and the layout closes up; a group whose first region has no art is retried
 against the others before giving up.
 
+### The PSP panel
+
+Above the grid, because for a PSP save it comes first. A PSP save is wrapped
+twice — the console encrypts it with a per-title game key before the game's own
+encryption is anywhere in the picture:
+
+```
+MHP2NDG.BIN (1,483,024 bytes)   PSP savedata encryption (KIRK + the game key)
+  └─ MHP2NDG.BIN (1,483,008)    Monster Hunter's own — what a .savepatch undoes
+       └─ plaintext
+```
+
+Every PSP tool in the catalog operates on the *middle* layer, so a file copied
+straight off a Memory Stick goes into the patch engine and comes back as noise
+that looks like output unless the outer layer comes off first. The panel is
+that outer layer, and it is deliberately not a card in the grid: it is not per-game, and it works for
+any PSP save at all — including the ~60 PSP titles the patch database covers
+but the catalog does not, and saves with no patch.
+
+It wants two files, `PARAM.SFO` and the save itself, and works out the rest:
+
+- **the game key**, matched against `PSP/gamekeys.txt` in apollo-patches (16KB,
+  fetched from the CDN like the patches are) using the save directory read out
+  of the SFO — which is exactly what that file is keyed on. Failing that, drop
+  a dumper's file (SGKeyDumper or SGDeemer) or type 32 hex digits. A save whose
+  PARAM.SFO declares no keyed mode needs no key and is not asked for one.
+- **which files are encrypted**, from `SAVEDATA_FILE_LIST`. `ICON0.PNG` and
+  `PIC1.PNG` are not, and the panel offers only what the SFO lists.
+
+Re-encrypting hands back **two** files, and both have to go into the save
+folder: the data file, and a rewritten `PARAM.SFO`. The file's own hash lives
+in its `SAVEDATA_FILE_LIST` entry and the two SFO-wide hashes are regenerated
+over the result, so a save put back with the old `PARAM.SFO` does not load.
+
+The engine is `core/psp/`, compiled into the same wasm module — it needs only
+mbedTLS's AES and SHA1, which this module already links, so it costs about
+12KB gzipped rather than a second module with its own copy of the crypto, its
+own heap and its own instantiate.
+
+### …and inside the game cards
+
+The eleven PSP tools in the grid address the *inner* layer, so each of their
+dialogs also carries the console one, as an optional stage: add the save
+folder's `PARAM.SFO` and Decrypt takes both layers off in one press, while
+Re-encrypt puts both back and hands over the rewritten `PARAM.SFO` alongside
+the save. Leave it out and the tool behaves exactly as it always did, which is
+right for a file that is already unwrapped.
+
+The stage is deliberately not one of the patch's file slots. Those slots are
+the patch's own targets and their indices are what `routeChain()` assigns codes
+to, so a row for `PARAM.SFO` would shift every route by one; it is a stage
+wrapped around the run, not another target. Only files `SAVEDATA_FILE_LIST`
+names are wrapped — a save folder holds `ICON0.PNG` too.
+
+The order is the part worth stating, because it is not symmetric and getting it
+backwards produces a file that looks plausible and that the game refuses:
+
+```
+opening a save    unwrap the console's layer, THEN run the patch's decrypt
+putting it back   run the patch's encrypt, THEN wrap the console's layer
+```
+
+`psp.js` owns that rule (`wrapsNatively`, and the calls beneath it) so the
+panel, the game cards and `verify-tools.mjs` cannot drift apart on it.
+
 ## Verifying the tools
 
 ```bash
@@ -75,14 +142,30 @@ the output to equal the reference plaintext byte for byte. The result is
 page without needing the saves — and `dist/tools.json` is generated from it
 with `--verified-only`.
 
-So the page does not promise anything that has not been run. 107 patches pass
-today — 59 driven directly against a sample, 48 more inheriting that proof by
-carrying a byte-identical chain — and they collapse to 51 cards; the catalog knows about 1148, and opening up the rest is a matter of
-dropping `--verified-only` once there is evidence for them.
+So the page does not promise anything that has not been run. 187 patches pass
+today — 109 driven directly against a sample, 78 more inheriting that proof by
+carrying a byte-identical chain — and they collapse to 109 cards (PS3 46, PS4
+53, PSP 8, PS Vita 2); the catalog knows about 1156, and opening up the rest is
+a matter of dropping `--verified-only` once there is evidence for them.
+
+`verify-manifest.tsv`'s 8th column extends that to the PSP rows. A row marked
+`psp=<32 hex digits>` has the suite wrap the sample as a console would have
+stored it — a `PARAM.SFO` fixture plus the game key from apollo-patches'
+`PSP/gamekeys.txt`, the same one the page looks up — and then requires the full
+two-stage chain to reach the same plaintext a one-stage row reaches, and on the
+way back to reproduce the wrapped bytes exactly. Six of the eight PSP rows
+carry one; the two whose titles have no key in that database verify the patch
+alone, exactly as the page does when no `PARAM.SFO` is supplied.
+
+That proves the *composition* — order, routing, both directions. It does not
+re-prove the console layer itself: `core/test_psp.c` does that, against
+known-answer vectors taken from the unmodified apollo-psp implementation and
+against real console-written saves.
 
 What it is really guarding is the seam between the engine and the patches,
-which has drifted before and gives no signal when it does. On its first run it
-refused four patches, all for that reason — `main` predates fixes that exist on
+which drifts silently: a patch written against a fixed engine keeps parsing
+against an unfixed one and simply produces the wrong bytes. Four patches are
+refused for exactly that reason, because `main` predates fixes that exist on
 branches held back for the next console release:
 
 - `PS3/BLES00450` + `PS3/BLUS30248` (Need for Speed: Undercover) decrypt with a
@@ -141,9 +224,9 @@ previous runs.
   scans the C stack conservatively, and under wasm that finds almost nothing:
   locals live in wasm locals rather than addressable memory, so a measured run
   had **1276 bytes** of shadow stack for the entire live VM call chain. Live
-  objects went unseen, were swept, and the next free of one aborted the module
-  with `assert(!"bad free")`. Before this step, applying *any* Python patch
-  here failed outright — about 50 patches in the database contain Python codes.
+  objects go unseen, are swept, and the next free of one aborts the module with
+  `assert(!"bad free")` — which takes out *every* Python patch, about 50 of
+  them in the database.
 
   It cannot be passed as `-sBINARYEN_EXTRA_PASSES=--spill-pointers`, because
   that route is a catch-22: the pass locates the stack pointer **by name**, so
@@ -172,7 +255,7 @@ previous runs.
 ## The patch database browser
 
 Users should not have to go and find a `.savepatch` first, so the page can
-search the ~2200 patches in
+search the ~2250 patches in
 [apollo-patches](https://github.com/bucanero/apollo-patches) by game name or
 title ID and fetch the one they pick.
 
@@ -180,7 +263,7 @@ The split between build time and run time is deliberate:
 
 - **The index is built in.** `../tools/build-index.py` reads the second line of
   every patch file (where the game name lives) and writes `dist/patches.json` —
-  2240 rows, 24KB gzipped, fetched the first time the dialog opens. Reading
+  2247 rows, 24KB gzipped, fetched the first time the dialog opens. Reading
   2200 files is trivial here and impossible from a browser, and the GitHub API
   would neither give game names nor survive the rate limit.
 - **The patches are fetched live**, from
@@ -210,7 +293,7 @@ filesystem root when no host callback is set, and MicroPython's import
 `stat()`s real paths, so files written after startup work fine.
 
 They were embedded with `--embed-file` at first. Measured, that cost **133KB
-gzipped — 31% of the whole page** — while only 35 of 2240 patches import one. It
+gzipped — 31% of the whole page** — while only 35 of 2247 patches import one. It
 also left the page internally inconsistent: patches came live from the CDN while
 the modules they import were frozen at build time, so a patch updated upstream
 to use a new module raised a bare `ImportError`. Upstream history shows that is
@@ -272,7 +355,7 @@ once rather than waiting for *Save changes*: the type and the text are separate
 things, and a wrongly-typed code often has nothing to type. It matters more
 than it sounds — without a `[SW:…]` / `[BSD:…]` / `[PYTHON:…]` prefix the type
 comes from the shape of the body, so a single mistyped line makes a Save Wizard
-code parse as BSD and fail, with no way to correct it from here until now.
+code parse as BSD and fail, and this is the only way to correct it from here.
 
 Switching a code *to* Python has to tell the worker, because the Python helper
 modules are fetched on demand and that decision is made from the parsed types

@@ -60,6 +60,16 @@ const patchdb_entry_t *patchdb_at(const patchdb_t *db, int index);
 int patchdb_read(const patchdb_t *db, int index, char **buf, size_t *len);
 
 /*
+ * One named entry's bytes, for the archive's non-patch contents — today that
+ * is PSP/gamekeys.txt, the PSP game-key database. Same ownership contract as
+ * patchdb_read(): *buf is a NUL-terminated malloc'd buffer the caller frees,
+ * and *len excludes the terminator, so it can be handed straight to a text
+ * parser. Returns 1 on success, 0 when the archive has no such entry.
+ */
+int patchdb_read_file(const patchdb_t *db, const char *name,
+                      char **buf, size_t *len);
+
+/*
  * Write the archive's python/ modules into <dir>/python, creating both
  * directories. Existing files are overwritten, so a newer bundle wins.
  * Returns the number of modules written, or -1 on failure.

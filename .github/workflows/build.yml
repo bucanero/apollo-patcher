@@ -116,6 +116,13 @@ jobs:
         ./build/apollo_ctrl_test --edit apollo-lib/tests/fixtures/BLUS30490.savepatch
         ./build/apollo_ctrl_test --export apollo-lib/tests/fixtures/BLUS30490.savepatch
 
+    # The PSP savedata layer: bounds checks on the PARAM.SFO parser, and
+    # known-answer vectors taken from the unmodified apollo-psp implementation,
+    # so a regression here means the vendored copy has stopped matching what
+    # ships on the console. Self-contained -- no sample save needed.
+    - name: Run PSP savedata test
+      run: ./build/apollo_psp_test
+
     # CMakeLists.txt does not set a deployment target. Use macOS 11.0, the first
     # Apple Silicon release, as one baseline for both slices. Fail before upload
     # if a shipped executable or link input loses a CPU slice, or if a

@@ -474,6 +474,20 @@ const patchdb_entry_t *patchdb_at(const patchdb_t *db, int index)
     return &db->list[index];
 }
 
+int patchdb_read_file(const patchdb_t *db, const char *name,
+                      char **buf, size_t *len)
+{
+    const zip_entry_t *e;
+
+    if (!db || !name || !buf) return 0;
+    e = find_entry(db, name);
+    if (!e) {
+        g_error = "no such entry in the patch database";
+        return 0;
+    }
+    return read_zip_entry(db, e, buf, len);
+}
+
 int patchdb_read(const patchdb_t *db, int index, char **buf, size_t *len)
 {
     if (!db || !buf || index < 0 || index >= db->list_count) return 0;

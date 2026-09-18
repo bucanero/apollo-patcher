@@ -132,9 +132,9 @@ function variantLabel(codes, index) {
  * told apart only by the folder they sit in. Collapsing to basenames would
  * have made that one slot and silently checksummed the wrong save.
  *
- * Zero or one entry means the old behaviour is correct and the user brings a
- * single save under any name. Two or more means the tool genuinely needs that
- * many files.
+ * Zero or one entry means one slot is correct and the user brings a single
+ * save under any name. Two or more means the tool genuinely needs that many
+ * files.
  */
 export function chainTargets(codes, indices) {
     const seen = [];
@@ -282,8 +282,8 @@ export function splitIndices(codes, indices) {
      * re-encrypt half, so there is no case where this adds a step nobody wants.
      *
      * Bounded by the first DECRYPT code, not by the split point, so a patch
-     * whose required codes are all unlabelled keeps the old shape -- one
-     * action, not two identical ones.
+     * whose required codes are all unlabelled stays one action, rather than
+     * two identical ones.
      */
     const firstDecrypt = kinds.findIndex((k) => k === 'd');
     let prelude = 0;
@@ -291,11 +291,11 @@ export function splitIndices(codes, indices) {
         while (prelude < firstDecrypt && kinds[prelude] === '') prelude++;
 
     return {
-        /* NOTE these two now OVERLAP by the prelude, so they are no longer a
-         * partition and `[...decrypt, ...rest]` is not the chain -- it repeats
-         * the prelude, which silently corrupted variant splitting and chain
-         * fingerprints the first time round. `indices` is the whole list, in
-         * order, for callers that want it. */
+        /* NOTE `decrypt` and `rest` OVERLAP by the prelude, so they are not a
+         * partition: `[...decrypt, ...rest]` is NOT the chain, it repeats the
+         * prelude, and using it that way corrupts variant splitting and chain
+         * fingerprints. `indices` is the whole list, in order, for callers
+         * that want it. */
         indices,
         decrypt: indices.slice(0, split),
         rest: [...indices.slice(0, prelude), ...indices.slice(split)],
@@ -313,8 +313,8 @@ export function splitIndices(codes, indices) {
  * L.A. Noire is the case that matters: the {TAG} IS the AES key, and its two
  * values are two genuinely different saves — `Game Savedata` and
  * `User Profile`. Nothing but the person holding the file can say which one it
- * is, so the page has to ask. It used to duck the question by refusing to list
- * such patches at all.
+ * is, so the page asks rather than guessing, and the action buttons stay
+ * disabled until it has an answer.
  *
  * Keyed by tag AND by the value list, so one choice drives every code that
  * mentions it — L.A. Noire names {ST} in both its decrypt and its encrypt code
