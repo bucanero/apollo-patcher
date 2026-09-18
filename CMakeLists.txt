@@ -235,4 +235,13 @@ target_link_libraries(apollo_ps3_test PRIVATE apollo_engine)
 option(APOLLO_BUILD_GUI "Build the Dear ImGui GUI (needs OpenGL/GLFW)" ON)
 if(APOLLO_BUILD_GUI)
     add_subdirectory(gui)
+else()
+    # Said out loud because the option is STICKY: a build directory once
+    # configured with -DAPOLLO_BUILD_GUI=OFF keeps skipping the app, and a
+    # later `cmake --build build` reports success for the tests while the app
+    # binary sits there untouched from whenever it was last built. The failure
+    # looks like "my change did not take effect", which is the hardest kind to
+    # trace. Re-enable with -DAPOLLO_BUILD_GUI=ON.
+    message(STATUS "APOLLO_BUILD_GUI=OFF: the desktop app will NOT be built "
+                   "or updated by this build directory")
 endif()

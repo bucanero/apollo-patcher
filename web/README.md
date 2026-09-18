@@ -19,6 +19,9 @@ public/tools.html    the tools page — one decrypt/re-encrypt pair per game
 public/tools.js      its UI, on the same worker
 public/psp.js        the PSP savedata panel on that page — the console's own
                      encryption, which wraps a save below the game's
+public/ps3.js        the PS3's, the same layer one console up
+public/settings.js   which console a save is written FOR: the PSP's Fuse ID
+                     and the PS3's console ID
 public/tools.css     its layout, on style.css's tokens
 public/toolkit.js    which codes each action runs; shared with verify-tools.mjs
 public/worker.js     owns the wasm module, runs every engine call
@@ -63,11 +66,11 @@ run time, by title ID. Coverage is partial, so the image removes itself when it
 404s and the layout closes up; a group whose first region has no art is retried
 against the others before giving up.
 
-### The PSP panel
+### The PSP and PS3 panels
 
-Above the grid, because for a PSP save it comes first. A PSP save is wrapped
-twice — the console encrypts it with a per-title game key before the game's own
-encryption is anywhere in the picture:
+Above the grid, because for a save off either console it comes first. Such a
+save is wrapped twice — the console encrypts it with a key of its own before the
+game's encryption is anywhere in the picture:
 
 ```
 MHP2NDG.BIN (1,483,024 bytes)   PSP savedata encryption (KIRK + the game key)
@@ -75,47 +78,71 @@ MHP2NDG.BIN (1,483,024 bytes)   PSP savedata encryption (KIRK + the game key)
        └─ plaintext
 ```
 
-Every PSP tool in the catalog operates on the *middle* layer, so a file copied
-straight off a Memory Stick goes into the patch engine and comes back as noise
-that looks like output unless the outer layer comes off first. The panel is
-that outer layer, and it is deliberately not a card in the grid: it is not per-game, and it works for
-any PSP save at all — including the ~60 PSP titles the patch database covers
-but the catalog does not, and saves with no patch.
+Every PSP and PS3 tool in the catalog operates on the *middle* layer, so a file
+copied straight off a Memory Stick or a hard drive goes into the patch engine
+and comes back as noise that looks like output unless the outer layer comes off
+first. The panels are that outer layer, and they are deliberately not cards in
+the grid: they are not per-game, and they work for any save at all — including
+titles the patch database covers but the catalog does not, and saves with no
+patch.
 
-It wants two files, `PARAM.SFO` and the save itself, and works out the rest:
+Each wants two files — the console's metadata and the save itself — and works
+out the rest:
 
-- **the game key**, matched against `PSP/gamekeys.txt` in apollo-patches (16KB,
-  fetched from the CDN like the patches are) using the save directory read out
-  of the SFO — which is exactly what that file is keyed on. Failing that, drop
-  a dumper's file (SGKeyDumper or SGDeemer) or type 32 hex digits. A save whose
-  PARAM.SFO declares no keyed mode needs no key and is not asked for one.
-- **which files are encrypted**, from `SAVEDATA_FILE_LIST`. `ICON0.PNG` and
-  `PIC1.PNG` are not, and the panel offers only what the SFO lists.
+|                 | PSP                          | PS3                            |
+|-----------------|------------------------------|--------------------------------|
+| metadata        | `PARAM.SFO`                  | `PARAM.PFD`                    |
+| what is wrapped | `SAVEDATA_FILE_LIST`         | the PFD's entry table          |
+| the key         | `PSP/gamekeys.txt` (16KB)    | `PS3/games.conf` (280KB)       |
+| keyed by        | the save directory           | the save directory *and* the file name |
+| fallback        | a dumper's file, or 32 hex digits | 32 hex digits             |
+
+Both databases are fetched from the CDN like the patches are; `games.conf` is 23
+times the size of the PSP's, so it is fetched when the panel opens rather than
+at page load.
+
+Two things differ enough to be worth stating:
+
+- **The PS3 needs a save folder NAME**, because `games.conf` files its sections
+  under save directories and `PARAM.PFD` carries no such string. Dropping the
+  folder's `PARAM.SFO` in alongside fills the field; otherwise you type it.
+- **The PS3 panel checks the file against the database.** `PARAM.PFD` records a
+  hash per protected file, so the panel can say whether the one you loaded is
+  still the one it describes — worth knowing before patching, since a save that
+  already disagrees would have the damage signed into place.
 
 Re-encrypting hands back **two** files, and both have to go into the save
-folder: the data file, and a rewritten `PARAM.SFO`. The file's own hash lives
-in its `SAVEDATA_FILE_LIST` entry and the two SFO-wide hashes are regenerated
-over the result, so a save put back with the old `PARAM.SFO` does not load.
+folder: the data file, and the rewritten metadata. The file's own hash lives in
+the metadata and the signatures over it are regenerated, so a save put back with
+the old `PARAM.SFO` or `PARAM.PFD` does not load.
 
-The engine is `core/psp/`, compiled into the same wasm module — it needs only
-mbedTLS's AES and SHA1, which this module already links, so it costs about
-12KB gzipped rather than a second module with its own copy of the crypto, its
-own heap and its own instantiate.
+The engines are `core/psp/` and `core/ps3/`, compiled into the same wasm module
+— between them they need only mbedTLS's AES and SHA1, which this module already
+links, so they cost **23KB gzipped** rather than separate modules with their own
+copies of the crypto, their own heaps and their own instantiates. Measured
+against builds with each layer removed: 317KB with neither, 331KB with the
+PSP's, 341KB with both.
 
 ### …and inside the game cards
 
-The eleven PSP tools in the grid address the *inner* layer, so each of their
+The PSP and PS3 tools in the grid address the *inner* layer, so each of their
 dialogs also carries the console one, as an optional stage: add the save
-folder's `PARAM.SFO` and Decrypt takes both layers off in one press, while
-Re-encrypt puts both back and hands over the rewritten `PARAM.SFO` alongside
-the save. Leave it out and the tool behaves exactly as it always did, which is
-right for a file that is already unwrapped.
+folder's `PARAM.SFO` or `PARAM.PFD` and Decrypt takes both layers off in one
+press, while Re-encrypt puts both back and hands over the rewritten metadata
+alongside the save. Leave it out and the tool behaves exactly as it always did,
+which is right for a file that is already unwrapped.
 
-The stage is deliberately not one of the patch's file slots. Those slots are
-the patch's own targets and their indices are what `routeChain()` assigns codes
-to, so a row for `PARAM.SFO` would shift every route by one; it is a stage
-wrapped around the run, not another target. Only files `SAVEDATA_FILE_LIST`
-names are wrapped — a save folder holds `ICON0.PNG` too.
+The stage is deliberately not one of the patch's file slots. Those slots are the
+patch's own targets and their indices are what `routeChain()` assigns codes to,
+so a row for the metadata would shift every route by one; it is a stage wrapped
+around the run, not another target. Only files the metadata names are wrapped —
+a save folder holds `ICON0.PNG` too.
+
+For a PS3 tool the save folder defaults to the tool's own title ID, which is
+right for 8480 of `games.conf`'s 8510 section IDs. When it is not — DiRT 3 files
+`BLUS30724` and `BLUS30724PROFILE` with different keys — the stage says so
+rather than decrypting to noise: it verifies the loaded file against the hash
+`PARAM.PFD` recorded, and warns when they disagree.
 
 The order is the part worth stating, because it is not symmetric and getting it
 backwards produces a file that looks plausible and that the game refuses:
@@ -125,8 +152,37 @@ opening a save    unwrap the console's layer, THEN run the patch's decrypt
 putting it back   run the patch's encrypt, THEN wrap the console's layer
 ```
 
-`psp.js` owns that rule (`wrapsNatively`, and the calls beneath it) so the
-panel, the game cards and `verify-tools.mjs` cannot drift apart on it.
+The `NATIVE` table in `tools.js` owns that rule, and the per-console differences
+under it, so the panels, the game cards and `verify-tools.mjs` cannot drift
+apart on it.
+
+### Settings
+
+The **Settings** button in the header holds how saves are read and written.
+Everything in it is optional, and every default is the safe one.
+
+- **Byte order** — *Auto*, *Big-endian* or *Little-endian*. Auto follows each
+  patch, which is right for every patch in the database. A forced order is
+  remembered across visits and applies to every save on both pages, so each says
+  which order is in effect whenever one is forced — and says so in amber when it
+  contradicts the patch that is open. The patcher page carries the same control
+  inline, next to Apply, since it has no Settings dialog of its own.
+
+The other two name the console a save is written *for*. Both change only what is
+WRITTEN, and leaving them blank keeps whatever a save already says.
+
+- **PSP, Fuse ID.** Savedata modes 4 and 6 derive two `PARAM.SFO` hashes from
+  the console's own fuse. A PSP loads a save whose values differ, so this only
+  matters for reproducing one console's output byte for byte.
+- **PS3, console ID (IDPS).** Inside `PARAM.PFD`, one of `PARAM.SFO`'s four
+  hashes is keyed by the IDPS of a single machine. Name one and the PS3 panel
+  offers **Re-bind to your console**, which rewrites that hash and re-signs the
+  database around it.
+
+The values live in the wasm module, which belongs to the worker, so the page
+pushes them there on every change and once at start-up; `localStorage` keeps
+them across visits, since they describe your console rather than the save you
+happen to be holding.
 
 ## Verifying the tools
 
@@ -148,19 +204,31 @@ carrying a byte-identical chain — and they collapse to 109 cards (PS3 46, PS4
 53, PSP 8, PS Vita 2); the catalog knows about 1156, and opening up the rest is
 a matter of dropping `--verified-only` once there is evidence for them.
 
-`verify-manifest.tsv`'s 8th column extends that to the PSP rows. A row marked
-`psp=<32 hex digits>` has the suite wrap the sample as a console would have
-stored it — a `PARAM.SFO` fixture plus the game key from apollo-patches'
-`PSP/gamekeys.txt`, the same one the page looks up — and then requires the full
-two-stage chain to reach the same plaintext a one-stage row reaches, and on the
-way back to reproduce the wrapped bytes exactly. Six of the eight PSP rows
-carry one; the two whose titles have no key in that database verify the patch
-alone, exactly as the page does when no `PARAM.SFO` is supplied.
+`verify-manifest.tsv`'s 8th column extends that to the rows whose console wraps
+saves itself. A row marked `psp=<32 hex>` or `ps3=<32 hex>` has the suite wrap
+the sample as a console would have stored it — a `PARAM.SFO` or `PARAM.PFD`
+fixture plus the real key — and then requires the full two-stage chain to reach
+the same plaintext a one-stage row reaches, and on the way back to reproduce
+both the wrapped bytes and the rewritten metadata exactly, from a fresh fixture
+rather than a carried-over one.
+
+**54 of the 118 rows carry one**: 48 of the 52 PS3 rows and 6 of the 8 PSP.
+`ps3=db` goes further and looks the key up in the real `PS3/games.conf` by title
+ID and file name, through the same C the page calls — so each of those rows also
+proves that lookup against all 1819 of its sections, which is coverage nothing
+else in CI has.
+
+The rows that carry none are right not to. Three PS3 titles — Uncharted 2
+(`BCES00509`, `BCUS98123`) and [PROTOTYPE] (`BLES00269`) — are filed in
+`games.conf` as `UNPROTECTEDGAME`, meaning the console encrypts nothing in them,
+so there is no layer to prove; `BLUS31460` is not in that database at all, and
+two PSP titles likewise. `ps3=db` FAILS rather than inventing a key, which is
+why these read as absences rather than as passes.
 
 That proves the *composition* — order, routing, both directions. It does not
-re-prove the console layer itself: `core/test_psp.c` does that, against
-known-answer vectors taken from the unmodified apollo-psp implementation and
-against real console-written saves.
+re-prove the console layers themselves: `core/test_psp.c` and `core/test_ps3.c`
+do that, against known-answer vectors cross-checked with the unmodified upstream
+implementations, and against real console-written saves.
 
 What it is really guarding is the seam between the engine and the patches,
 which drifts silently: a patch written against a fixed engine keeps parsing

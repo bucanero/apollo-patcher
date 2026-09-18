@@ -15,6 +15,7 @@ engine and drives the same functions the CLI does
   ../core/apollo_ctrl.[ch]         stdio-free facade over libapollo — shared with the web front-end
   ../core/patchdb.[ch]             reads apollo-patches.zip (the bundled database)
   ../core/psp/                     the PSP's own savedata encryption, below any patch
+  ../core/ps3/                     the PS3's, the same layer one console up
   ../../apollo-lib/source/*.c      libapollo engine (unchanged)
   ../../apollo-lib/mbedtls-2.16.12 crypto backend (libmbedcrypto), same as the CLI
 ```
@@ -147,50 +148,114 @@ including the Windows-1252 fallback that 245 of the patch files need. Without it
 the app would have to inflate 2247 entries at startup just to read their second
 line.
 
-## PSP saves
+## PSP and PS3 saves
 
-A PSP save is encrypted twice. The console wraps it with a per-title game key,
-and the game encrypts what is inside that — and every `.savepatch` addresses
-only the inner layer. So the console's wrapper has to come off first: feed the
-engine a file copied straight off a Memory Stick and it returns noise that
-looks like output.
+A PSP or PS3 save is encrypted twice. The console wraps it with a key of its
+own, and the game encrypts what is inside that — and every `.savepatch`
+addresses only the inner layer. So the console's wrapper has to come off first:
+feed the engine a file copied straight off a Memory Stick or a hard drive and it
+returns noise that looks like output.
 
-The desktop app has something the web page does not: the folder. So none of
-this is asked for. **Choose a target, and if a `PARAM.SFO` sits beside it that
-lists that file, a "PSP save" section appears** with everything already filled
-in — the save directory, the encryption mode, and the game key, looked up in
-the `PSP/gamekeys.txt` that travels in `apollo-patches.zip`. No network: the
-web page fetches the same file from a CDN, the app carries it.
+The desktop app has something the web page does not: the folder. So none of this
+is asked for. **Choose a target, and if the console's metadata sits beside it
+and lists that file, a section appears** with everything already filled in.
 
-The file list is what decides, not the file name: `SAVEDATA_FILE_LIST` is the
-authoritative answer to what the console wrapped, and a save folder holds
-`ICON0.PNG` too. A target the SFO does not name gets no section at all, rather
-than an offer to decrypt something that was never encrypted.
+|             | PSP                        | PS3                          |
+|-------------|----------------------------|------------------------------|
+| metadata    | `PARAM.SFO`                | `PARAM.PFD`                  |
+| what is wrapped | `SAVEDATA_FILE_LIST`   | the PFD's entry table        |
+| the key     | per title, `PSP/gamekeys.txt` | per file, `PS3/games.conf` |
+| keyed by    | the save directory         | the save directory *and* the file name |
+
+Both key databases travel in `apollo-patches.zip`. No network: the web page
+fetches the same files from a CDN, the app carries them.
+
+The metadata is what decides, not the file name. A save folder holds
+`ICON0.PNG` too, and a target the metadata does not name gets no section at all
+rather than an offer to decrypt something that was never encrypted. On the PS3
+that answer is especially reliable — a game that encrypts nothing ships a
+`PARAM.PFD` listing only `PARAM.SFO`, so no key database has to be consulted to
+find out.
 
 - **The checkbox** — *unwrap before patching, and put it back after* — is the
-  main event, and defaults to on. Apply then takes the console's layer off,
-  runs the codes, puts it back, and rewrites `PARAM.SFO` with the file's new
-  hash. The order is not symmetric and not negotiable: wrapping first would
-  encrypt the ciphertext.
+  main event, and defaults to on. Apply then takes the console's layer off, runs
+  the codes, puts it back, and rewrites the metadata with the file's new hash.
+  The order is not symmetric and not negotiable: wrapping first would encrypt
+  the ciphertext.
 - **Decrypt only / Re-encrypt** are for the other case — opening a save in the
   hex editor, or repairing one that a failed run left decrypted. Decrypt only
   turns the checkbox off, so a file that is already plaintext is not unwrapped
   twice.
-- **Resign PARAM.SFO** regenerates its hashes alone, for a save that was never
-  encrypted. It needs no game key.
+- **Resign** regenerates the metadata's own hashes alone, leaving every file as
+  it is. It needs no key.
+- **Re-bind to your console** (PS3) appears once a console ID is named in
+  Settings. See below.
 
 Without a key nothing is guessed: the buttons and the checkbox stay disabled
-rather than quietly decrypting in the unkeyed mode and handing back noise. For
-a game the database does not cover, type 32 hex digits or load a dumper's file
-(SGKeyDumper's 16 bytes, or SGDeemer's 1536).
+rather than handing back noise. For a game the database does not cover, type 32
+hex digits — or, on the PSP, load a dumper's file (SGKeyDumper's 16 bytes, or
+SGDeemer's 1536).
+
+A PS3 save also gets a check the PSP cannot offer: whether `PARAM.PFD`'s
+recorded hash still matches the file on disk. A mismatch says so in the section,
+because a save that already disagrees was damaged before it got here and
+patching would sign the damage into place. It is only asked when the file is
+still the length the console left it — one you already decrypted cannot match,
+and flagging that would be crying wolf.
 
 If Apply cannot put the layer back, it says so and names the state the file is
 actually in — decrypted on disk — rather than reporting a generic failure. The
 re-wrap runs even when a code failed, because the alternative is leaving the
 user with something the console cannot read and no obvious way back.
 
-The crypto is `../core/psp/`, vendored from apollo-psp and pinned to it by
-`core/test_psp.c`; see the [top-level README](../README.md#psp-savedata).
+The crypto is `../core/psp/` and `../core/ps3/`; see the
+[top-level README](../README.md#the-consoles-own-savedata-encryption).
+
+## Settings
+
+**File ▸ Settings…** holds how saves are read and written. Everything in it is
+optional, and every default is the safe one.
+
+- **Byte order** — *Auto*, *Big-endian* or *Little-endian*. Auto is right for
+  every patch in the database: PS3 saves are big-endian, everything else Apollo
+  covers is not, and the database's own platform tag says which a patch is.
+  Force one only for a loose patch file for a console it does not cover.
+
+  A forced order is remembered across runs and applies to every save, which is
+  the point of it and also its only hazard — a forced big-endian left set will
+  byte-reverse a PS4 or Vita save and hand back something that looks patched.
+  The main window therefore always says which order is in effect and why, in
+  amber when a forced one disagrees with the patch you have open, and the log
+  repeats it at Apply.
+
+The other two name the console a save is written *for*. Both change only what
+is WRITTEN, and leaving them blank keeps whatever a save already says — which
+is what patching one in place wants.
+
+- **PSP, Fuse ID** (16 hex digits). Savedata modes 4 and 6 derive two
+  `PARAM.SFO` hashes from the console's own fuse. A PSP loads a save whose
+  values differ, so this only matters for reproducing one console's output byte
+  for byte.
+- **PS3, console ID / IDPS** (32 hex digits, plus a user number). Inside
+  `PARAM.PFD`, one of `PARAM.SFO`'s four hashes is keyed by the IDPS of a single
+  machine — that is what binds a save to a console. Name one and the PS3 section
+  offers **Re-bind to your console**, which rewrites that hash and re-signs the
+  database around it. The user number reaches only a trophy folder's hashes.
+
+Both hex fields are all-or-nothing: a half-typed value is not "no value", it is
+one that would bind a save to the wrong machine, so Save stays disabled until
+each is empty or complete. The byte order has nothing to validate, so it takes
+effect and is saved the moment it is picked.
+
+Re-binding is the `PARAM.PFD` half of moving a save between consoles. A save
+also carries account fields in its own `PARAM.SFO`, and those are not touched.
+
+Settings live in the user's config directory —
+`~/Library/Application Support/apollo-patcher/settings.txt` on macOS,
+`$XDG_CONFIG_HOME/apollo-patcher/` on Linux, `%APPDATA%\apollo-patcher\` on
+Windows — because they describe the person's console rather than this copy of
+the program. It is the only file the app writes there; ImGui's own `.ini` is
+deliberately off.
 
 ## Opening things
 
@@ -204,17 +269,17 @@ that game's patch from the database. Arguments are taken in the order given, so
 an explicit patch beats the one a save's title ID would have auto-loaded,
 whichever way round they are written. `--help` prints this and exits.
 
-**A folder works too**, which is the obvious thing to drag for a PSP save: its
-`PARAM.SFO` already says which files the console encrypted, and the first of
-those becomes the target. So
+**A folder works too**, which is the obvious thing to drag for either console's
+save: its `PARAM.SFO` or `PARAM.PFD` already says which files the console
+encrypted, and the first of those becomes the target. So
 
 ```bash
 apollo_patcher_gui /Volumes/PSP/PSP/SAVEDATA/ULUS10391
 ```
 
 opens the save, finds its key, and loads Monster Hunter Freedom Unite's patch —
-from the folder alone. A folder that is not a PSP save says so rather than
-becoming a target nothing can read.
+from the folder alone, and a PS3 folder takes the same route. A folder that is
+neither says so rather than becoming a target nothing can read.
 
 Files can also be **dropped on the window**, which takes the same route. Note
 that on macOS a `.app` launched from Finder is handed documents through Apple
@@ -292,19 +357,22 @@ a Windows/Linux file association, and the drop handler covers the window.
 - **Apply is blocked** while any checked code has an unfilled required option:
   the offending combo boxes and an "(required)" tag turn red, and the button is
   disabled until every selection is made.
-- **Big-endian mode** checkbox: selects the byte order the engine uses for save
-  data (PS3 / Xbox 360 / Wii saves), the equivalent of the `patcher` CLI's
-  `-b`/`--big-endian` flag. It calls `apollo_set_endianness()` before each code
-  is applied, so a single build handles both byte orders — no separate
-  big-endian binary.
+- **Byte order**, the equivalent of the `patcher` CLI's `-b`/`--big-endian`
+  flag. Detected per patch by default and overridable in Settings; the main
+  window shows which order is in effect and why. It calls
+  `apollo_set_endianness()` before each code is applied, so a single build
+  handles both byte orders — no separate big-endian binary. See
+  [Settings](#settings).
 
-- **PSP savedata**: the console's own encryption, detected from the save
-  folder and taken off and put back around Apply. See [PSP saves](#psp-saves)
+- **PSP and PS3 savedata**: the consoles' own encryption, detected from the
+  save folder and taken off and put back around Apply, plus a Settings panel
+  naming the console a save is written for. See
+  [PSP and PS3 saves](#psp-and-ps3-saves)
   above.
 - **The patch finds itself**: choosing a target looks its title ID up in the
   bundled database and loads that game's patch, or offers it when one is
   already open.
-- **Files on the command line and dropped on the window**, including a PSP save
+- **Files on the command line and dropped on the window**, including a save
   folder. See [Opening things](#opening-things).
 
 ## Known caveats / TODO

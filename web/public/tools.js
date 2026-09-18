@@ -18,7 +18,7 @@ import { splitChain, chainTargets, targetLabels, routeChain, matchesTarget,
 import { initPsp, needsKey, pspSfoInfo, pspKeyFor,
          pspListedFor, pspNativeDecrypt, pspNativeEncrypt,
          NULL_KEY } from './psp.js';
-import { initSettings } from './settings.js';
+import { initSettings, effectiveBigEndian, byteOrderForced } from './settings.js';
 import { initPs3, ps3SettingsChanged, ps3PfdInfo, ps3KeyFor, ps3ListedFor, ps3NeedsKey,
          ps3NativeDecrypt, ps3NativeEncrypt, ps3FolderFromSfo, ps3Verify,
          ensurePs3KeyDb } from './ps3.js';
@@ -793,6 +793,32 @@ $('variants').addEventListener('click', (ev) => {
     setStatus('');
 });
 
+/*
+ * The byte order in effect for the tool that is open.
+ *
+ * Silent under Auto, because the detection is the catalogue's own platform tag
+ * and is right by construction there. It speaks up only when Settings forces
+ * one, and turns amber when that contradicts the patch -- a forced big-endian
+ * over a PS4 save writes byte-reversed values and hands back something that
+ * looks patched.
+ */
+function renderByteOrder() {
+    const el = $('tool-order');
+
+    el.hidden = !active || !byteOrderForced();
+    if (el.hidden) return;
+
+    const be = effectiveBigEndian(active.bigEndian);
+    const clash = be !== !!active.bigEndian;
+
+    el.classList.toggle('bad-text', clash);
+    el.textContent = clash
+        ? `Byte order: ${be ? 'big' : 'little'}-endian, forced in Settings — but this `
+          + `${PLATFORM_LABEL[active.row.platform] || active.row.platform} patch expects `
+          + `${active.bigEndian ? 'big' : 'little'}-endian.`
+        : `Byte order: ${be ? 'big' : 'little'}-endian, forced in Settings.`;
+}
+
 function renderActions() {
     const { chain } = active;
     const buttons = [];
@@ -815,6 +841,7 @@ function renderActions() {
       </button>`).join('');
     $('actions').hidden = false;
     $('actions').dataset.spec = JSON.stringify(buttons.map(({ key, indices, label }) => ({ key, indices, label })));
+    renderByteOrder();
     syncActionState();
 }
 
@@ -889,7 +916,7 @@ async function run(spec) {
          * L.A. Noire asks once and both its decrypt and encrypt code need
          * setting. */
         options: optionAssignments(active.options, active.chosen),
-        bigEndian: active.bigEndian,
+        bigEndian: effectiveBigEndian(active.bigEndian),
     }, files.map((f) => f.buffer));
 
     setBusy(null);
@@ -1190,6 +1217,11 @@ initPs3(call);
 /* Which console saves are written FOR. Applied to the worker before anything
  * can use it, and again on every change -- the values live in the wasm module,
  * which is the worker's alone. */
-initSettings(call, ps3SettingsChanged);
+initSettings(call, (res) => {
+    ps3SettingsChanged(res);
+    /* The byte order can be changed while a tool dialog is open behind the
+     * Settings one, and it decides what Apply will do. */
+    if ($('tool').open) renderByteOrder();
+});
 
 boot();

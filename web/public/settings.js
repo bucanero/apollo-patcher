@@ -1,10 +1,11 @@
 /*
- * Settings: which console a save is being written FOR.
+ * Settings: how saves are read and written.
  *
- * Both values here change what Apollo WRITES when it puts a save back, and
- * neither affects reading one. That is the whole shape of this dialog, and the
- * reason it is safe to leave empty: a blank field means "whatever the save
- * already says", which is what patching a save in place wants.
+ * Two kinds of thing live here, and they are different in a way worth keeping
+ * straight. The byte order describes THE SAVE IN FRONT OF YOU and is normally
+ * detected per patch; the console IDs describe YOUR HARDWARE and are true
+ * forever. Every one of them is safe to leave alone -- the defaults mean "keep
+ * whatever the save already says", which is what patching one in place wants.
  *
  *   PSP, Fuse ID       Two of a PARAM.SFO's hashes are derived from the
  *                      console's own fuse in savedata modes 4 and 6. A PSP
@@ -27,7 +28,34 @@ const KEY = 'apollo.settings';
 
 /* The defaults are "say nothing", which is why both are empty strings rather
  * than the values they stand in for. */
-const EMPTY = { pspFuseId: '', ps3ConsoleId: '', ps3UserId: 1 };
+const EMPTY = { pspFuseId: '', ps3ConsoleId: '', ps3UserId: 1, byteOrder: 'auto' };
+
+/*
+ * Byte order for save DATA, the CLI's -b/--big-endian flag.
+ *
+ * 'auto' is the default and the only value that cannot be wrong: PS3 saves are
+ * big-endian and everything else Apollo covers is not, and the patch database's
+ * own platform tag says which a patch is. The other two are for somebody who
+ * knows better than the tag.
+ *
+ * Forcing one is remembered across visits, which is the point of it and also
+ * its only hazard: a forced big-endian left set byte-reverses every PS4 or Vita
+ * save afterwards, and the result looks like a patched save rather than an
+ * error. Both pages therefore say which order is in effect and why, and say it
+ * in amber when a forced one disagrees with the patch that is open.
+ */
+export const BYTE_ORDERS = ['auto', 'big', 'little'];
+
+/* What the engine should run with for a patch the detection called `detected`. */
+export function effectiveBigEndian(detected) {
+    switch (current.byteOrder) {
+        case 'big':    return true;
+        case 'little': return false;
+        default:       return !!detected;
+    }
+}
+
+export const byteOrderForced = () => current.byteOrder !== 'auto';
 
 let current = { ...EMPTY };
 let call = null;
@@ -89,10 +117,34 @@ function validate() {
 }
 
 function render() {
+    $('set-order').value = current.byteOrder;
     $('set-fuse').value = current.pspFuseId;
     $('set-cid').value = current.ps3ConsoleId;
     $('set-user').value = String(current.ps3UserId || 1);
+    renderOrderWarning();
     validate();
+}
+
+function renderOrderWarning() {
+    $('set-order-warn').hidden = current.byteOrder === 'auto';
+}
+
+/*
+ * The store on its own, for a page with no Settings dialog in it.
+ *
+ * index.html has none -- the console panels it would configure live on the
+ * tools page -- but it applies codes, so it needs the byte order. Reading the
+ * same key means the two pages cannot disagree about it.
+ */
+export function loadSettings() {
+    return load();
+}
+
+/* Change one field and persist it. Returns the new settings. */
+export function updateSettings(patch) {
+    current = { ...current, ...patch };
+    save();
+    return settings();
 }
 
 export function initSettings(worker, changed) {
@@ -113,10 +165,25 @@ export function initSettings(worker, changed) {
     for (const id of ['set-fuse', 'set-cid', 'set-user'])
         $(id).addEventListener('input', validate);
 
+    /* The byte order takes effect the moment it is picked: it cannot be
+     * half-typed, so there is nothing to validate and no reason to make anyone
+     * press Save for it. */
+    $('set-order').addEventListener('change', (ev) => {
+        current.byteOrder = BYTE_ORDERS.includes(ev.target.value) ? ev.target.value : 'auto';
+        save();
+        renderOrderWarning();
+        onChange({ ok: true, byteOrder: current.byteOrder });
+        setStatus(current.byteOrder === 'auto'
+            ? 'Byte order follows each patch again.'
+            : `Byte order forced to ${current.byteOrder}-endian for every save.`,
+            current.byteOrder === 'auto' ? 'good' : '');
+    });
+
     $('settings-save').addEventListener('click', async () => {
         if (!validate()) return;
 
         current = {
+            ...current,
             pspFuseId: $('set-fuse').value.trim().toUpperCase(),
             ps3ConsoleId: $('set-cid').value.trim().toUpperCase(),
             ps3UserId: Math.max(1, parseInt($('set-user').value, 10) || 1),
@@ -137,6 +204,8 @@ export function initSettings(worker, changed) {
         save();
         render();
         await push();
-        setStatus('Cleared. Saves keep whatever console they are already bound to.', 'good');
+        onChange({ ok: true, byteOrder: current.byteOrder });
+        setStatus('Cleared. Byte order follows each patch, and saves keep whatever '
+                  + 'console they are already bound to.', 'good');
     });
 }

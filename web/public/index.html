@@ -89,11 +89,24 @@
       <input type="search" id="filter" placeholder="Filter codes…" aria-label="Filter codes">
       <button type="button" id="select-default" class="ghost">Reset selection</button>
       <button type="button" id="select-none" class="ghost">Clear</button>
-      <label class="endian" title="PS3 saves store data big-endian">
-        <input type="checkbox" id="big-endian"> Big-endian data
+      <!-- Byte order for save DATA. Auto follows the patch, which is right for
+           every patch in the database; the other two are for a loose file for a
+           console it does not cover. The choice is remembered, so #endian-why
+           says which order is in effect whenever it is not Auto. -->
+      <label class="endian" title="PS3 saves store data big-endian; everything else little-endian">
+        <select id="big-endian" aria-label="Byte order for save data">
+          <option value="auto">Byte order: auto</option>
+          <option value="big">Byte order: big-endian</option>
+          <option value="little">Byte order: little-endian</option>
+        </select>
       </label>
       <button type="button" id="apply" class="primary" disabled>Apply</button>
     </div>
+
+    <!-- Which byte order Apply will run with, and why. Hidden under Auto: the
+         detection is right for every database patch, so saying so each time
+         would be noise. -->
+    <p class="warn" id="endian-why" hidden></p>
 
     <p class="warn" id="needs-options" hidden></p>
 

@@ -220,6 +220,11 @@
        than one file, and a page cannot start several downloads at once. -->
   <div id="outputs" class="outputs" hidden></div>
 
+  <!-- Which byte order the engine will run with, and why. Only shown when a
+       forced order is in play: with Auto the detection is always right for a
+       database patch, so saying so every time would be noise. -->
+  <p id="tool-order" class="psp-key-why" hidden></p>
+
   <div id="actions" class="actions" hidden></div>
 
   <p id="status" class="status" role="status" aria-live="polite"></p>
@@ -340,10 +345,32 @@
     <div>
       <h2 id="settings-title">Settings</h2>
       <p class="tool-sub">
-        Which console Apollo writes saves <em>for</em>. Both are optional, and
-        neither changes how a save is read &mdash; only what is written back.
+        How saves are read and written. All of these are optional: the defaults
+        detect the byte order from each patch, and leave every save bound to the
+        console it came from.
       </p>
     </div>
+  </div>
+
+  <div class="set-group">
+    <p class="psp-key-head"><span class="option-label">Save data &mdash; byte order</span></p>
+    <div class="psp-key-inputs">
+      <select id="set-order" aria-label="Byte order for save data">
+        <option value="auto">Auto &mdash; detect from the patch</option>
+        <option value="big">Big-endian</option>
+        <option value="little">Little-endian</option>
+      </select>
+    </div>
+    <p class="psp-key-why">
+      Auto is right for every patch in the database: PS3 saves are big-endian
+      and everything else Apollo covers is not, and the database says which a
+      patch is. Force one only for a loose patch file for a console it does not
+      cover.
+    </p>
+    <p id="set-order-warn" class="psp-note" hidden>
+      A forced order is remembered across visits and applies to every save. Each
+      page says so when it disagrees with the patch you have open.
+    </p>
   </div>
 
   <div class="set-group">
@@ -388,7 +415,7 @@
 
   <div class="set-actions">
     <button type="button" id="settings-save" class="gh-button">Save</button>
-    <button type="button" id="settings-clear" class="linkish">Clear both</button>
+    <button type="button" id="settings-clear" class="linkish">Reset all</button>
   </div>
 
   <p id="settings-status" class="status" role="status" aria-live="polite"></p>

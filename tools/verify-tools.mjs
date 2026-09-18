@@ -72,13 +72,23 @@ const rows = fs.readFileSync(path.join(HERE, 'verify-manifest.tsv'), 'utf8')
     .map((l) => {
         const [platform, titleId, enc, dec, be, variant, options, native] = l.split('\t');
         return { platform, titleId, enc, dec, bigEndian: be === '1',
-                 /* Optional 8th field: `psp=<32 hex digits>`, or `psp=-` for a
-                  * game the console stores unkeyed. It says this platform
-                  * wraps saves in ITS OWN encryption under whatever the patch
-                  * does, and asks for the whole composition to be proved --
-                  * see "THE CONSOLE'S OWN LAYER" below. */
-                 native: /^psp=/i.test(native || '')
-                     ? { kind: 'psp', key: native.slice(4).trim() }
+                 /*
+                  * Optional 8th field: which console wraps this save in ITS
+                  * OWN encryption under whatever the patch does, and with what
+                  * key. It asks for the whole composition to be proved -- see
+                  * "THE CONSOLE'S OWN LAYER" below.
+                  *
+                  *   psp=<32 hex>  the game key, from PSP/gamekeys.txt
+                  *   psp=-         a game the console stores unkeyed
+                  *   ps3=<32 hex>  the secure file ID
+                  *   ps3=db        ...looked up in the real PS3/games.conf,
+                  *                 by title id and file name, so the row also
+                  *                 proves that lookup against all 1819 of its
+                  *                 sections
+                  */
+                 native: /^(psp|ps3)=/i.test(native || '')
+                     ? { kind: native.slice(0, 3).toLowerCase(),
+                         key: native.slice(4).trim() }
                      : null,
                  /* Optional 6th field: which of a multi-tool patch's variants
                   * this row is about. MGS HD holds Metal Gear Solid 2's whole
@@ -294,7 +304,9 @@ function pspWrap(sfo, name, plain, key) {
     try {
         const rc = M._apw_psp_encrypt(sp, sfo.length, np, dp, plain.length, kp);
         if (rc !== 0) return { error: pspError(rc) };
-        return { bytes: pspOut(), sfo: heapCopy(sp, sfo.length) };
+        /* `meta`, not `sfo`: the PS3 half returns its PARAM.PFD under the same
+         * name, so the code driving both can stay one code path. */
+        return { bytes: pspOut(), meta: heapCopy(sp, sfo.length) };
     } finally {
         M._free(sp); M._free(dp); M._free(kp); M._free(np);
     }
@@ -311,6 +323,145 @@ function pspUnwrap(sfo, enc, key) {
     }
 }
 
+const ps3Error = (rc) => M.UTF8ToString(M._apw_ps3_error(rc));
+
+/*
+ * A PARAM.PFD shaped like the ones a console writes, listing exactly `names`.
+ *
+ * Mirrors build_pfd() in core/test_ps3.c, for the same reason pspSfoFixture()
+ * mirrors build_sfo(): nothing that ships ever BUILDS one of these -- the page
+ * and the engine only ever read them.
+ *
+ * The header key and each entry key are filler. That is deliberate: they
+ * decrypt to SOMETHING deterministic, which is all a fixture needs, and it
+ * keeps the file free of any real console's secrets. The signatures are left
+ * to apfd_resign(), which is the code under test.
+ */
+const PFD_LEN = 32768, PFD_CAPACITY = 57, PFD_RESERVED = 114, PFD_ENTRY = 272;
+
+/* Upstream's bucket hash, written out again here so the fixture would notice
+ * the implementation changing it. */
+function pfdBucket(name) {
+    let h = 0n;
+    for (const ch of Buffer.from(name, 'latin1'))
+        h = (((h << 5n) - h + BigInt(ch)) & 0xFFFFFFFFFFFFFFFFn);
+    return Number(h % BigInt(PFD_CAPACITY));
+}
+
+function pfdFixture(names) {
+    const out = Buffer.alloc(PFD_LEN);
+    const etOff = 96 + 24 + PFD_CAPACITY * 8;
+
+    /* A deterministic filler, the same xorshift core/test_ps3.c uses. */
+    const fill = (at, len, seed) => {
+        let x = seed >>> 0;
+        for (let i = 0; i < len; i++) {
+            x ^= (x << 13) >>> 0; x >>>= 0;
+            x ^= x >>> 17;
+            x ^= (x << 5) >>> 0;  x >>>= 0;
+            out[at + i] = (x >>> 24) & 0xFF;
+        }
+    };
+
+    out.writeBigUInt64BE(0x50464442n, 0);          /* "PFDB" */
+    out.writeBigUInt64BE(3n, 8);
+    fill(16, 16, 0xA5A5A5A5);                      /* header key: the signature IV */
+    fill(32, 64, 0x5A5A5A5A);                      /* signature, in its stored form */
+
+    out.writeBigUInt64BE(BigInt(PFD_CAPACITY), 96);
+    out.writeBigUInt64BE(BigInt(PFD_RESERVED), 104);
+    out.writeBigUInt64BE(BigInt(names.length), 112);
+
+    /* Every bucket empty, then the entries chained into theirs. Two names CAN
+     * hash to one bucket, so this builds the chain rather than assuming they
+     * do not -- a multi-file row would otherwise lose an entry. */
+    const bucket = new Array(PFD_CAPACITY).fill(PFD_RESERVED);
+    const next = new Array(names.length).fill(PFD_RESERVED);
+    for (let i = names.length - 1; i >= 0; i--) {
+        const b = pfdBucket(names[i]);
+        next[i] = bucket[b];
+        bucket[b] = i;
+    }
+    bucket.forEach((v, i) => out.writeBigUInt64BE(BigInt(v), 120 + i * 8));
+
+    names.forEach((name, i) => {
+        const at = etOff + i * PFD_ENTRY;
+        if (Buffer.byteLength(name) > 64)
+            throw new Error(`"${name}" is too long for a PARAM.PFD entry`);
+        out.writeBigUInt64BE(BigInt(next[i]), at);
+        out.write(name, at + 8, 'latin1');
+        fill(at + 80, 64, 0x1234567 + i);
+    });
+
+    const pp = alloc(out);
+    try {
+        const rc = M._apw_ps3_resign(pp, out.length);
+        if (rc !== 0) throw new Error(`signing the fixture: ${ps3Error(rc)}`);
+        return heapCopy(pp, out.length);
+    } finally {
+        M._free(pp);
+    }
+}
+
+/* Put the console's wrapper ON. Returns the wrapped bytes and the PARAM.PFD as
+ * it stands afterwards -- encryption rewrites it, and each successive file has
+ * to build on the last so one PFD ends up carrying every file's hash. */
+function ps3Wrap(pfd, name, plain, sfid) {
+    const pp = alloc(pfd), dp = alloc(plain), kp = alloc(sfid);
+    const np = M.stringToNewUTF8(name);
+    try {
+        const rc = M._apw_ps3_encrypt(pp, pfd.length, np, dp, plain.length, kp);
+        if (rc !== 0) return { error: ps3Error(rc) };
+        return { bytes: pspOut(), meta: heapCopy(pp, pfd.length) };
+    } finally {
+        M._free(pp); M._free(dp); M._free(kp); M._free(np);
+    }
+}
+
+/* ...and take it off again. */
+function ps3Unwrap(pfd, name, enc, sfid) {
+    const pp = alloc(pfd), dp = alloc(enc), kp = alloc(sfid);
+    const np = M.stringToNewUTF8(name);
+    try {
+        const rc = M._apw_ps3_decrypt(pp, pfd.length, np, dp, enc.length, kp);
+        return rc !== 0 ? { error: ps3Error(rc) } : { bytes: pspOut() };
+    } finally {
+        M._free(pp); M._free(dp); M._free(kp); M._free(np);
+    }
+}
+
+/*
+ * The secure file ID the real PS3/games.conf files under this title id and
+ * file name, for a row that says `ps3=db`.
+ *
+ * Read through the same C the page and the desktop app call, so a row proves
+ * the two rules that database needs -- longest directory prefix for the
+ * section, first pattern in file order for the file -- against all 1819 of its
+ * sections rather than against a fixture.
+ */
+let gamesConf = null;
+
+function ps3KeyFromDb(titleId, fileName) {
+    if (gamesConf === null) {
+        const p = path.join(patchesDir, 'PS3', 'games.conf');
+        gamesConf = fs.existsSync(p) ? fs.readFileSync(p) : false;
+    }
+    if (gamesConf === false) return { error: 'PS3/games.conf is not in the patches checkout' };
+
+    const tp = alloc(gamesConf);
+    const dp = M.stringToNewUTF8(titleId);
+    const fp = M.stringToNewUTF8(fileName);
+    const kp = M._malloc(16);
+    const ip = M._malloc(80);
+    try {
+        const rc = M._apw_ps3_key_from_db(tp, gamesConf.length, dp, fp, kp, ip, 80);
+        if (rc !== 0) return { error: ps3Error(rc) };
+        return { key: heapCopy(kp, 16), entry: M.UTF8ToString(ip) };
+    } finally {
+        M._free(tp); M._free(dp); M._free(fp); M._free(kp); M._free(ip);
+    }
+}
+
 const NULL_KEY = Buffer.alloc(16);
 
 /*
@@ -323,7 +474,7 @@ const NULL_KEY = Buffer.alloc(16);
  * basename, minus the .ENC/.DEC the reference tools append, covers a patch
  * that declares no target.
  */
-const pspSaveName = (target, rel) =>
+const nativeSaveName = (target, rel) =>
     (target || '').trim() || path.basename(rel).replace(/\.(enc|dec)$/i, '');
 
 function openPatch(file) {
@@ -424,37 +575,59 @@ for (const row of rows) {
      */
     let native = null;
     if (row.native) {
-        const key = row.native.key === '-' ? NULL_KEY
-                                           : Buffer.from(row.native.key, 'hex');
+        const kind = row.native.kind;
+        const names = encs.map((rel, i) => nativeSaveName(targets[i] ?? targets[0], rel));
+        const wrapped = [];
+        let key = null, meta = null, bad = null, note = '';
+
+        if (kind === 'ps3' && /^db$/i.test(row.native.key)) {
+            const hit = ps3KeyFromDb(row.titleId, names[0]);
+            if (hit.error) {
+                console.log(`FAIL  ${label}  ps3=db: ${hit.error}`);
+                M._apw_close(); fail++; continue;
+            }
+            key = hit.key;
+            note = ` (key from games.conf, ${hit.entry})`;
+        } else {
+            key = row.native.key === '-' ? NULL_KEY
+                                         : Buffer.from(row.native.key, 'hex');
+        }
+
         if (key.length !== 16) {
-            console.log(`FAIL  ${label}  psp= needs 32 hex digits or "-"`);
+            console.log(`FAIL  ${label}  ${kind}= needs 32 hex digits`
+                        + (kind === 'psp' ? ' or "-"' : ' or "db"'));
             M._apw_close(); fail++; continue;
         }
-        /* 0x41 is what a save written by firmware 2.5.2 or later carries;
-         * 0x01 is the unkeyed form. Both are exercised by core/test_psp.c. */
-        const names = encs.map((rel, i) => pspSaveName(targets[i] ?? targets[0], rel));
-        const wrapped = [];
-        let bad = null;
-        let sfo = null;
 
         try {
-            sfo = pspSfoFixture(names, key.equals(NULL_KEY) ? 0x01 : 0x41);
+            /* For the PSP, 0x41 is what a save written by firmware 2.5.2 or
+             * later carries and 0x01 is the unkeyed form; both are exercised
+             * by core/test_psp.c. The PS3's metadata carries no such mode --
+             * its entry table says what is protected. */
+            meta = kind === 'psp'
+                ? pspSfoFixture(names, key.equals(NULL_KEY) ? 0x01 : 0x41)
+                : pfdFixture(names);
         } catch (err) {
             console.log(`FAIL  ${label}  console layer: ${err.message}`);
             M._apw_close(); fail++; continue;
         }
 
+        const wrap = (m, n, b) => kind === 'psp' ? pspWrap(m, n, b, key)
+                                                 : ps3Wrap(m, n, b, key);
+        const unwrap = (m, n, b) => kind === 'psp' ? pspUnwrap(m, b, key)
+                                                   : ps3Unwrap(m, n, b, key);
+
         for (let i = 0; i < inputs.length; i++) {
-            const w = pspWrap(sfo, names[i], Buffer.from(inputs[i].bytes), key);
+            const w = wrap(meta, names[i], Buffer.from(inputs[i].bytes));
             if (w.error) { bad = `wrapping ${names[i]}: ${w.error}`; break; }
-            sfo = w.sfo;
+            meta = w.meta;
             wrapped.push(w.bytes);
         }
         /* The wrapper has to be invertible before anything downstream means
          * anything. Checked against the sample, not against itself. */
         if (!bad) {
             for (let i = 0; i < wrapped.length; i++) {
-                const u = pspUnwrap(sfo, wrapped[i], key);
+                const u = unwrap(meta, names[i], wrapped[i]);
                 if (u.error) { bad = `unwrapping ${names[i]}: ${u.error}`; break; }
                 if (!u.bytes.equals(Buffer.from(inputs[i].bytes))) {
                     bad = `unwrapping ${names[i]} did not return the sample`;
@@ -467,7 +640,7 @@ for (const row of rows) {
             console.log(`FAIL  ${label}  console layer: ${bad}`);
             M._apw_close(); fail++; continue;
         }
-        native = { key, names, sfo, wrapped };
+        native = { kind, key, names, meta, wrapped, note, wrap };
     }
 
     const save = inputs[0].bytes;
@@ -550,18 +723,22 @@ for (const row of rows) {
         let outs = back.out;
         let rewrapFailed = null;
         if (native) {
-            let sfo = pspSfoFixture(native.names,
-                                    native.key.equals(NULL_KEY) ? 0x01 : 0x41);
+            /* From a FRESH fixture, so the metadata has to arrive at the same
+             * bytes by the same route rather than by being carried over. */
+            let meta = native.kind === 'psp'
+                ? pspSfoFixture(native.names, native.key.equals(NULL_KEY) ? 0x01 : 0x41)
+                : pfdFixture(native.names);
             const again = [];
             for (let i = 0; i < outs.length && i < native.names.length; i++) {
-                const w = pspWrap(sfo, native.names[i], outs[i], native.key);
+                const w = native.wrap(meta, native.names[i], outs[i]);
                 if (w.error) { rewrapFailed = w.error; break; }
-                sfo = w.sfo;
+                meta = w.meta;
                 again.push(w.bytes);
             }
-            if (!rewrapFailed && !sfo.equals(native.sfo))
-                rewrapFailed = 'the rewritten PARAM.SFO does not match the one '
-                             + 'wrapping produced';
+            if (!rewrapFailed && !meta.equals(native.meta))
+                rewrapFailed = `the rewritten ${native.kind === 'psp' ? 'PARAM.SFO'
+                                                                     : 'PARAM.PFD'} `
+                             + 'does not match the one wrapping produced';
             outs = again;
         }
 
@@ -638,8 +815,8 @@ for (const row of rows) {
         console.log(`ok    ${label}  ${doc.game || ''} (${steps.length} ${row.checksumOnly ? 'checksum' : 'decrypt'} code(s), ${sizes} bytes${
             slack ? `, payload matched with ${slack} trailing byte(s) ignored` : ''}${
             trip ? ` + ${chain.rest.length}-code round trip` : ''}${
-            native ? (trip ? ', through the console\'s own layer both ways'
-                            : ', through the console\'s own layer') : ''})`);
+            native ? `, through the ${native.kind.toUpperCase()}'s own layer${
+                trip ? ' both ways' : ''}${native.note}` : ''})`);
     } else {
         fail++;
         let why = !tripOk

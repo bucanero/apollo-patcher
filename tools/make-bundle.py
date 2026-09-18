@@ -18,7 +18,8 @@ stat()/open() (see micropy_import_stat in apollo-lib), so the app extracts
 python/ to a cache directory on first use. They travel in the same zip so there
 is only ever one file to ship.
 
-~2250 patches, 8.9MB of text, ~2.7MB zipped.
+~2250 patches, 8.9MB of text, plus 300KB of console key databases; ~2.8MB
+zipped.
 
 This is Python rather than shell because the shell version needed `zip`,
 `unzip`, `du` and a `python3` on PATH, and MSYS2 (the Windows CI job) does not
@@ -35,7 +36,7 @@ PLATFORMS = ["PS2", "PS3", "PS4", "PSP", "PSV"]
 # stamps them with the checkout time, so without this every CI run would produce
 # a different archive for identical content. The archive is still not quite
 # byte-reproducible — index.tsv carries its own build timestamp, so exactly one
-# of the 2267 entries varies between runs — but the other 2266 do not, which is
+# of the 2268 entries varies between runs — but the other 2267 do not, which is
 # what makes two bundles worth diffing.
 FIXED_DATE = (2020, 1, 1, 0, 0, 0)
 

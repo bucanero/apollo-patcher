@@ -6,6 +6,8 @@
  */
 
 import { CDN } from './cdn.js';
+import { loadSettings, updateSettings, effectiveBigEndian,
+         byteOrderForced, BYTE_ORDERS } from './settings.js';
 
 const TYPE = { 1: 'Save Wizard', 2: 'BSD', 3: 'Python' };
 
@@ -27,7 +29,34 @@ const state = {
     options: {},         // index -> [selected value per group]
     patched: null,       // Uint8Array of the last successful run
     edited: new Set(),   // indices whose body was hand-edited this session
+    beDetected: false,   // what the patch says its byte order is; see renderByteOrder
 };
+
+/*
+ * Byte order for save DATA.
+ *
+ * The detection above is the patch's own answer and is right for every patch in
+ * the database. Settings can force one, which is remembered across visits, so
+ * the select shows what is chosen and #endian-why shows what that MEANS for the
+ * patch in front of you -- and says so loudly when a forced order contradicts
+ * it, since that writes byte-reversed values and hands back a save that looks
+ * patched.
+ */
+function renderByteOrder() {
+    const stored = loadSettings().byteOrder;
+    const why = $('endian-why');
+
+    if ($('big-endian').value !== stored) $('big-endian').value = stored;
+
+    if (!state.codes.length || !byteOrderForced()) { why.hidden = true; return; }
+
+    const be = effectiveBigEndian(state.beDetected);
+    why.hidden = false;
+    why.textContent = be === state.beDetected
+        ? `Byte order: ${be ? 'big' : 'little'}-endian, forced in Settings.`
+        : `Byte order: ${be ? 'big' : 'little'}-endian, forced in Settings — but this `
+          + `patch expects ${state.beDetected ? 'big' : 'little'}-endian.`;
+}
 
 /* ---------------------------------------------------------------------------
  * Worker plumbing
@@ -152,15 +181,14 @@ async function loadPatch(file, displayName, platform) {
     /* Prefer the index's name when the patch came from the database: the
      * engine hands back raw bytes, and 245 patches are Windows-1252, so their
      * ™/® characters arrive mojibaked through UTF8ToString. */
-    /* Byte order follows the patch, not the previous one: a PS3 patch turns
-     * big-endian on, anything else turns it back off. Still a checkbox, so it
-     * can be overridden afterwards. */
-    const be = !!res.bigEndian;
-    if ($('big-endian').checked !== be) {
-        $('big-endian').checked = be;
-        appendLog([be ? 'PS3 title detected — big-endian data mode enabled'
-                      : 'Non-PS3 title — big-endian data mode disabled']);
-    }
+    /* Byte order follows the patch unless Settings forces one. The DETECTION
+     * is what is kept here; what the engine runs with is
+     * effectiveBigEndian(state.beDetected), so a forced mode can be shown as
+     * forced rather than looking like the patch's own answer. */
+    state.beDetected = !!res.bigEndian;
+    appendLog([state.beDetected ? 'PS3 title detected — big-endian save data'
+                                : 'Non-PS3 title — little-endian save data']);
+    renderByteOrder();
 
     $('game-name').textContent = displayName || res.game.trim() || file.name;
     $('code-count').textContent = `${res.codes.length} codes`;
@@ -662,7 +690,7 @@ async function apply() {
             options: state.options,
             save: copy,
             saveName: state.saveName,
-            bigEndian: $('big-endian').checked,
+            bigEndian: effectiveBigEndian(state.beDetected),
         },
         [copy],
     );
@@ -938,6 +966,14 @@ $('code-dialog').addEventListener('close', () => { editing = null; });
 
 $('open-db').addEventListener('click', openDb);
 $('view-patch').addEventListener('click', showPatchText);
+/* The byte order is shared with the tools page through the same stored
+ * setting, so a choice made here is the one made there. */
+$('big-endian').addEventListener('change', (ev) => {
+    const value = BYTE_ORDERS.includes(ev.target.value) ? ev.target.value : 'auto';
+    updateSettings({ byteOrder: value });
+    renderByteOrder();
+});
+
 $('save-patch').addEventListener('click', savePatchFile);
 $('view-save').addEventListener('click', editSaveData);
 $('view-result').addEventListener('click', viewResultData);
@@ -951,6 +987,10 @@ $('db-search').addEventListener('keydown', (e) => {
         $('db-results').querySelector('.db-row')?.click();
     }
 });
+
+/* Show the stored byte order before anything is loaded, so the select is never
+ * out of step with what Apply would do. */
+renderByteOrder();
 
 call('version').then(({ version }) => {
     if (version) $('version').textContent = `Apollo engine ${version}`;

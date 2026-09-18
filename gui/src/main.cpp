@@ -87,7 +87,14 @@ struct AppState {
     std::string         log;
     std::mutex          log_mtx;
     bool                backup = true;    // copy target -> target.bak before patching
-    bool                big_endian = false; // engine data byte order (CLI's -b flag)
+
+    // What apctl_is_big_endian_for() said about the patch that is open, and
+    // whether anything is open for it to have said it about. The value the
+    // engine actually runs with is effective_big_endian(), which is this
+    // unless Settings overrides it -- keeping the two apart is what lets the
+    // main window say "forced, and it disagrees with this patch".
+    bool                be_detected = false;
+    std::string         be_platform;      // "PS3", "PS4", ... "" for a loose file
     bool                scroll_log = false;
     bool                show_log = false; // log pane collapsed by default
     bool                open_apply_popup = false;
@@ -310,6 +317,9 @@ static std::string strip_cr(const std::string& in) {
         if (c != '\r') out += c;
     return out;
 }
+// Defined below, next to the setting that can override it.
+static bool effective_big_endian();
+
 
 // Shared tail of both load paths (file and database): a session exists, so set
 // up the per-row UI state around it.
@@ -334,19 +344,18 @@ static void adopt_session(apctl_session_t* session,
 
     // PS3 save data is big-endian, and no patch in the database declares the
     // order per code (the engine's [BE:...] header exists but goes unused), so
-    // pick the mode up rather than leave the user to notice. The database's own
+    // work the mode out rather than leave the user to notice. The database's own
     // platform tag decides when there is one; a loose file falls back to its
-    // title ID. Still a checkbox they can override afterwards.
-    if (apctl_is_big_endian_for(platform, label.c_str())) {
-        if (!g_app.big_endian) {
-            g_app.big_endian = true;
-            g_app.append_log("PS3 title detected - big-endian data mode enabled");
-        }
-    } else if (g_app.big_endian) {
-        g_app.big_endian = false;
-        g_app.append_log("Non-PS3 title - big-endian data mode disabled");
-    }
-    apctl_set_big_endian(g_app.big_endian ? 1 : 0);
+    // title ID.
+    //
+    // Recorded, not applied: Settings can force a mode, and keeping the
+    // detection separate is what lets the main window say a forced one
+    // disagrees with the patch in front of it.
+    g_app.be_detected = apctl_is_big_endian_for(platform, label.c_str()) != 0;
+    g_app.be_platform = platform ? platform : "";
+    g_app.append_log(g_app.be_detected ? "PS3 title detected - big-endian save data"
+                                       : "Non-PS3 title - little-endian save data");
+    apctl_set_big_endian(effective_big_endian() ? 1 : 0);
 }
 
 // ---- about box -------------------------------------------------------------
@@ -514,13 +523,42 @@ static bool write_all(const std::string& path, const unsigned char* data, size_t
 // Kept in the user's config directory rather than beside the app, because it
 // describes their console and not this copy of the program. ImGui's own ini is
 // deliberately off (see main), so this is the only thing written there.
+/*
+ * Byte order for save DATA, the CLI's -b/--big-endian flag.
+ *
+ * AUTO is the default and the only value that cannot be wrong: PS3 saves are
+ * big-endian and everything else Apollo covers is not, and the patch database's
+ * own platform tag says which a patch is (apctl_is_big_endian_for). The other
+ * two are for somebody who knows better than the tag -- a loose patch file for
+ * a console that is not in the database, say.
+ *
+ * Forcing one is remembered across runs, which is the point of it and also its
+ * only hazard: a forced big-endian left set will byte-reverse every PS4 or Vita
+ * save afterwards, and the result looks like a patched save rather than an
+ * error. draw_byte_order() says so in amber whenever a forced mode disagrees
+ * with the patch that is open.
+ */
+enum ByteOrder { BYTE_ORDER_AUTO = 0, BYTE_ORDER_BIG = 1, BYTE_ORDER_LITTLE = 2 };
+
 struct Settings {
     char fuse_hex[17]    = "";     // 16 hex digits, or empty for the default
     char console_hex[33] = "";     // 32 hex digits, or empty for "leave alone"
     int  user_id         = 1;
+    int  byte_order      = BYTE_ORDER_AUTO;
     std::string status;            // what the last save or load had to say
 };
+/*
+ * g_settings holds the FIELDS -- ImGui edits its buffers in place, so while
+ * someone is halfway through typing a console ID, g_settings.console_hex is
+ * that half. g_saved is what is on disk.
+ *
+ * They are separate because the byte order commits the moment it is picked
+ * while the two hex fields commit on Save: without the split, changing the
+ * order mid-word would write the half-typed ID to the file and push it to the
+ * engine, silently clearing the console binding.
+ */
 static Settings g_settings;
+static Settings g_saved;
 static bool g_want_settings = false;
 
 static std::string config_dir() {
@@ -545,9 +583,24 @@ static std::string settings_path() {
     return dir.empty() ? std::string() : dir + "settings.txt";
 }
 
+/*
+ * The byte order actually in effect: what the patch says, unless Settings
+ * overrides it. With nothing loaded there is nothing to detect, so AUTO reads
+ * as little-endian -- the host's own order, and what the engine defaults to.
+ */
+static bool effective_big_endian() {
+    switch (g_settings.byte_order) {
+        case BYTE_ORDER_BIG:    return true;
+        case BYTE_ORDER_LITTLE: return false;
+        default:                return g_app.be_detected;
+    }
+}
+
 // Hand the values to the two engines. Called after a load and after every
 // edit, so what is on screen is what will be written.
 static void settings_apply() {
+    apctl_set_big_endian(effective_big_endian() ? 1 : 0);
+
     apsp_set_fuse_id(KIRK_HOST_FUSE_ID);
     if (strlen(g_settings.fuse_hex) == 16) {
         unsigned long long v = strtoull(g_settings.fuse_hex, nullptr, 16);
@@ -580,10 +633,18 @@ static void settings_load() {
         if (key == "psp_fuse_id")    snprintf(g_settings.fuse_hex, sizeof g_settings.fuse_hex, "%s", val.c_str());
         else if (key == "ps3_console_id") snprintf(g_settings.console_hex, sizeof g_settings.console_hex, "%s", val.c_str());
         else if (key == "ps3_user_id")    g_settings.user_id = atoi(val.c_str());
+        else if (key == "byte_order")
+            /* Named rather than numbered, so the file stays readable and an
+             * unrecognised value falls back to the safe one. */
+            g_settings.byte_order = val == "big"    ? BYTE_ORDER_BIG
+                                  : val == "little" ? BYTE_ORDER_LITTLE
+                                                    : BYTE_ORDER_AUTO;
     }
     settings_apply();
+    g_saved = g_settings;
 }
 
+// Writes g_saved, never the fields: see the note there.
 static bool settings_store() {
     const std::string dir = config_dir();
     if (dir.empty()) return false;
@@ -599,9 +660,12 @@ static bool settings_store() {
 
     out << "# Apollo Save Patcher - which console saves are written FOR.\n"
         << "# Both are optional; blank keeps whatever a save already says.\n"
-        << "psp_fuse_id=" << g_settings.fuse_hex << "\n"
-        << "ps3_console_id=" << g_settings.console_hex << "\n"
-        << "ps3_user_id=" << g_settings.user_id << "\n";
+        << "psp_fuse_id=" << g_saved.fuse_hex << "\n"
+        << "ps3_console_id=" << g_saved.console_hex << "\n"
+        << "ps3_user_id=" << g_saved.user_id << "\n"
+        << "byte_order=" << (g_saved.byte_order == BYTE_ORDER_BIG    ? "big"
+                           : g_saved.byte_order == BYTE_ORDER_LITTLE ? "little"
+                                                                     : "auto") << "\n";
     return (bool)out;
 }
 
@@ -1335,10 +1399,14 @@ static void apply_selected() {
 
     // Byte order for save data — the engine's global setting, re-asserted by
     // apctl_apply() for every code (apollo_free_var_list() clears it).
-    apctl_set_big_endian(g_app.big_endian ? 1 : 0);
+    const bool be = effective_big_endian();
+    apctl_set_big_endian(be ? 1 : 0);
     g_app.log.clear();
-    g_app.append_log(g_app.big_endian ? "=== Using big-endian data mode"
-                                      : "=== Using host (little-endian) data mode");
+    g_app.append_log(be ? "=== Using big-endian data mode"
+                        : "=== Using host (little-endian) data mode");
+    if (g_settings.byte_order != BYTE_ORDER_AUTO && be != g_app.be_detected)
+        g_app.append_log("[!] That byte order is forced in Settings and disagrees "
+                         "with this patch");
 
     // The console's own layer comes OFF before any code runs and goes back ON
     // after — the reverse order, which is not negotiable: wrapping first would
@@ -2215,9 +2283,29 @@ static void draw_settings_window() {
                        "written back. Left blank, a save keeps whatever it "
                        "already says.");
 
+    ImGui::SeparatorText("Save data");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+    const char* ORDERS[] = { "Auto (detect from the patch)", "Big-endian", "Little-endian" };
+    bool order_changed = ImGui::Combo("Byte order", &g_settings.byte_order,
+                                      ORDERS, IM_ARRAYSIZE(ORDERS));
+    ImGui::TextDisabled("Auto is right for every patch in the database: PS3 saves are");
+    ImGui::TextDisabled("big-endian and everything else Apollo covers is not, and the");
+    ImGui::TextDisabled("database says which a patch is. Force one only for a loose patch");
+    ImGui::TextDisabled("file for a console it does not cover.");
+    if (g_settings.byte_order != BYTE_ORDER_AUTO) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f),
+                           "A forced order is remembered across runs, and applies to");
+        ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f),
+                           "every save. The main window says so when it disagrees with");
+        ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f),
+                           "the patch you have open.");
+    }
+
     ImGui::SeparatorText("PSP");
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
-    bool changed = ImGui::InputText("Fuse ID", g_settings.fuse_hex, sizeof g_settings.fuse_hex,
+    bool changed = order_changed;
+    changed |= ImGui::InputText("Fuse ID", g_settings.fuse_hex, sizeof g_settings.fuse_hex,
                                     ImGuiInputTextFlags_CharsHexadecimal |
                                     ImGuiInputTextFlags_CharsUppercase);
     ImGui::TextDisabled("16 hex digits. Savedata modes 4 and 6 derive two PARAM.SFO");
@@ -2251,12 +2339,20 @@ static void draw_settings_window() {
     const size_t cid_len  = strlen(g_settings.console_hex);
     const bool   ok = (fuse_len == 0 || fuse_len == 16) && (cid_len == 0 || cid_len == 32);
 
+    /* The order alone: apply just the byte order, not settings_apply(), which
+     * would also push whatever half-typed hex is in the fields. */
+    if (order_changed) {
+        apctl_set_big_endian(effective_big_endian() ? 1 : 0);
+        g_saved.byte_order = g_settings.byte_order;
+        settings_store();
+    }
     if (changed) g_settings.status.clear();
 
     ImGui::Separator();
     ImGui::BeginDisabled(!ok);
     if (ImGui::Button("Save")) {
         settings_apply();
+        g_saved = g_settings;
         g_settings.status = settings_store()
             ? (cid_len == 32 ? "Saved. PS3 saves will be re-bound to this console."
                              : "Saved. Saves keep whatever console they are bound to.")
@@ -2266,10 +2362,12 @@ static void draw_settings_window() {
     ImGui::EndDisabled();
 
     ImGui::SameLine();
-    if (ImGui::Button("Clear both")) {
+    if (ImGui::Button("Clear all")) {
         g_settings.fuse_hex[0] = g_settings.console_hex[0] = '\0';
         g_settings.user_id = 1;
+        g_settings.byte_order = BYTE_ORDER_AUTO;
         settings_apply();
+        g_saved = g_settings;
         settings_store();
         g_settings.status = "Cleared. Saves keep whatever console they are bound to.";
     }
@@ -2285,6 +2383,47 @@ static void draw_settings_window() {
     }
 
     ImGui::End();
+}
+
+/*
+ * What byte order the engine will run with, and why.
+ *
+ * A line rather than a control: the choice lives in Settings now, and what is
+ * worth having next to Apply is the ANSWER. The amber case is the one this
+ * exists for -- a mode forced in Settings that contradicts the patch in front
+ * of you writes byte-reversed values and produces a save that looks patched, so
+ * it has to be visible from where the patching happens rather than two menus
+ * away.
+ */
+static void draw_byte_order() {
+    const bool be     = effective_big_endian();
+    const bool forced = g_settings.byte_order != BYTE_ORDER_AUTO;
+    const char* order = be ? "big-endian" : "little-endian";
+
+    ImGui::TextDisabled("Byte order:");
+    ImGui::SameLine();
+
+    if (!g_app.session) {
+        ImGui::TextDisabled(forced ? "%s, forced in Settings"
+                                   : "%s until a patch says otherwise", order);
+    } else if (forced && be != g_app.be_detected) {
+        ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f),
+                           "%s, forced in Settings - but this is a %s patch",
+                           order,
+                           g_app.be_platform.empty()
+                               ? (g_app.be_detected ? "big-endian" : "little-endian")
+                               : g_app.be_platform.c_str());
+    } else if (forced) {
+        ImGui::Text("%s, forced in Settings", order);
+    } else {
+        ImGui::Text("%s%s", order,
+                    g_app.be_detected ? " (PS3 title)" : " (not a PS3 title)");
+    }
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Read/write save data as big-endian (PS3) or little-endian\n"
+                          "(PS4, PS Vita, PSP, PC). Same as the patcher CLI's\n"
+                          "-b/--big-endian flag. Change it in File > Settings.");
 }
 
 static void draw_main_window(bool* want_quit) {
@@ -2364,14 +2503,7 @@ static void draw_main_window(bool* want_quit) {
 
     ImGui::Checkbox("Back up target (.bak) before patching", &g_app.backup);
 
-    // Data byte order — equivalent of the CLI's -b/--big-endian flag. Applied
-    // to the engine right before patching (see apply_selected).
-    if (ImGui::Checkbox("Big-endian mode", &g_app.big_endian))
-        apctl_set_big_endian(g_app.big_endian ? 1 : 0);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Read/write save data as big-endian (PS3, Xbox 360, Wii, ...).\n"
-                          "Leave off for little-endian saves (PS4, PS Vita, PC).\n"
-                          "Same as the patcher CLI's -b/--big-endian flag.");
+    draw_byte_order();
 
     ImGui::Spacing();
     if (g_app.session)
