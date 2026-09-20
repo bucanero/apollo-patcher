@@ -148,6 +148,131 @@ including the Windows-1252 fallback that 245 of the patch files need. Without it
 the app would have to inflate 2247 entries at startup just to read their second
 line.
 
+## Browsing saves
+
+**Browse saves...** (Ctrl+B, or File ▸ Browse saves...) is the way in. Point it
+at wherever the saves are — a memory stick, a folder pulled off a PS3's hard
+drive, a USB stick of PS4 exports — and it finds every save underneath and
+lists them by game. Pick one and the target, the game key, the byte order and
+the codes all follow. The alternative, *Find a game*, starts from the patch
+database instead, which is what you want when the save is not on this machine
+yet.
+
+Finding them is the same question on all four consoles and has the same answer:
+**a save is a folder with a `PARAM.SFO` in it**. Where that SFO sits is itself
+the first half of the identification:
+
+| Found at | Console | Encrypted by the console |
+|----------|---------|--------------------------|
+| `<save>/PARAM.SFO`, with `SAVEDATA_PARAMS` | PSP | yes, per-title game key |
+| `<save>/PARAM.SFO`, without | PS3 | yes, `PARAM.PFD` |
+| `<save>/sce_sys/param.sfo`, with `TITLE_ID` | PS4 | no |
+| `<save>/sce_sys/param.sfo`, without | Vita | no |
+
+The second half — which game — is where the four consoles stop agreeing, and is
+the reason `core/saveinfo.c` exists rather than the app reading three keys and
+guessing:
+
+- **PSP and PS3** name no title ID at all. It is the first nine characters of
+  `SAVEDATA_DIRECTORY` (`ULUS10391DATA00`, `BLUS30917-AUTOSAVE`), and the name
+  is `TITLE`.
+- **PS4** says `TITLE_ID` outright, and `MAINTITLE` is the game's real name —
+  the only one of the four that stores it plainly.
+- **Vita** says neither. `TITLE` is usually empty and there is no `TITLE_ID`
+  key; the title ID is nine bytes at `0x28` inside the binary `PARAMS` blob,
+  with `PARENT_DIRECTORY` (`/PCSE00608`) as the fallback. So a Vita save is
+  **nameless** until the patch database is asked about its title ID, which is
+  where the name in the list comes from.
+
+A title ID is believed only when it is exactly nine characters of upper-case
+letters and digits. A folder somebody renamed still gets listed under its own
+name — it just offers no codes, which is the right answer, because the wrong
+game's codes would be worse than none.
+
+This is also what makes PS4 and Vita saves work at all: their folder is named
+after the *slot* (`SLOT0`, `JOJOASB.S`), so the folder-name lookup described
+above finds nothing. The browser passes the title ID it read from the SFO
+along with the file, and that is what the database is asked about.
+
+### What the walk does and does not do
+
+- **Depth 8, 40 000 folders.** A PS3's savedata sits five levels down
+  (`dev_hdd0/home/00000001/savedata/<save>`), so eight is generous for anything
+  pointed at a card or a drive. Both limits are *reported* when they are hit —
+  "3 folders sit deeper than the scan goes" — because a save missing from the
+  list with nothing said about it looks exactly like "you have no saves", and
+  that is the one failure nobody can debug.
+- **A folder that is a save is not descended into.** Nothing below a save is a
+  save, and a PS4 save's `sce_sys` would otherwise be examined in its own right.
+- **Symlinked folders are skipped.** A link pointing back up its own tree would
+  otherwise be walked until the depth cap stopped it, listing the same saves
+  several times over.
+- **A game's own `PARAM.SFO` is not a save.** Discs and homebrew EBOOTs carry
+  one and they are all over a memory card; requiring `SAVEDATA_DIRECTORY` is
+  what keeps them out of the list.
+- **It runs on its own thread.** A memory stick scans in well under a second,
+  but nothing stops somebody choosing their home directory, and a window that
+  freezes for a minute looks broken rather than busy. There is a Stop button,
+  and quitting mid-scan cancels rather than waiting for the disk.
+
+The folder is remembered in the settings file and re-scanned in the background
+at startup, so the list is there the next time rather than asking again.
+
+The browser is two panes, and a modal cannot be wider than the window around
+it — ImGui clips it rather than growing the window — so the app's own window
+decides how much room the file list gets. It opens at 1180x820 for that
+reason, clamped to the monitor's work area so the default cannot land partly
+off a smaller screen, and both modals shrink with the window rather than
+losing an edge.
+
+### Which file inside the save
+
+A save is a folder, and a patch addresses one file in it. The right one is
+starred, and for the two encrypted consoles it is not a guess: the console's
+own metadata says which files it wrapped — `SAVEDATA_FILE_LIST` in a PSP's
+`PARAM.SFO`, the entry table in a PS3's `PARAM.PFD` — and that is the same list
+that answers "which file comes out as garbage if you patch it as-is". PS4 and
+Vita saves have no such list, so the largest file stands in; their saves are one
+big file plus, occasionally, a small index beside it.
+
+Everything else in the folder is listed too, with its size, so an unusual save
+can still be opened by hand. The console's own metadata and artwork —
+`PARAM.SFO`, `PARAM.PFD`, `ICON0.PNG`, `ICON1.PAM`, `PIC1.PNG`, `SND0.AT3`,
+`sce_sys/` — is left out: none of it is ever the target, and on a PS3 the
+artwork is *inside* the encrypted list, so leaving it in would have
+Assassin's Creed suggesting its animated icon.
+
+The last word belongs to the patch. A `.savepatch` carries target-file lines
+(`:OPTIONS.DAT`), and once the game's codes are loaded they are asked: if the
+patch names exactly one file, that file is in this save, and it is not the one
+that was opened, the target moves to it and the log says so. Only when the
+suggestion was taken — a file picked by hand is left alone — and only when the
+answer is unambiguous, since plenty of patches address two files and have no
+opinion about which to start with.
+
+Across 176 real PS3 saves, 119 of which have codes: 101 suggestions already
+matched the patch's own target line, 3 were corrected by it, and 15 were left
+alone because the patch named several files or named one this save does not
+have.
+
+### Checking a folder from a terminal
+
+`--scan` runs the same walk with no window, which is how the browser's
+behaviour is tested — and is useful on its own for "what does this card
+actually hold":
+
+```bash
+apollo_patcher_gui --scan /Volumes/PSP
+```
+
+Add a save's number to have it opened as well, which reports the target, the
+patch, the code count, the byte order and the state of the encryption layer —
+everything the main window would be showing had you clicked it:
+
+```bash
+apollo_patcher_gui --scan /Volumes/PSP 2
+```
+
 ## PSP and PS3 saves
 
 A PSP or PS3 save is encrypted twice. The console wraps it with a key of its
@@ -250,6 +375,11 @@ effect and is saved the moment it is picked.
 Re-binding is the `PARAM.PFD` half of moving a save between consoles. A save
 also carries account fields in its own `PARAM.SFO`, and those are not touched.
 
+The saves folder is in that file too, though nothing in this dialog sets it:
+choosing one in the save browser writes it there straight away. It is the one
+setting somebody changes by *using* the app, and having to re-find a memory
+stick every launch is the thing the browser exists to stop.
+
 Settings live in the user's config directory —
 `~/Library/Application Support/apollo-patcher/settings.txt` on macOS,
 `$XDG_CONFIG_HOME/apollo-patcher/` on Linux, `%APPDATA%\apollo-patcher\` on
@@ -263,11 +393,14 @@ deliberately off.
 apollo_patcher_gui [FILE...]
 ```
 
-A `.savepatch` is opened as the patch; anything else is opened as the save to
-patch, which pulls in everything that follows from it — the PSP game key, and
-that game's patch from the database. Arguments are taken in the order given, so
+Files on the command line are the other way in, alongside **Browse saves...**
+above. A `.savepatch` is opened as the patch; anything else is opened as the
+save to patch, which pulls in everything that follows from it — the PSP game
+key, and that game's patch from the database. Arguments are taken in the order given, so
 an explicit patch beats the one a save's title ID would have auto-loaded,
-whichever way round they are written. `--help` prints this and exits.
+whichever way round they are written. `--help` prints this and exits, and
+`--scan DIR [N]` lists the saves under a folder without opening a window (see
+[Browsing saves](#browsing-saves)).
 
 **A folder works too**, which is the obvious thing to drag for either console's
 save: its `PARAM.SFO` or `PARAM.PFD` already says which files the console
@@ -369,6 +502,10 @@ a Windows/Linux file association, and the drop handler covers the window.
   naming the console a save is written for. See
   [PSP and PS3 saves](#psp-and-ps3-saves)
   above.
+- **Browse saves**: point the app at a folder and it finds every PSP, PS3, PS4
+  and Vita save under it, lists them by game, and opens the one you pick —
+  target, key, byte order and codes together. See
+  [Browsing saves](#browsing-saves).
 - **The patch finds itself**: choosing a target looks its title ID up in the
   bundled database and loads that game's patch, or offers it when one is
   already open.

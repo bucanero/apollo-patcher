@@ -66,7 +66,9 @@ VERIFIED    = ../tools/verified.json
 # SHA1, which this module already links for libapollo's own decrypters, so they
 # ride in the same wasm rather than separate ones: ~12KB gzipped against a
 # second module's duplicated crypto, second heap and second instantiate.
-SRCS        = src/apollo_wasm.c ../core/apollo_ctrl.c \
+# ../core/sfo.c is the PARAM.SFO container, which the PSP path now shares with
+# every other console rather than carrying its own copy of.
+SRCS        = src/apollo_wasm.c ../core/apollo_ctrl.c ../core/sfo.c \
 			  ../core/psp/kirk_engine.c ../core/psp/psp_savedata.c \
 			  ../core/ps3/pfd_savedata.c
 STATIC      = $(wildcard public/*)

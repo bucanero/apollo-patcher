@@ -43,6 +43,7 @@
 
 #include "kirk_engine.h"
 #include "psp_savedata.h"
+#include "sfo.h"       /* the PARAM.SFO container, shared with every other console */
 
 /* Same sink the rest of the engine logs through -- apollo_ctrl.c defines
  * dbglogger_log() and routes it to the front-end's log panel. */
@@ -684,10 +685,12 @@ static void UpdateSavedataHashes(uint8_t* savedataParams, uint8_t* data, int siz
  * Every one of those offsets comes out of the file, so every one is checked
  * against the buffer's real length before it is followed. A PARAM.SFO reaches
  * this from a browser tab, not only from your own Memory Stick.
+ *
+ * That container is core/sfo.c's now -- every console since the PSP writes it
+ * identically, and one parser for all of them is one place to get the bounds
+ * right. What stays here is what is PSP-specific: SAVEDATA_PARAMS and
+ * SAVEDATA_FILE_LIST, and the writing back that encryption does to both.
  * ------------------------------------------------------------------------ */
-
-#define SFO_MAGIC    0x46535000u
-#define SFO_VERSION  0x00000101u
 
 /* Not in the public enum: "the file parses, that key is simply not in it".
  * Callers map it to whichever of APSP_ERR_NO_PARAM / _NO_FILE they mean. */
@@ -704,17 +707,6 @@ static void UpdateSavedataHashes(uint8_t* savedataParams, uint8_t* data, int siz
 #define FLIST_ENTRY_LEN 0x20
 #define FLIST_HASH_OFF  0x0D
 
-static uint32_t le32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
-         | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static uint16_t le16(const uint8_t *p)
-{
-    return (uint16_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8));
-}
-
 /* A located value. An OFFSET rather than a pointer, so the same lookup serves
  * the read-only calls and the two that write back into the SFO without a
  * const-cast anywhere. */
@@ -724,56 +716,15 @@ typedef struct {
     uint32_t max;   /* reserved bytes */
 } sfo_val_t;
 
+/* The container is parsed in core/sfo.c, which every console's SFO shares --
+ * this only restates the answer in this file's error codes. */
 static int sfo_find(const uint8_t *sfo, size_t sfo_len, const char *name, sfo_val_t *out)
 {
-    uint32_t keys, data, count, i;
+    int rc = asfo_find(sfo, sfo_len, name, &out->off, &out->len, &out->max, NULL);
 
-    if (!sfo || sfo_len < 0x14)
-        return APSP_ERR_SFO;
-    if (le32(sfo) != SFO_MAGIC || le32(sfo + 4) != SFO_VERSION)
-        return APSP_ERR_SFO;
-
-    keys  = le32(sfo + 0x08);
-    data  = le32(sfo + 0x0C);
-    count = le32(sfo + 0x10);
-
-    if (keys > sfo_len || data > sfo_len)
-        return APSP_ERR_SFO;
-    /* Written as a division so a huge count cannot overflow the multiply. */
-    if (count > (sfo_len - 0x14) / 0x10)
-        return APSP_ERR_SFO;
-
-    for (i = 0; i < count; i++) {
-        const uint8_t *e = sfo + 0x14 + 0x10 * (size_t)i;
-        uint32_t key_off  = le16(e);
-        uint32_t val_len  = le32(e + 0x04);
-        uint32_t val_max  = le32(e + 0x08);
-        uint32_t val_off  = le32(e + 0x0C);
-        const char *k;
-        size_t room;
-
-        if ((size_t)keys + key_off >= sfo_len)
-            continue;
-        /* The name has to actually terminate inside the key table, or strcmp
-         * would run off the end of the buffer. */
-        k    = (const char *)sfo + keys + key_off;
-        room = sfo_len - (keys + key_off);
-        if (!memchr(k, '\0', room) || strcmp(k, name) != 0)
-            continue;
-
-        /* Both subtractions are safe: data <= sfo_len was checked above, and
-         * the first test leaves data + val_off <= sfo_len. */
-        if (val_len > val_max)
-            return APSP_ERR_SFO;
-        if (val_off > sfo_len - data || val_max > sfo_len - data - val_off)
-            return APSP_ERR_SFO;
-
-        out->off = (size_t)data + val_off;
-        out->len = val_len;
-        out->max = val_max;
-        return APSP_OK;
-    }
-    return SFO_NOT_FOUND;
+    if (rc == ASFO_ERR_MISSING)
+        return SFO_NOT_FOUND;
+    return rc == ASFO_OK ? APSP_OK : APSP_ERR_SFO;
 }
 
 /* SAVEDATA_PARAMS, which both directions need and which has to be long enough

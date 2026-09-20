@@ -16,6 +16,12 @@
 #include <cstring>   // strlen/strstr over the engine's C strings
 #include <fstream>
 #include <mutex>
+#include <atomic>        // the save scan runs off the UI thread
+#include <thread>
+#include <algorithm>     // sorting the save list
+#include <unordered_map> // title ID -> patch, for the save browser
+#include <filesystem>    // walking a folder of saves
+#include <chrono>        // --scan waits for the walk to finish
 #include <sys/stat.h>   // telling a save FOLDER from a save file (see open_path)
 #ifdef _WIN32
 #include <direct.h>     // _mkdir, for the settings directory
@@ -40,6 +46,7 @@
 #include "patchdb.h"       // bundled apollo-patches.zip (browsable database)
 #include "psp_savedata.h"  // the PSP's own savedata encryption, below any patch
 #include "pfd_savedata.h"  // ...and the PS3's, which works the same way
+#include "saveinfo.h"     // which console wrote a PARAM.SFO, and for which game
 #include "kirk_engine.h"   // KIRK_HOST_FUSE_ID, the Fuse ID default
 
 #ifdef _WIN32
@@ -107,6 +114,10 @@ struct AppState {
     // detect_patch_for_target().
     int                 match_index = -1;
     std::string         match_label;      // "PSP/ULUS10391.savepatch"
+    // A title ID the save browser read out of the save's own PARAM.SFO, for
+    // the saves whose folder name does not carry one (every PS4 and Vita
+    // save). Empty for a target that arrived any other way.
+    std::string         title_hint;
 
     // ---- the PSP's own savedata encryption -------------------------------
     //
@@ -197,6 +208,11 @@ struct PatchDb {
     std::vector<std::string> platforms;        // "All", then those present
     std::vector<std::string> haystack;         // lowercased "name titleid"
     std::vector<int>         hits;             // indices into the database
+    // Lowercased title ID -> the one patch that carries it. No title ID in the
+    // database appears on two platforms, so one index per ID is exact rather
+    // than a first-wins approximation. Read from the save-scanning thread,
+    // which is why it is built once at start-up and never touched again.
+    std::unordered_map<std::string, int> by_title_id;
     char                     search[128] = "";
     int                      platform = 0;     // index into platforms
     bool                     refilter = true;
@@ -445,6 +461,21 @@ static void draw_about() {
 
 // Window titles get the file name; the full path goes in the body, where it
 // can wrap and be read.
+// A file size for a list: three significant figures and a unit, because the
+// point of the column is telling the 4 MB save from the 3 KB index beside it,
+// not counting bytes.
+static std::string human_size(unsigned long long bytes) {
+    static const char* const unit[] = { "B", "KB", "MB", "GB" };
+    double v = double(bytes);
+    int    u = 0;
+    while (v >= 1024.0 && u < 3) { v /= 1024.0; u++; }
+
+    char buf[64];
+    snprintf(buf, sizeof buf, u == 0 ? "%.0f %s" : (v < 10.0 ? "%.1f %s" : "%.0f %s"),
+             v, unit[u]);
+    return buf;
+}
+
 static const char* base_name(const std::string& path) {
     size_t slash = path.find_last_of("/\\");
     return path.c_str() + (slash == std::string::npos ? 0 : slash + 1);
@@ -545,6 +576,11 @@ struct Settings {
     char console_hex[33] = "";     // 32 hex digits, or empty for "leave alone"
     int  user_id         = 1;
     int  byte_order      = BYTE_ORDER_AUTO;
+    // Where the saves are. Not a property of a console like the two above,
+    // but the same kind of thing: something the person tells the app once and
+    // should not have to tell it again. Set by choosing a folder in the save
+    // browser, never typed.
+    std::string saves_root;
     std::string status;            // what the last save or load had to say
 };
 /*
@@ -633,6 +669,7 @@ static void settings_load() {
         if (key == "psp_fuse_id")    snprintf(g_settings.fuse_hex, sizeof g_settings.fuse_hex, "%s", val.c_str());
         else if (key == "ps3_console_id") snprintf(g_settings.console_hex, sizeof g_settings.console_hex, "%s", val.c_str());
         else if (key == "ps3_user_id")    g_settings.user_id = atoi(val.c_str());
+        else if (key == "saves_root")     g_settings.saves_root = val;
         else if (key == "byte_order")
             /* Named rather than numbered, so the file stays readable and an
              * unrecognised value falls back to the safe one. */
@@ -663,6 +700,7 @@ static bool settings_store() {
         << "psp_fuse_id=" << g_saved.fuse_hex << "\n"
         << "ps3_console_id=" << g_saved.console_hex << "\n"
         << "ps3_user_id=" << g_saved.user_id << "\n"
+        << "saves_root=" << g_saved.saves_root << "\n"
         << "byte_order=" << (g_saved.byte_order == BYTE_ORDER_BIG    ? "big"
                            : g_saved.byte_order == BYTE_ORDER_LITTLE ? "little"
                                                                      : "auto") << "\n";
@@ -1170,6 +1208,7 @@ static void init_patchdb() {
     for (int i = 0; i < n; ++i) {
         const patchdb_entry_t* e = patchdb_at(g_db.db, i);
         g_db.haystack.push_back(lowered(std::string(e->name) + " " + e->title_id));
+        g_db.by_title_id.emplace(lowered(e->title_id), i);
         // Platforms in database order, deduplicated — no fixed list to keep in
         // sync when the database gains one.
         bool seen = false;
@@ -1230,14 +1269,19 @@ static void refilter_db() {
 // is one: it is what the console recorded, and survives someone renaming the
 // directory on the way off the Memory Stick.
 //
+// The folder is not always enough, though. A PS4 or Vita save is in a folder
+// named after its SLOT ("SLOT0", "JOJOASB.S"), with the title ID only inside
+// sce_sys/param.sfo — so the save browser, which has already read that, passes
+// it in as g_app.title_hint and this believes it over anything on disk.
+//
 static int detect_patch_for_target() {
     g_app.match_index = -1;
     g_app.match_label.clear();
     if (!g_db.db || g_app.target_path.empty()) return -1;
 
-    std::string from = g_app.psp.found && !g_app.psp.directory.empty()
-                     ? g_app.psp.directory
-                     : std::string();
+    std::string from = g_app.title_hint;
+    if (from.empty() && g_app.psp.found && !g_app.psp.directory.empty())
+        from = g_app.psp.directory;
     if (from.empty()) {
         // The containing folder's own name. dir_of() keeps its trailing
         // separator, so drop that before taking the last component.
@@ -1248,18 +1292,18 @@ static int detect_patch_for_target() {
     }
     if (from.size() < 9) return -1;
 
-    const std::string id = lowered(from.substr(0, 9));
-    for (int i = 0; i < patchdb_count(g_db.db); i++) {
-        const patchdb_entry_t* e = patchdb_at(g_db.db, i);
-        if (!e || lowered(e->title_id) != id) continue;
-        // A title ID belongs to one platform in practice (the letters say
-        // which), but if the PSP detection already spoke, believe it.
-        if (g_app.psp.found && strcmp(e->platform, "PSP") != 0) continue;
-        g_app.match_index = i;
-        g_app.match_label = std::string(e->platform) + "/" + e->title_id + ".savepatch";
-        return i;
-    }
-    return -1;
+    auto it = g_db.by_title_id.find(lowered(from.substr(0, 9)));
+    if (it == g_db.by_title_id.end()) return -1;
+
+    const patchdb_entry_t* e = patchdb_at(g_db.db, it->second);
+    if (!e) return -1;
+    // A title ID belongs to one platform (the letters say which), but if the
+    // PSP detection already spoke, believe it over the database.
+    if (g_app.psp.found && strcmp(e->platform, "PSP") != 0) return -1;
+
+    g_app.match_index = it->second;
+    g_app.match_label = std::string(e->platform) + "/" + e->title_id + ".savepatch";
+    return g_app.match_index;
 }
 
 // Defined below, next to the database browser it belongs to.
@@ -1270,8 +1314,9 @@ static void load_patch_from_db(int index);
 // it. Shared by the "Choose target..." dialog, the command line and files
 // dropped on the window, so all three behave identically.
 //
-static void adopt_target(const std::string& path) {
+static void adopt_target(const std::string& path, const std::string& title_hint = "") {
     g_app.target_path = path;
+    g_app.title_hint  = title_hint;
 
     // Look around the new target for the metadata that lists it, so a save the
     // console encrypted announces itself instead of having to be declared. Only
@@ -1352,6 +1397,440 @@ static void open_path(const std::string& path) {
         load_patch(path);
     else
         adopt_target(path);
+}
+
+
+// ---- the save browser ------------------------------------------------------
+//
+// Point the app at wherever the saves are -- a memory stick, a folder pulled
+// off a PS3's hard drive, a USB stick full of PS4 exports -- and it finds the
+// saves in it and lists them. That is how the console apps work, and it is the
+// difference between "choose target file..." (which means knowing that
+// MHP2NDG.BIN inside ULUS10391DATA00 is the one) and picking a game by name.
+//
+// Finding them is the same question on all four consoles and has the same
+// answer: a save is a FOLDER WITH A PARAM.SFO IN IT. Where that SFO sits is
+// itself the first half of the identification --
+//
+//   <save>/PARAM.SFO           PSP or PS3, and the save is encrypted
+//   <save>/sce_sys/param.sfo   PS4 or Vita, and it is not
+//
+// -- and core/saveinfo.c does the second half (which console, which game).
+// Nothing here parses an SFO; this walks directories and nothing else, so the
+// part that reads attacker-controlled offsets stays in one tested place.
+//
+// The walk runs on its own thread. A memory stick scans in well under a
+// second, but nothing stops somebody choosing their home directory, and a UI
+// that freezes for a minute looks broken rather than busy.
+//
+namespace fs = std::filesystem;
+
+struct SaveEntry {
+    std::string path;        // the save folder, no trailing separator
+    std::string dir_name;    // its last component, which is what is on disk
+    std::string name;        // what the console calls the game
+    std::string detail;      // ...and the slot: "AUTOSAVE", "Slot 1"
+    std::string title_id;
+    const char* platform = "?";
+    bool        encrypted = false;   // a console layer sits under the patch
+    int         patch_index = -1;    // into the database, or -1 for no codes
+    std::string patch_name;          // the database's name for the game
+
+    std::vector<std::string> files;  // relative to path, metadata excluded
+    int         suggest = -1;        // the one to open, or -1 for no data file
+    bool        suggest_listed = false;  // ...and whether the console named it
+    std::string haystack;            // lowercased, for the filter box
+};
+
+// Files a save carries that are never the target: the metadata itself, and
+// the icons and jingle the console shows in its own save list.
+static bool is_metadata(const std::string& name) {
+    static const char* const skip[] = {
+        "PARAM.SFO", "PARAM.PFD", "ICON0.PNG", "ICON1.PNG",
+        "ICON1.PMF", "ICON0.PAM", "ICON1.PAM", "PIC0.PNG", "PIC1.PNG",
+        "PIC1.PAM", "SND0.AT3", "KEYSTONE", "SCE_SYS",
+    };
+    const std::string up = [&] {
+        std::string u = name;
+        for (char& c : u) c = char(toupper((unsigned char)c));
+        return u;
+    }();
+    for (const char* s : skip)
+        if (up == s) return true;
+    return false;
+}
+
+struct SaveBrowser {
+    std::string              root;          // what was scanned
+    std::vector<SaveEntry>   saves;
+    std::vector<int>         hits;          // indices into saves, filtered
+    char                     search[128] = "";
+    int                      platform = 0;  // 0 = all, else index into names
+    bool                     only_coded = false;
+    bool                     refilter = true;
+    bool                     want_open = false;
+    int                      selected = -1; // index into saves
+    int                      pick = -1;     // index into saves[selected].files
+    std::string              note;          // what the last scan had to say
+
+    // The scan, which runs on its own thread. `done` is what the UI polls;
+    // seeing it set is the point at which the thread is joined and its result
+    // taken, so nothing is shared while both are running.
+    std::thread              worker;
+    std::atomic<bool>        running{false};
+    std::atomic<bool>        done{false};
+    std::atomic<bool>        cancel{false};
+    std::atomic<int>         seen{0};       // directories looked at so far
+    std::atomic<int>         too_deep{0};   // ...and ones the depth cap cut off
+    std::vector<SaveEntry>   out;           // the thread's result
+    std::string              out_note;
+};
+static SaveBrowser g_sb;
+
+// How deep to go looking, and how much to look at. A PS3's savedata sits five
+// levels down (dev_hdd0/home/00000001/savedata/<save>), so eight is generous;
+// the directory cap is only there so that pointing this at a whole disk stops
+// rather than running for minutes.
+static const int  SCAN_MAX_DEPTH = 8;
+static const int  SCAN_MAX_DIRS  = 40000;
+
+static bool read_meta(const fs::path& p, std::vector<unsigned char>& out) {
+    std::error_code ec;
+    if (!fs::is_regular_file(p, ec)) return false;
+    return read_all(p.string(), out);
+}
+
+// Every regular file in the save that could be the one a patch addresses.
+// Recursive because a PS4 save can have subfolders, shallow because none of
+// them nests deeply, and sce_sys is skipped outright -- it is the console's
+// own metadata, never save data.
+static void collect_files(const fs::path& root, const fs::path& dir,
+                          int depth, std::vector<std::string>& out) {
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(dir, ec)) {
+        if (out.size() >= 256) return;
+        const std::string leaf = e.path().filename().string();
+        if (leaf.empty() || leaf[0] == '.') continue;
+
+        if (e.is_directory(ec)) {
+            if (depth > 0 && !is_metadata(leaf))
+                collect_files(root, e.path(), depth - 1, out);
+            continue;
+        }
+        if (!e.is_regular_file(ec) || is_metadata(leaf)) continue;
+
+        const std::string rel = fs::relative(e.path(), root, ec).generic_string();
+        // An empty result would make the save FOLDER the target, which nothing
+        // can read; the plain file name is right for everything but the
+        // subfolder case, and is the better thing to lose.
+        out.push_back(ec || rel.empty() ? leaf : rel);
+    }
+}
+
+// Which of those files the console itself says is the save -- PARAM.SFO's
+// SAVEDATA_FILE_LIST on a PSP, PARAM.PFD's entry table on a PS3. Both list
+// exactly the files that are encrypted, so this is also the answer to "which
+// one will come out as garbage if you patch it as-is".
+//
+// PS4 and Vita saves have no such list, and the largest file stands in: their
+// saves are one big file plus, occasionally, a small index beside it.
+static int suggest_file(SaveEntry& save, const std::vector<unsigned char>& sfo,
+                        const std::vector<unsigned char>& pfd) {
+    char name[APFD_NAME_LEN];
+
+    save.suggest_listed = false;
+
+    if (strcmp(save.platform, "PSP") == 0 && !sfo.empty()) {
+        const int n = apsp_sfo_file_count(sfo.data(), sfo.size());
+        for (int i = 0; i < n; i++) {
+            if (apsp_sfo_file_name(sfo.data(), sfo.size(), i, name, sizeof name) != APSP_OK)
+                continue;
+            for (size_t f = 0; f < save.files.size(); f++)
+                if (save.files[f] == name) { save.suggest_listed = true; return int(f); }
+        }
+    } else if (!pfd.empty() && apfd_valid(pfd.data(), pfd.size()) == APFD_OK) {
+        const int n = apfd_entry_count(pfd.data(), pfd.size());
+        for (int i = 0; i < n; i++) {
+            if (apfd_entry_name(pfd.data(), pfd.size(), i, name, sizeof name) != APFD_OK)
+                continue;
+            if (apfd_entry_has_builtin_key(name)) continue;   // PARAM.SFO, trophies
+            for (size_t f = 0; f < save.files.size(); f++)
+                if (save.files[f] == name) { save.suggest_listed = true; return int(f); }
+        }
+    }
+
+    // No list, or a list naming nothing that is actually there.
+    std::error_code ec;
+    int    best = save.files.empty() ? -1 : 0;
+    uintmax_t biggest = 0;
+    for (size_t f = 0; f < save.files.size(); f++) {
+        const uintmax_t n = fs::file_size(fs::path(save.path) / save.files[f], ec);
+        if (!ec && n > biggest) { biggest = n; best = int(f); }
+    }
+    return best;
+}
+
+// Is this folder a save, and if so what is in it? Returns false for every
+// other folder on the card, which is most of them.
+static bool examine(const fs::path& dir, SaveEntry& out) {
+    std::vector<unsigned char> sfo, pfd;
+    asave_info_t info;
+    asave_where_t where;
+
+    if (read_meta(dir / "PARAM.SFO", sfo)) {
+        where = ASAVE_AT_ROOT;
+    } else if (read_meta(dir / "sce_sys" / "param.sfo", sfo)) {
+        where = ASAVE_AT_SCE;
+    } else {
+        return false;
+    }
+
+    read_meta(dir / "PARAM.PFD", pfd);
+    if (asave_identify(sfo.data(), sfo.size(), where, pfd.empty() ? 0 : 1, &info) != ASAVE_OK)
+        return false;
+
+    out.path      = dir.string();
+    out.dir_name  = dir.filename().string();
+    out.name      = info.name;
+    out.detail    = info.detail;
+    out.title_id  = info.title_id;
+    out.platform  = asave_platform_name(info.platform);
+    out.encrypted = info.encrypted != 0;
+
+    collect_files(dir, dir, 2, out.files);
+    std::sort(out.files.begin(), out.files.end());
+    out.suggest = suggest_file(out, sfo, pfd);
+    return true;
+}
+
+// The walk itself. A folder that IS a save is not descended into: a PS4
+// save's sce_sys would otherwise be examined as a candidate of its own, and
+// nothing below a save is a save.
+static void scan_walk(const fs::path& dir, int depth, std::vector<SaveEntry>& out) {
+    std::error_code ec;
+
+    if (g_sb.cancel.load() || g_sb.seen.load() >= SCAN_MAX_DIRS) return;
+    g_sb.seen.fetch_add(1);
+
+    SaveEntry here;
+    if (examine(dir, here)) {
+        out.push_back(std::move(here));
+        return;
+    }
+    if (depth <= 0) {
+        // Counted, because a save below this point would otherwise be missing
+        // from the list with nothing said about it -- which looks exactly like
+        // "you have no saves" and is the one failure somebody cannot debug.
+        std::error_code dc;
+        for (const auto& e : fs::directory_iterator(dir, dc))
+            if (e.is_directory(dc)) { g_sb.too_deep.fetch_add(1); break; }
+        return;
+    }
+
+    for (const auto& e : fs::directory_iterator(
+             dir, fs::directory_options::skip_permission_denied, ec)) {
+        if (g_sb.cancel.load()) return;
+        // Symlinks are not followed: a link pointing back up its own tree
+        // would walk forever, and the depth cap only bounds how long.
+        if (!e.is_directory(ec) || e.is_symlink(ec)) continue;
+        const std::string leaf = e.path().filename().string();
+        if (leaf.empty() || leaf[0] == '.') continue;
+        scan_walk(e.path(), depth - 1, out);
+    }
+}
+
+// Everything that needs the patch database, done on the UI thread after the
+// walk: the database is read-only but the entries it hands back are the
+// caller's to hold, and keeping it on one thread costs nothing here.
+static void resolve_patches(std::vector<SaveEntry>& saves) {
+    for (SaveEntry& s : saves) {
+        if (!s.title_id.empty() && g_db.db) {
+            auto it = g_db.by_title_id.find(lowered(s.title_id));
+            if (it != g_db.by_title_id.end()) {
+                const patchdb_entry_t* e = patchdb_at(g_db.db, it->second);
+                // The database's platform has to agree with the save's own.
+                // It always does -- a title ID belongs to one console -- and
+                // when it does not, something has been misidentified and
+                // loading that game's codes would be worse than offering none.
+                if (e && strcmp(e->platform, s.platform) == 0) {
+                    s.patch_index = it->second;
+                    s.patch_name  = e->name;
+                }
+            }
+        }
+        // A Vita save has no name of its own (see saveinfo.h), so the
+        // database is where its name comes from when there is a patch.
+        if (s.name.empty()) s.name = s.patch_name;
+        s.haystack = lowered(s.name + " " + s.patch_name + " " + s.title_id
+                             + " " + s.dir_name + " " + s.detail);
+    }
+
+    std::sort(saves.begin(), saves.end(), [](const SaveEntry& a, const SaveEntry& b) {
+        const int p = strcmp(a.platform, b.platform);
+        if (p != 0) return p < 0;
+        if (a.name != b.name) return lowered(a.name) < lowered(b.name);
+        return a.dir_name < b.dir_name;
+    });
+}
+
+static void scan_join() {
+    if (g_sb.worker.joinable()) g_sb.worker.join();
+    g_sb.running = false;
+    g_sb.done    = false;
+}
+
+static void scan_start(const std::string& root) {
+    // Cancel BEFORE joining: choosing a second folder while the first is still
+    // being walked would otherwise freeze the window until that walk finished
+    // on its own, which is exactly what running it on a thread was for.
+    g_sb.cancel = true;
+    scan_join();
+
+    g_sb.root   = root;
+    g_sb.cancel   = false;
+    g_sb.seen     = 0;
+    g_sb.too_deep = 0;
+    g_sb.out.clear();
+    g_sb.out_note.clear();
+    g_sb.saves.clear();
+    g_sb.hits.clear();
+    g_sb.selected = -1;
+    g_sb.pick     = -1;
+    g_sb.note     = "Scanning...";
+    g_sb.running  = true;
+    g_sb.done     = false;
+
+    g_sb.worker = std::thread([root] {
+        try {
+            scan_walk(fs::path(root), SCAN_MAX_DEPTH, g_sb.out);
+        } catch (const std::exception& e) {
+            // A filesystem this cannot walk at all -- a disconnected volume,
+            // a path the OS refuses. Reported rather than thrown away, and
+            // whatever was found before it stays in the list.
+            g_sb.out_note = std::string("The scan stopped early: ") + e.what();
+        }
+        g_sb.done = true;
+    });
+}
+
+// Take the thread's result. Called once per frame from the UI, and does
+// nothing until the walk has finished.
+static void scan_collect() {
+    if (!g_sb.running.load() || !g_sb.done.load()) return;
+
+    scan_join();
+    g_sb.saves = std::move(g_sb.out);
+    g_sb.out.clear();
+    resolve_patches(g_sb.saves);
+    g_sb.refilter = true;
+    g_sb.selected = g_sb.saves.empty() ? -1 : 0;
+    g_sb.pick     = -1;
+
+    char buf[512];
+    int coded = 0;
+    for (const SaveEntry& s : g_sb.saves) if (s.patch_index >= 0) coded++;
+    snprintf(buf, sizeof buf, "%d save%s found in %d folder%s; %d ha%s codes.",
+             int(g_sb.saves.size()), g_sb.saves.size() == 1 ? "" : "s",
+             g_sb.seen.load(), g_sb.seen.load() == 1 ? "" : "s",
+             coded, coded == 1 ? "s" : "ve");
+    g_sb.note = buf;
+    if (!g_sb.out_note.empty()) g_sb.note += "  " + g_sb.out_note;
+    const int deep = g_sb.too_deep.load();
+    if (deep > 0) {
+        snprintf(buf, sizeof buf,
+                 "  %d folder%s sit%s deeper than the scan goes (%d levels) - "
+                 "choose a folder closer to the saves.",
+                 deep, deep == 1 ? "" : "s", deep == 1 ? "s" : "", SCAN_MAX_DEPTH);
+        g_sb.note += buf;
+    }
+    if (g_sb.seen.load() >= SCAN_MAX_DIRS)
+        g_sb.note += "  Stopped after " + std::to_string(SCAN_MAX_DIRS)
+                   + " folders - choose a folder closer to the saves.";
+    if (g_sb.cancel.load()) g_sb.note += "  Stopped early.";
+    g_app.append_log(("Save scan: " + g_sb.note).c_str());
+}
+
+static void refilter_saves() {
+    g_sb.hits.clear();
+    const std::string needle = lowered(g_sb.search);
+    const char* platform = (g_sb.platform > 0
+                            && size_t(g_sb.platform) < g_db.platforms.size())
+                         ? g_db.platforms[size_t(g_sb.platform)].c_str() : nullptr;
+
+    for (size_t i = 0; i < g_sb.saves.size(); ++i) {
+        const SaveEntry& s = g_sb.saves[i];
+        if (platform && strcmp(s.platform, platform) != 0) continue;
+        if (g_sb.only_coded && s.patch_index < 0) continue;
+        if (!needle.empty() && s.haystack.find(needle) == std::string::npos) continue;
+        g_sb.hits.push_back(int(i));
+    }
+    g_sb.refilter = false;
+}
+
+//
+// Open one file out of one save: make it the target, and load the game's
+// codes if the database has them.
+//
+// The title ID goes along with it, because for PS4 and Vita the folder does
+// not carry one -- see detect_patch_for_target().
+//
+//
+// Does the patch now open name this file? A `.savepatch` carries target-file
+// lines (":OPTIONS.DAT"), and they are the last word on which file it
+// addresses -- more authoritative than anything guessed from the save.
+//
+// Returns the name it does want, or "" when it names the file already open, or
+// names nothing, or names several. Only a single unambiguous answer is worth
+// acting on.
+//
+static std::string patch_wants_other_file(const SaveEntry& save, const std::string& open_now) {
+    if (!g_app.session) return "";
+
+    std::vector<std::string> named;
+    const int n = apctl_code_count(g_app.session);
+    for (int i = 0; i < n; i++) {
+        const apctl_code_t* c = apctl_code_at(g_app.session, i);
+        if (!c || !c->file || !c->file[0]) continue;
+        const std::string f = lowered(c->file);
+        if (f == lowered(open_now)) return "";   // it means this one
+        if (std::find(named.begin(), named.end(), f) == named.end()) named.push_back(f);
+    }
+    if (named.size() != 1) return "";
+
+    // ...and it has to actually be in the save. A patch naming a file that is
+    // not here says the save is a different slot, not that it is the wrong
+    // file, and re-pointing at something absent would only break what works.
+    for (const std::string& f : save.files)
+        if (lowered(f) == named[0]) return f;
+    return "";
+}
+
+static void open_save_file(const SaveEntry& save, int file_index) {
+    if (file_index < 0 || file_index >= int(save.files.size())) return;
+
+    const std::string name = save.files[size_t(file_index)];
+    adopt_target((fs::path(save.path) / name).string(), save.title_id);
+
+    // adopt_target loads the matching patch only when nothing is open, so that
+    // choosing a target never discards somebody's edited codes behind their
+    // back. Here the GAME is what was chosen, out of a list of games, so a
+    // patch already open is the stale one and swapping it is the whole point.
+    if (g_app.match_index >= 0 && g_app.patch_path != g_app.match_label)
+        load_patch_from_db(g_app.match_index);
+
+    // Now that the patch is open it can be asked. This matters where the
+    // console's own list and the patch disagree: Assassin's Creed encrypts
+    // ICON1.PAM as well as its save, so PARAM.PFD's first entry is the
+    // ANIMATED ICON, while the patch says ":OPTIONS.DAT". Only ever taken
+    // when the file opened was the suggestion rather than one picked by hand.
+    if (file_index != save.suggest) return;
+
+    const std::string want = patch_wants_other_file(save, name);
+    if (want.empty() || want == name) return;
+
+    g_app.append_log(("The patch targets " + want + " - opening that instead of "
+                      + name).c_str());
+    adopt_target((fs::path(save.path) / want).string(), save.title_id);
 }
 
 static void load_patch_from_db(int index) {
@@ -1528,6 +2007,7 @@ static bool g_pending_open   = false;
 static bool g_pending_target = false;
 static bool g_pending_save_patch = false;
 static bool g_pending_psp_key = false;
+static bool g_pending_saves_root = false;
 static void do_open_patch()    { g_pending_open = true; }
 static void do_choose_target() { g_pending_target = true; }
 static void do_save_patch()    { g_pending_save_patch = true; }
@@ -1612,6 +2092,22 @@ static void process_pending_dialogs() {
                 g_app.append_log((std::string("[!] PSP key file: ") + apsp_strerror(rc)
                                   + " (expected SGKeyDumper's 16 bytes or SGDeemer's 1536)").c_str());
             }
+        }
+    }
+    if (g_pending_saves_root) {
+        g_pending_saves_root = false;
+        // A FOLDER, not a file: what is being chosen is where to look, and
+        // the saves underneath it may be five levels down.
+        std::string p = pfd::select_folder("Where your saves are",
+                                           g_saved.saves_root).result();
+        if (!p.empty()) {
+            // Remembered straight away rather than on some later Save: this
+            // is the one setting somebody changes by USING the app, and
+            // having to re-find a memory stick every launch is the thing the
+            // browser exists to stop.
+            g_settings.saves_root = g_saved.saves_root = p;
+            settings_store();
+            scan_start(p);
         }
     }
     if (g_pending_save_patch) {
@@ -1956,6 +2452,31 @@ static void draw_code_viewers() {
 
 // The database browser. 2200+ rows, so the list is clipped rather than emitted
 // in full every frame.
+//
+// Ask for a modal this big, and take whatever fits.
+//
+// A popup is clipped to the application window rather than growing it, so a
+// size in fixed pixels loses its right-hand edge the moment somebody's window
+// is narrower -- which the save browser was, at 920 wide against a default
+// window of 860. The constraint is re-applied every frame rather than only on
+// open, so dragging the window smaller shrinks the modal with it instead of
+// cutting it off.
+//
+static void size_modal(float want_w, float want_h) {
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    // A margin, so the modal reads as a window on top of the app rather than
+    // as the app's own contents.
+    const float room_w = vp->WorkSize.x - 40.0f;
+    const float room_h = vp->WorkSize.y - 40.0f;
+    const ImVec2 want(std::min(want_w, room_w), std::min(want_h, room_h));
+
+    ImGui::SetNextWindowSizeConstraints(ImVec2(320.0f, 240.0f), ImVec2(room_w, room_h));
+    ImGui::SetNextWindowSize(want, ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+                                   vp->WorkPos.y + vp->WorkSize.y * 0.5f),
+                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+}
+
 static void render_db_browser() {
     if (g_db.want_open) {
         g_db.want_open = false;
@@ -1963,7 +2484,7 @@ static void render_db_browser() {
         ImGui::OpenPopup("Patch database");
     }
 
-    ImGui::SetNextWindowSize(ImVec2(620, 520), ImGuiCond_Appearing);
+    size_modal(620, 520);
     if (!ImGui::BeginPopupModal("Patch database", nullptr,
                                 ImGuiWindowFlags_NoSavedSettings))
         return;
@@ -2052,9 +2573,253 @@ static void render_db_browser() {
     ImGui::EndPopup();
 }
 
+//
+// The save browser's window: the list on the left, the chosen save on the
+// right. Two panes rather than two steps, because the question "which of
+// these files is the save" only makes sense next to the answer to "which save
+// is this", and a second modal on top of the first would hide it.
+//
+static void render_save_browser() {
+    if (g_sb.want_open) {
+        g_sb.want_open = false;
+        g_sb.refilter = true;
+        ImGui::OpenPopup("Saves");
+    }
+
+    size_modal(920, 600);
+    if (!ImGui::BeginPopupModal("Saves", nullptr, ImGuiWindowFlags_NoSavedSettings))
+        return;
+
+    // --- the folder row ---
+    if (ImGui::Button("Choose folder...")) g_pending_saves_root = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Pick the folder your saves are in - a memory stick, a\n"
+                          "PS3's savedata folder, a USB stick of PS4 exports. Every\n"
+                          "save underneath it is found, whatever the layout.");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(g_sb.root.empty() || g_sb.running.load());
+    if (ImGui::Button("Rescan")) scan_start(g_sb.root);
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", g_sb.root.empty() ? "(no folder chosen)" : g_sb.root.c_str());
+
+    if (g_sb.running.load()) {
+        ImGui::Text("Scanning... %d folders", g_sb.seen.load());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Stop")) g_sb.cancel = true;
+    } else if (!g_sb.note.empty()) {
+        ImGui::TextDisabled("%s", g_sb.note.c_str());
+    } else {
+        ImGui::TextDisabled("Nothing scanned yet.");
+    }
+
+    ImGui::Separator();
+
+    // --- filters ---
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::InputTextWithHint("##savesearch", "Game, title ID or folder...",
+                                 g_sb.search, sizeof g_sb.search))
+        g_sb.refilter = true;
+
+    // Six consoles and a checkbox on the line below the search box, wrapped
+    // rather than laid out with SameLine alone: the modal is only as wide as
+    // the application window (see size_modal), so on a narrow one the tail of
+    // a fixed row would simply be off the edge with no way to reach it.
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float right = ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x;
+    auto same_line_if_it_fits = [&](const char* next) {
+        const float w = ImGui::CalcTextSize(next).x + ImGui::GetFrameHeight()
+                      + st.ItemInnerSpacing.x;
+        if (ImGui::GetItemRectMax().x + st.ItemSpacing.x + w < right)
+            ImGui::SameLine();
+    };
+
+    for (size_t p = 0; p < g_db.platforms.size(); ++p) {
+        if (p) same_line_if_it_fits(g_db.platforms[p].c_str());
+        if (ImGui::RadioButton(g_db.platforms[p].c_str(), g_sb.platform == int(p))) {
+            g_sb.platform = int(p);
+            g_sb.refilter = true;
+        }
+    }
+    if (!g_db.platforms.empty()) same_line_if_it_fits("Only saves with codes");
+    if (ImGui::Checkbox("Only saves with codes", &g_sb.only_coded))
+        g_sb.refilter = true;
+
+    if (g_sb.refilter) refilter_saves();
+
+    // --- the two panes ---
+    const float footer = ImGui::GetFrameHeightWithSpacing() + st.ItemSpacing.y;
+    // 55% to the list, except that the pane beside it has a file list and two
+    // paragraphs in it and stops being readable below about 300px. On a
+    // window wide enough the first rule wins; on a narrow one the second
+    // does, down to a floor that keeps the list itself usable.
+    const float avail  = ImGui::GetContentRegionAvail().x;
+    const float detail = 300.0f * g_ui_scale;
+    const float list_w = std::max(avail * 0.38f, std::min(avail * 0.55f, avail - detail));
+    int         open_now = -1;   // index into the selected save's files
+
+    if (ImGui::BeginTable("##saverows", 4,
+                          ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg,
+                          ImVec2(list_w, -footer))) {
+        ImGui::TableSetupColumn("Game", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Console", ImGuiTableColumnFlags_WidthFixed,
+                                ImGui::CalcTextSize("Console ").x);
+        ImGui::TableSetupColumn("Title ID", ImGuiTableColumnFlags_WidthFixed,
+                                ImGui::CalcTextSize("NPUB31842 ").x);
+        ImGui::TableSetupColumn("Codes", ImGuiTableColumnFlags_WidthFixed,
+                                ImGui::CalcTextSize("Codes ").x);
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+
+        ImGuiListClipper clipper;
+        clipper.Begin(int(g_sb.hits.size()));
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                const int index = g_sb.hits[size_t(row)];
+                const SaveEntry& s = g_sb.saves[size_t(index)];
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::PushID(index);
+                // The slot, when the save has one, is what tells two saves of
+                // the same game apart -- which is the whole reason the list
+                // has more than one row per game.
+                const std::string label =
+                    (s.name.empty() ? s.dir_name : s.name)
+                    + (s.detail.empty() ? std::string() : "  -  " + s.detail);
+                if (ImGui::Selectable(label.c_str(), g_sb.selected == index,
+                                      ImGuiSelectableFlags_SpanAllColumns |
+                                      ImGuiSelectableFlags_AllowDoubleClick)) {
+                    if (g_sb.selected != index) g_sb.pick = -1;
+                    g_sb.selected = index;
+                    if (ImGui::IsMouseDoubleClicked(0))
+                        open_now = g_sb.pick >= 0 ? g_sb.pick : s.suggest;
+                }
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextDisabled("%s", s.platform);
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextDisabled("%s", s.title_id.empty() ? "-" : s.title_id.c_str());
+                ImGui::TableSetColumnIndex(3);
+                if (s.patch_index >= 0)
+                    ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.60f, 1.0f), "yes");
+                else
+                    ImGui::TextDisabled("-");
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::SameLine();
+
+    if (ImGui::BeginChild("##savedetail", ImVec2(0, -footer), true)) {
+        if (g_sb.selected < 0 || g_sb.selected >= int(g_sb.saves.size())) {
+            ImGui::TextWrapped(
+                g_sb.saves.empty()
+                    ? "Choose a folder above. Anything underneath it that is a save - a "
+                      "folder with a PARAM.SFO in it, or with sce_sys/param.sfo for PS4 "
+                      "and Vita - turns up in this list."
+                    : "Pick a save on the left.");
+        } else {
+            const SaveEntry& s = g_sb.saves[size_t(g_sb.selected)];
+
+            ImGui::TextColored(ImVec4(0.80f, 0.80f, 0.95f, 1.0f), "%s",
+                               s.name.empty() ? s.dir_name.c_str() : s.name.c_str());
+            if (!s.detail.empty()) ImGui::TextDisabled("%s", s.detail.c_str());
+            ImGui::Spacing();
+            ImGui::Text("%s   %s", s.platform, s.title_id.empty() ? "(no title ID)"
+                                                                  : s.title_id.c_str());
+            ImGui::TextDisabled("%s", s.dir_name.c_str());
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", s.path.c_str());
+
+            ImGui::Spacing();
+            if (s.patch_index >= 0) {
+                ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.60f, 1.0f),
+                                   "Codes available: %s", s.patch_name.c_str());
+            } else {
+                ImGui::TextDisabled("No codes in the database for this game.");
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("The save still opens - the hex editor works on it,\n"
+                                      "and a .savepatch from anywhere else can be loaded\n"
+                                      "by hand. Only the bundled database has nothing.");
+            }
+            if (s.encrypted)
+                ImGui::TextDisabled("The %s encrypts this save; it is unwrapped on the "
+                                    "way in and re-wrapped on the way out.", s.platform);
+
+            ImGui::Spacing();
+            ImGui::SeparatorText("Files in this save");
+
+            if (s.files.empty()) {
+                ImGui::TextWrapped("This save holds nothing but its own metadata - "
+                                   "no data file to patch.");
+            } else {
+                const int shown = g_sb.pick >= 0 ? g_sb.pick : s.suggest;
+                const float avail = ImGui::GetContentRegionAvail().y
+                                  - ImGui::GetFrameHeightWithSpacing() * 2.0f;
+                if (ImGui::BeginChild("##files", ImVec2(0, avail > 60.0f ? avail : 60.0f))) {
+                    std::error_code ec;
+                    for (size_t f = 0; f < s.files.size(); f++) {
+                        const uintmax_t n =
+                            fs::file_size(fs::path(s.path) / s.files[f], ec);
+                        char row[512];
+                        snprintf(row, sizeof row, "%s##f%zu", s.files[f].c_str(), f);
+                        if (ImGui::Selectable(row, shown == int(f),
+                                              ImGuiSelectableFlags_AllowDoubleClick)) {
+                            g_sb.pick = int(f);
+                            if (ImGui::IsMouseDoubleClicked(0)) open_now = int(f);
+                        }
+                        ImGui::SameLine(ImGui::GetContentRegionMax().x - 90.0f * g_ui_scale);
+                        ImGui::TextDisabled("%s", ec ? "?" : human_size(n).c_str());
+                        if (int(f) == s.suggest && shown != int(f)) {
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("*");
+                        }
+                    }
+                }
+                ImGui::EndChild();
+
+                // Which of the two answers this actually is. A save whose
+                // game encrypts nothing has a PARAM.PFD listing only
+                // PARAM.SFO, so "the console says so" would be a claim the
+                // console never made.
+                ImGui::TextDisabled(
+                    s.suggest_listed
+                        ? "* the file the console's own metadata says is the save"
+                        : "* the largest file - nothing here names one");
+
+                ImGui::BeginDisabled(shown < 0);
+                if (ImGui::Button("Open this save", ImVec2(160, 0))) open_now = shown;
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Make this file the target%s.",
+                                      s.patch_index >= 0
+                                          ? " and load this game's codes" : "");
+            }
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::Text("%d save%s", int(g_sb.hits.size()), g_sb.hits.size() == 1 ? "" : "s");
+    ImGui::SameLine();
+    ImGui::TextDisabled("of %d", int(g_sb.saves.size()));
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - 110.0f);
+    if (ImGui::Button("Close", ImVec2(110, 0))) ImGui::CloseCurrentPopup();
+
+    if (open_now >= 0 && g_sb.selected >= 0) {
+        open_save_file(g_sb.saves[size_t(g_sb.selected)], open_now);
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+}
+
 static void draw_menu_bar(bool* want_quit) {
     if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("Browse saves...", "Ctrl+B")) g_sb.want_open = true;
             if (ImGui::MenuItem("Find a game...", "Ctrl+F")) g_db.want_open = true;
             if (ImGui::MenuItem("Open .savepatch...", "Ctrl+O")) do_open_patch();
             if (ImGui::MenuItem("Save .savepatch as...", "Ctrl+S",
@@ -2437,6 +3202,17 @@ static void draw_main_window(bool* want_quit) {
     draw_menu_bar(want_quit);
 
     // --- file rows ---
+    //
+    // Two ways in, and the first is the one to reach for: start from YOUR
+    // SAVES and the app works out the game, the codes and the encryption.
+    // "Find a game" starts from the patch database instead, which is what you
+    // want when the save is not on this machine yet, or to read the codes.
+    if (ImGui::Button("Browse saves...")) g_sb.want_open = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Point at a folder of saves - a memory stick, a PS3's\n"
+                          "savedata folder, PS4 or Vita exports - and pick one by\n"
+                          "name. PSP and PS3 saves are unwrapped for you.");
+    ImGui::SameLine();
     if (ImGui::Button("Find a game...")) g_db.want_open = true;
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Search the bundled patch database (%d patches).",
@@ -2560,6 +3336,8 @@ static void draw_main_window(bool* want_quit) {
         ImGui::EndPopup();
     }
 
+    scan_collect();
+    render_save_browser();
     render_db_browser();
     draw_about();
 
@@ -2632,13 +3410,141 @@ static void print_usage(const char* argv0) {
         "Apollo Save Patcher\n"
         "\n"
         "  %s [FILE...]\n"
+        "  %s --scan DIR [N]\n"
         "\n"
         "A .savepatch is opened as the patch; anything else is opened as the\n"
         "save to patch, which also looks up its game key and its patch in the\n"
         "bundled database. Files can be dropped on the window instead.\n"
         "\n"
+        "--scan prints the saves under DIR and exits, without opening a window:\n"
+        "the same walk \"Browse saves...\" does, for checking what a folder holds\n"
+        "from a terminal or a script. Add a save's number to have it opened as\n"
+        "well, which reports the target, the patch and the encryption layer --\n"
+        "everything the main window would be showing had you clicked it.\n"
+        "\n"
         "  $APOLLO_PATCHES_ZIP   where to find apollo-patches.zip\n",
+        argv0 && *argv0 ? argv0 : "apollo_patcher_gui",
         argv0 && *argv0 ? argv0 : "apollo_patcher_gui");
+}
+
+//
+// The save scan on its own, with no window. This is the browser's whole brain
+// -- the same scan_start/scan_collect pair the modal drives -- so what it
+// prints is exactly what the list would show, which is the only way to check
+// the walk without a person looking at it.
+//
+// A column-width string for --scan's table. Truncating at a byte boundary
+// would cut a multi-byte character in half and emit invalid UTF-8 -- these are
+// real game names, and plenty of them carry a (TM) or are Japanese outright.
+static std::string clip(const std::string& in, size_t width) {
+    size_t n = in.size();
+
+    if (n > width) {
+        n = width;
+        while (n > 0 && (unsigned char)in[n] >= 0x80 && (unsigned char)in[n] < 0xC0)
+            n--;   // back off onto the start of the character that got cut
+    }
+    std::string out = in.substr(0, n);
+    // Padded here rather than by printf, whose width counts bytes and so would
+    // undo the point of the above.
+    size_t cols = 0;
+    for (char c : out)
+        if (((unsigned char)c & 0xC0) != 0x80) cols++;
+    out.append(width > cols ? width - cols : 0, ' ');
+    return out;
+}
+
+static int run_scan(const char* root, int pick) {
+    if (!is_dir(root)) {
+        fprintf(stderr, "%s is not a folder\n", root);
+        return 2;
+    }
+
+    scan_start(root);
+    while (g_sb.running.load() && !g_sb.done.load())
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    scan_collect();
+
+    for (size_t i = 0; i < g_sb.saves.size(); i++) {
+        const SaveEntry& s = g_sb.saves[i];
+        printf("%3zu  %-3s  %-9s  %s  %s  %s\n",
+               i, s.platform,
+               s.title_id.empty() ? "-" : s.title_id.c_str(),
+               clip(s.name.empty() ? "(unnamed)" : s.name, 34).c_str(),
+               clip(s.detail.empty() ? "-" : s.detail, 16).c_str(),
+               s.dir_name.c_str());
+        for (size_t f = 0; f < s.files.size(); f++)
+            printf("          %s%s\n", int(f) == s.suggest ? "* " : "  ", s.files[f].c_str());
+        printf("          %s\n", s.patch_index >= 0
+                                     ? ("codes: " + s.patch_name).c_str()
+                                     : "no codes");
+    }
+    printf("\n%s\n", g_sb.note.c_str());
+
+    if (pick < 0)
+        return g_sb.saves.empty() ? 1 : 0;
+
+    // ...and what happens when one of them is chosen: the same call the
+    // browser's "Open this save" makes, and then everything that followed
+    // from it. What this prints is what the main window would be showing.
+    if (pick >= int(g_sb.saves.size())) {
+        fprintf(stderr, "no save %d in that folder\n", pick);
+        return 2;
+    }
+    const SaveEntry& s = g_sb.saves[size_t(pick)];
+    open_save_file(s, s.suggest);
+
+    printf("\nopening save %d\n", pick);
+    printf("  target      %s\n", g_app.target_path.c_str());
+    printf("  title hint  %s\n", g_app.title_hint.empty() ? "(none)"
+                                                           : g_app.title_hint.c_str());
+    printf("  patch       %s\n", g_app.patch_path.empty() ? "(none)"
+                                                           : g_app.patch_path.c_str());
+    printf("  codes       %d\n", g_app.session ? apctl_code_count(g_app.session) : 0);
+    printf("  byte order  %s\n", effective_big_endian() ? "big-endian" : "little-endian");
+    if (g_app.psp.found)
+        printf("  PSP layer   %s, key %s (%s)\n", g_app.psp.listed.c_str(),
+               g_app.psp.have_key ? "found" : "MISSING", g_app.psp.key_note.c_str());
+    if (g_app.ps3.found)
+        printf("  PS3 layer   %s, key %s (%s)\n", g_app.ps3.listed.c_str(),
+               g_app.ps3.have_key ? "found" : "MISSING", g_app.ps3.key_note.c_str());
+    if (!g_app.psp.found && !g_app.ps3.found)
+        printf("  no console encryption layer\n");
+
+    return g_app.session ? 0 : 1;
+}
+
+//
+// The window's starting size.
+//
+// Wider than it used to be because the save browser is the way into the app
+// now, and a modal cannot be wider than the window around it (see
+// size_modal) -- so the window's width is what decides whether the file list
+// beside the save list is readable. At 860 the browser lost its right-hand
+// edge outright.
+//
+// Clamped to the monitor, because a default that does not fit is worse than a
+// small one: a window taller than the screen hides its own buttons behind the
+// taskbar, and there is no reason to assume a 1080p desktop. glfwGetMonitor-
+// Workarea already excludes the taskbar and the macOS menu bar.
+//
+static void default_window_size(int* w, int* h) {
+    *w = 1180;
+    *h = 820;
+
+    GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+    if (!monitor) return;   // a headless or unusual setup; take the numbers above
+
+    int mx = 0, my = 0, mw = 0, mh = 0;
+    glfwGetMonitorWorkarea(monitor, &mx, &my, &mw, &mh);
+    if (mw > 0 && *w > mw - 80) *w = mw - 80;
+    if (mh > 0 && *h > mh - 80) *h = mh - 80;
+
+    // ...but not so small that the app is unusable on a tiny display. Below
+    // this the window is scrollable rather than cropped, which is the better
+    // failure.
+    if (*w < 720) *w = 720;
+    if (*h < 540) *h = 540;
 }
 
 int main(int argc, char** argv) {
@@ -2660,6 +3566,10 @@ int main(int argc, char** argv) {
         // It is not a file and predates modern launch services; skip it rather
         // than report it as an unreadable save.
         if (strncmp(argv[i], "-psn_", 5) == 0) continue;
+        if (strcmp(argv[i], "--scan") == 0) {
+            if (i + 1 >= argc) { print_usage(argv[0]); return 2; }
+            return run_scan(argv[i + 1], i + 2 < argc ? atoi(argv[i + 2]) : -1);
+        }
         open_path(argv[i]);
     }
 
@@ -2673,9 +3583,12 @@ int main(int argc, char** argv) {
 
     glfwSetErrorCallback(glfw_error_cb);
     if (!glfwInit()) { fatal("Failed to initialize GLFW.\n\n" + g_glfw_error); return 1; }
+    int win_w = 0, win_h = 0;
+    default_window_size(&win_w, &win_h);   // needs glfwInit, for the monitor
+
     // No context hints: GLFW's default legacy/compatibility context is what the
     // fixed-function opengl2 backend needs, on every platform.
-    GLFWwindow* window = glfwCreateWindow(860, 820, "Apollo Save Patcher", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(win_w, win_h, "Apollo Save Patcher", nullptr, nullptr);
     if (!window) {
         fatal("Could not create an OpenGL context.\n\n"
               "This machine's graphics driver may not support OpenGL — this is "
@@ -2709,6 +3622,12 @@ int main(int argc, char** argv) {
     // has to be written for the same console as one patched in the tenth.
     settings_load();
 
+    // The folder from last time, scanned in the background while the window
+    // comes up. Costs nothing when there is none, and means "Browse saves..."
+    // shows a list rather than an empty pane on every launch.
+    if (!g_saved.saves_root.empty() && is_dir(g_saved.saves_root))
+        scan_start(g_saved.saves_root);
+
     bool want_quit = false;
     while (!glfwWindowShouldClose(window) && !want_quit) {
         glfwPollEvents();
@@ -2720,6 +3639,7 @@ int main(int argc, char** argv) {
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_O, false)) do_open_patch();
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_S, false) &&
             g_app.session) do_save_patch();
+        if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_B, false)) g_sb.want_open = true;
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_F, false)) g_db.want_open = true;
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_Q, false)) want_quit = true;
 
@@ -2738,6 +3658,12 @@ int main(int argc, char** argv) {
         // Open any requested native dialog now — outside the ImGui frame.
         process_pending_dialogs();
     }
+
+    // Stop the save scan before anything it touches goes away. cancel makes
+    // the walk return at its next directory rather than at the end of the
+    // disk, so quitting mid-scan closes the window now and not in a minute.
+    g_sb.cancel = true;
+    scan_join();
 
     g_app.close();
     ImGui_ImplOpenGL2_Shutdown();

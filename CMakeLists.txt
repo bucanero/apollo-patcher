@@ -64,6 +64,11 @@ set(MBEDTLS_DIR "${APOLLO_ROOT}/mbedtls-2.16.12")
 # build does not use it — the page fetches patches over the network instead —
 # but it costs nothing to carry in the shared library.
 #
+# core/sfo.c parses a PARAM.SFO, which every console since the PSP writes in
+# the same container, and core/saveinfo.c says which console wrote a given one
+# and what game it belongs to. That is what lets a front-end be pointed at a
+# folder of saves and produce a list instead of asking for one file at a time.
+#
 # core/psp/ and core/ps3/ are the consoles' own savedata encryption — the layer
 # BELOW anything a .savepatch does, and the reason a save taken straight off a
 # Memory Stick or a PS3 hard drive comes out of the patch engine as garbage.
@@ -91,7 +96,8 @@ set(PS3_SRCS
     core/ps3/pfd_savedata.c)
 
 add_library(apollo_engine STATIC ${ENGINE_SRCS} ${PSP_SRCS} ${PS3_SRCS}
-                                 core/apollo_ctrl.c core/patchdb.c)
+                                 core/apollo_ctrl.c core/patchdb.c
+                                 core/sfo.c core/saveinfo.c)
 target_include_directories(apollo_engine PUBLIC
     ${APOLLO_ROOT}/include
     ${APOLLO_ROOT}/tools          # provides dbglogger.h prototype
@@ -225,6 +231,14 @@ target_link_libraries(apollo_psp_test PRIVATE apollo_engine)
 # self-consistent.
 add_executable(apollo_ps3_test core/test_ps3.c)
 target_link_libraries(apollo_ps3_test PRIVATE apollo_engine)
+
+# The PARAM.SFO reader and the save identification over it. Bounds checks on a
+# parser every front-end now shares (the PSP encryption path included), and
+# per-console cases built from the key sets real saves carry -- a save listed
+# under the wrong game would be patched with that game's codes.
+# `--scan DIR` walks a tree of real saves the way the desktop browser does.
+add_executable(apollo_save_test core/test_save.c)
+target_link_libraries(apollo_save_test PRIVATE apollo_engine)
 
 # ---------------------------------------------------------------------------
 # Front-ends.

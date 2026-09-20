@@ -8,7 +8,7 @@ drive the same `libapollo` engine the console apps use.
 
 | Front-end | What it is |
 |-----------|------------|
-| [`gui/`](gui/README.md) | Native desktop app (Dear ImGui + GLFW) for Windows, macOS and Linux — with the patch database bundled offline |
+| [`gui/`](gui/README.md) | Native desktop app (Dear ImGui + GLFW) for Windows, macOS and Linux — **point it at a folder of saves and pick a game by name**, with the patch database bundled offline |
 | [`web/`](web/README.md) | The engine compiled to WebAssembly, running in a browser tab — the patcher, with the patch database searchable in-page and **PSP and PS3 savedata panels** for the consoles' own encryption, plus a **tools page** offering one decrypt / re-encrypt pair per game |
 
 The command-line tools (`patcher`, `dumper`) and the engine itself live in
@@ -117,6 +117,11 @@ versions.
 core/     apollo_ctrl.[ch] — stdio-free engine facade, shared by both front-ends
                              (incl. the PS3 big-endian guess both apply)
           patchdb.[ch]     — reads the bundled patch database (apollo-patches.zip)
+          sfo.[ch]         — the PARAM.SFO container, which every console since
+                             the PSP writes identically; one parser for all
+          saveinfo.[ch]    — ...and which console wrote a given one, for which
+                             game. What lets the desktop app be pointed at a
+                             folder of saves and produce a list
           psp/             — the PSP's own savedata encryption, the layer below
                              any patch; vendored from apollo-psp, see above
           ps3/             — the PS3's, the same layer one console up; derived
@@ -124,6 +129,8 @@ core/     apollo_ctrl.[ch] — stdio-free engine facade, shared by both front-en
           test_psp.c       — the PSP's known-answer vectors, from that upstream
           test_ps3.c       — the PS3's, cross-checked against pfdtool, plus a
                              --corpus mode for a folder of real saves
+          test_save.c      — bounds on the SFO parser every front-end shares,
+                             and the per-console identification over it
 gui/      Dear ImGui desktop app
 web/      WebAssembly build + static site
 tools/    build-index.py   — patch index, for both front-ends; also the
@@ -224,7 +231,8 @@ cmake --build build -j
 Targets:
 - `apollo_patcher_gui` — the desktop app (macOS: `build/gui/apollo_patcher_gui.app`).
   Takes files on the command line, or dropped on its window: a `.savepatch`, a
-  save, or a PSP or PS3 save folder
+  save, or a PSP or PS3 save folder. `--scan DIR` lists the saves under a
+  folder without opening a window
 - `apollo_patches_bundle` — `apollo-patches.zip`, the database the app browses
   and the console key databases it needs. Built automatically when an
   `apollo-patches` checkout is present (see below) and copied into the app;
@@ -235,6 +243,9 @@ Targets:
 - `apollo_ps3_test` — the PS3 savedata checks, cross-checked against pfdtool.
   Needs no sample save either; `--corpus DIR PS3/games.conf` walks a folder of
   real ones and checks every hash a console wrote against one recomputed here
+- `apollo_save_test` — the `PARAM.SFO` parser every front-end shares, and the
+  identification over it: which console wrote a save and for which game.
+  `--sfo root|sce FILE` reports on a real one, `--scan DIR` on a whole folder
 - `-DAPOLLO_BUILD_GUI=OFF` builds only the engine + headless tests (no GL needed)
 
 ### Web
