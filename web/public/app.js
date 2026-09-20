@@ -6,8 +6,10 @@
  */
 
 import { CDN } from './cdn.js';
-import { loadSettings, updateSettings, effectiveBigEndian,
+import { initSettings, loadSettings, updateSettings, effectiveBigEndian,
          byteOrderForced, BYTE_ORDERS } from './settings.js';
+import { initPsp } from './psp.js';
+import { initPs3, ps3SettingsChanged } from './ps3.js';
 
 const TYPE = { 1: 'Save Wizard', 2: 'BSD', 3: 'Python' };
 
@@ -986,6 +988,19 @@ $('db-search').addEventListener('keydown', (e) => {
         e.preventDefault();
         $('db-results').querySelector('.db-row')?.click();
     }
+});
+
+/*
+ * The consoles' own savedata encryption, and the settings that steer it.
+ *
+ * Both panels share this page's worker -- it is the same wasm module, with
+ * core/psp and core/ps3 compiled in, so there is nothing else to start.
+ */
+initPsp(call);
+initPs3(call);
+initSettings(call, (res) => {
+    ps3SettingsChanged(res);
+    renderByteOrder();
 });
 
 /* Show the stored byte order before anything is loaded, so the select is never

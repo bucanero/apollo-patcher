@@ -396,6 +396,22 @@
  * Memory Stick the grid cannot help until the console's own layer is off.
  * Styled as a notice rather than a card, so it does not read as one more game.
  */
+/* The two console panels' banners, grouped. They carry their own 22px bottom
+ * margin, so this only has to separate the pair from what follows. */
+.console-tools { margin: 26px 0 0; }
+
+/* The tools page's pointer at them: a note, not a banner, because the page is
+ * no longer where the work happens. */
+.tools-note {
+    margin: 0 0 22px;
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--ink-dim);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+}
+
 .psp-banner {
     display: flex;
     flex-wrap: wrap;
@@ -470,7 +486,6 @@
     font-size: 12px;
     color: var(--ink-dim);
 }
-.good-text { color: var(--good); }
 
 .psp-key { margin-top: 12px; }
 .psp-key-head {
@@ -557,3 +572,15 @@
     gap: 1rem;
     margin-top: 1.25rem;
 }
+
+/* ---- text colour utilities ---------------------------------------------
+ *
+ * Last in the file on purpose. Both are applied ON TOP of a component class --
+ * .good-text on a .psp-key-state, .bad-text on a .psp-key-why -- and every one
+ * of those sets its own colour at the same specificity, so source order is the
+ * only thing that decides. Defined earlier, as they were, the component wins
+ * and the state never shows: the PSP panel's "found in the Apollo database"
+ * was grey rather than green for exactly that reason.
+ */
+.good-text { color: var(--good); }
+.bad-text  { color: var(--bad); }

@@ -475,6 +475,11 @@ let pickInto;
 export function initPsp(worker) {
     call = worker;
 
+    /* The panel's markup is on the patcher page only. The tools page still
+     * calls this, because the per-game dialogs there drive the SAME console
+     * layer through the shared functions above and those need `call`. */
+    if (!$('psp-open')) return;
+
     $('psp-open').addEventListener('click', () => {
         setStatus('');
         $('psp-log-wrap').hidden = true;

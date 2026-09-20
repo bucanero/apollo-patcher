@@ -1208,20 +1208,44 @@ $('drop').addEventListener('drop', (ev) => loadFiles(ev.dataTransfer?.files));
 
 $('tool').addEventListener('close', () => { active = null; slots = []; stage = null; });
 
-/* The console savedata panels share this page's worker -- it is the same wasm
- * module, with core/psp and core/ps3 compiled in, so there is nothing else to
- * start. */
-initPsp(call);
-initPs3(call);
+/*
+ * The console layers, for the stage inside the per-game dialogs.
+ *
+ * The standalone panels live on the patcher page -- neither is per-game, and
+ * both want the save folder's metadata alongside the file. These calls set the
+ * worker envelope the shared functions in psp.js and ps3.js need; each returns
+ * early here, having found none of its own markup.
+ */
+/*
+ * Guarded, and boot() runs either way. None of this is what the page is FOR --
+ * the grid is -- and a throw here used to take the grid with it, silently: the
+ * page rendered its header and then nothing, with no clue in it. That is
+ * reachable whenever the markup and the modules disagree, which a browser
+ * holding one of them from cache is enough to arrange.
+ */
+try {
+    initPsp(call);
+    initPs3(call);
 
-/* Which console saves are written FOR. Applied to the worker before anything
- * can use it, and again on every change -- the values live in the wasm module,
- * which is the worker's alone. */
-initSettings(call, (res) => {
-    ps3SettingsChanged(res);
-    /* The byte order can be changed while a tool dialog is open behind the
-     * Settings one, and it decides what Apply will do. */
-    if ($('tool').open) renderByteOrder();
-});
+    /*
+     * The settings themselves are edited on the patcher page too, and stored
+     * in localStorage, so this page reads them rather than offering a control:
+     * applied to the worker at start-up, and shown in the tool dialog whenever
+     * a forced byte order contradicts the patch that is open.
+     */
+    initSettings(call, ps3SettingsChanged);
+} catch (err) {
+    /* Said in the note that is already on the page about this layer, not
+     * through setStatus() -- that writes inside the tool dialog, where nobody
+     * who has not opened one will see it. */
+    console.error('console savedata setup failed', err);
+    const note = document.querySelector('.tools-note');
+    if (note) {
+        note.textContent = `The console savedata layer did not start (${err.message}). `
+                         + 'The tools below still work for a save that is already '
+                         + 'unwrapped; reload the page to try again.';
+        note.classList.add('bad-text');
+    }
+}
 
 boot();

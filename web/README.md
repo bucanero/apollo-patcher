@@ -17,11 +17,14 @@ public/index.html    the patcher page
 public/app.js        UI: state + DOM, no framework
 public/tools.html    the tools page — one decrypt/re-encrypt pair per game
 public/tools.js      its UI, on the same worker
-public/psp.js        the PSP savedata panel on that page — the console's own
-                     encryption, which wraps a save below the game's
+public/psp.js        the PSP savedata panel — the console's own encryption,
+                     which wraps a save below the game's. The PANEL is on the
+                     patcher page; the shared calls beneath it also drive the
+                     optional stage inside the tools page's game dialogs
 public/ps3.js        the PS3's, the same layer one console up
-public/settings.js   which console a save is written FOR: the PSP's Fuse ID
-                     and the PS3's console ID
+public/settings.js   byte order, and which console a save is written FOR (the
+                     PSP's Fuse ID, the PS3's console ID). The dialog is on the
+                     patcher page; the store is read by both
 public/tools.css     its layout, on style.css's tokens
 public/toolkit.js    which codes each action runs; shared with verify-tools.mjs
 public/worker.js     owns the wasm module, runs every engine call
@@ -34,7 +37,11 @@ dist/                build output — exactly what gets published
 ## Two pages
 
 `index.html` is the patcher: every patch in the database, the whole code list,
-tick what you want. It assumes you know which codes you need.
+tick what you want. It assumes you know which codes you need, which is also why
+the two **console savedata panels** and **Settings** live there — neither is
+per-game, both want the save folder's metadata alongside the file, and a save
+still wrapped in its console's own encryption is not something the two-click
+page can sensibly offer.
 
 `tools.html` is narrower on purpose. Most people arrive wanting one of two
 things — open this save so an editor can read it, or put the edited one back —
@@ -68,9 +75,9 @@ against the others before giving up.
 
 ### The PSP and PS3 panels
 
-Above the grid, because for a save off either console it comes first. Such a
-save is wrapped twice — the console encrypts it with a key of its own before the
-game's encryption is anywhere in the picture:
+On the **patcher** page, below the pickers. A save off either console is wrapped
+twice — the console encrypts it with a key of its own before the game's
+encryption is anywhere in the picture:
 
 ```
 MHP2NDG.BIN (1,483,024 bytes)   PSP savedata encryption (KIRK + the game key)
@@ -82,9 +89,10 @@ Every PSP and PS3 tool in the catalog operates on the *middle* layer, so a file
 copied straight off a Memory Stick or a hard drive goes into the patch engine
 and comes back as noise that looks like output unless the outer layer comes off
 first. The panels are that outer layer, and they are deliberately not cards in
-the grid: they are not per-game, and they work for any save at all — including
+the grid — they are not per-game, and they work for any save at all, including
 titles the patch database covers but the catalog does not, and saves with no
-patch.
+patch. The tools page carries a line pointing at them, since that is where
+somebody holding a raw save is most likely to start.
 
 Each wants two files — the console's metadata and the save itself — and works
 out the rest:
@@ -158,7 +166,10 @@ apart on it.
 
 ### Settings
 
-The **Settings** button in the header holds how saves are read and written.
+The **Settings** button in the patcher page's header holds how saves are read
+and written. The tools page has no such button: the only setting that reaches it
+is the byte order, which it honours and reports but never needs to change, since
+every patch it runs comes from the database and carries its own platform.
 Everything in it is optional, and every default is the safe one.
 
 - **Byte order** — *Auto*, *Big-endian* or *Little-endian*. Auto follows each
@@ -468,7 +479,12 @@ the database carries its platform — the directory it lives in — so that deci
 directly. A file the user supplies has no directory, so the shared
 `apctl_is_big_endian_for()` falls back to matching known PS3 title-ID prefixes
 against the file name, then against the patch's own first lines for a file that
-has been renamed. It remains a checkbox either way.
+has been renamed.
+
+That answer is the default, not the last word: Settings can force big- or
+little-endian for every save, and the choice is remembered. Both pages therefore
+say which order is in effect whenever one is forced, and say so in red when a
+forced order contradicts the patch that is open — see [Settings](#settings).
 
 ## Known limitation: the largest saves
 

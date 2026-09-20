@@ -154,8 +154,14 @@ export function initSettings(worker, changed) {
     load();
     /* Apply the stored values before anything can use them. Failures are the
      * worker's to report; there is nothing the person can do about them at
-     * start-up and the dialog will show the truth when they open it. */
+     * start-up and the dialog will show the truth when they open it.
+     *
+     * This half runs on BOTH pages. The dialog below is on the patcher page
+     * only -- the tools page has no control for these, it just honours them,
+     * and says so when a forced byte order contradicts the patch it has open. */
     push().catch(() => {});
+
+    if (!$('settings-open')) return;
 
     $('settings-open').addEventListener('click', () => {
         render();

@@ -9,7 +9,7 @@ drive the same `libapollo` engine the console apps use.
 | Front-end | What it is |
 |-----------|------------|
 | [`gui/`](gui/README.md) | Native desktop app (Dear ImGui + GLFW) for Windows, macOS and Linux — with the patch database bundled offline |
-| [`web/`](web/README.md) | The engine compiled to WebAssembly, running in a browser tab — the patcher, with the patch database searchable in-page, plus a **tools page** offering one decrypt / re-encrypt pair per game, and **PSP and PS3 savedata panels** for the consoles' own encryption |
+| [`web/`](web/README.md) | The engine compiled to WebAssembly, running in a browser tab — the patcher, with the patch database searchable in-page and **PSP and PS3 savedata panels** for the consoles' own encryption, plus a **tools page** offering one decrypt / re-encrypt pair per game |
 
 The command-line tools (`patcher`, `dumper`) and the engine itself live in
 [apollo-lib](https://github.com/bucanero/apollo-lib).

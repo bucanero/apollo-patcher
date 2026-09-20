@@ -603,6 +603,10 @@ export function ps3SettingsChanged() {
 export function initPs3(worker) {
     call = worker;
 
+    /* As in psp.js: the panel lives on the patcher page, but the tools page
+     * needs `call` set for the stage inside its per-game dialogs. */
+    if (!$('ps3-open')) return;
+
     $('ps3-open').addEventListener('click', () => {
         setStatus('');
         $('ps3-log-wrap').hidden = true;
