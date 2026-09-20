@@ -121,7 +121,12 @@ core/     apollo_ctrl.[ch] — stdio-free engine facade, shared by both front-en
                              the PSP writes identically; one parser for all
           saveinfo.[ch]    — ...and which console wrote a given one, for which
                              game. What lets the desktop app be pointed at a
-                             folder of saves and produce a list
+                             folder of saves and produce a list, including the
+                             title-ID catalogue that names a Vita save (which
+                             carries no name of its own)
+          png.[ch]         — a save's ICON0.PNG, decoded to RGBA. Small enough
+                             to write rather than vendor: all 185 real icons
+                             checked are 8-bit and non-interlaced
           psp/             — the PSP's own savedata encryption, the layer below
                              any patch; vendored from apollo-psp, see above
           ps3/             — the PS3's, the same layer one console up; derived
@@ -245,7 +250,8 @@ Targets:
   real ones and checks every hash a console wrote against one recomputed here
 - `apollo_save_test` — the `PARAM.SFO` parser every front-end shares, and the
   identification over it: which console wrote a save and for which game.
-  `--sfo root|sce FILE` reports on a real one, `--scan DIR` on a whole folder
+  `--sfo root|sce FILE` reports on a real one, `--scan DIR` on a whole folder,
+  `--icon FILE` decodes one save icon and prints its size and checksum
 - `-DAPOLLO_BUILD_GUI=OFF` builds only the engine + headless tests (no GL needed)
 
 ### Web

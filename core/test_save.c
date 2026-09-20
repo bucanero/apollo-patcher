@@ -30,8 +30,11 @@
 #include <sys/types.h>
 #include <dirent.h>
 
+#include <zlib.h>   /* building the synthetic PNGs below */
+
 #include "sfo.h"
 #include "saveinfo.h"
+#include "png.h"
 
 /* ---- the harness -------------------------------------------------------- */
 
@@ -495,6 +498,285 @@ static void check_title_ids(void)
     }
 }
 
+/*
+ * The title catalogue: game names by title ID, for saves that name no game
+ * themselves. Every Vita save is one of those.
+ */
+static void check_title_db(void)
+{
+    /* As tools/make-bundle.py writes it: platform, title ID, name, sorted.
+     * The awkward rows are deliberate -- a blank name, a record with no name
+     * field at all, CRLF, and a title ID in the wrong case. */
+    static const char db[] =
+        "PSP\tULUS10391\tMonster Hunter Freedom Unite\n"
+        "PSV\tPCSB00245\t\n"
+        "PSV\tPCSE00608\tResident Evil: Revelations 2\r\n"
+        "PSV\tPCSE00996\n"
+        "PSV\tPCSG00022\t@field\n";
+    char out[128];
+
+    printf("\nthe title catalogue\n");
+
+    CHECK("a Vita title is found",
+          asave_name_from_db(db, sizeof db - 1, "PSV", "PCSE00608", out, sizeof out) == ASAVE_OK);
+    CHECK_STR("...with its name", out, "Resident Evil: Revelations 2");
+
+    CHECK("a PSP title is found",
+          asave_name_from_db(db, sizeof db - 1, "PSP", "ULUS10391", out, sizeof out) == ASAVE_OK);
+    CHECK_STR("...with its name", out, "Monster Hunter Freedom Unite");
+
+    CHECK("the last line needs no terminator",
+          asave_name_from_db(db, sizeof db - 1, "PSV", "PCSG00022", out, sizeof out) == ASAVE_OK);
+    CHECK_STR("...and still reads", out, "@field");
+
+    CHECK("a lower-case title ID still matches",
+          asave_name_from_db(db, sizeof db - 1, "PSV", "pcse00608", out, sizeof out) == ASAVE_OK);
+
+    /* The platform is half the key: the catalogue holds the same ID for two
+     * consoles in a handful of places, and a PSP save must not be named after
+     * a Vita one. */
+    CHECK("the wrong platform does not match",
+          asave_name_from_db(db, sizeof db - 1, "PSP", "PCSE00608", out, sizeof out) != ASAVE_OK);
+    CHECK("...and leaves the buffer empty", out[0] == '\0');
+
+    CHECK("an unknown title says so",
+          asave_name_from_db(db, sizeof db - 1, "PSV", "PCSE99999", out, sizeof out) != ASAVE_OK);
+    CHECK("a record with an empty name is not a name",
+          asave_name_from_db(db, sizeof db - 1, "PSV", "PCSB00245", out, sizeof out) != ASAVE_OK);
+    CHECK("a record with no name field is not a name",
+          asave_name_from_db(db, sizeof db - 1, "PSV", "PCSE00996", out, sizeof out) != ASAVE_OK);
+
+    /* Refused rather than truncated -- half a game's name is worse than the
+     * folder name the caller would otherwise show. */
+    CHECK("a name too long for the buffer is refused",
+          asave_name_from_db(db, sizeof db - 1, "PSV", "PCSE00608", out, 8) != ASAVE_OK);
+    CHECK("...and leaves the buffer empty", out[0] == '\0');
+
+    CHECK("an empty catalogue is survivable",
+          asave_name_from_db("", 0, "PSV", "PCSE00608", out, sizeof out) != ASAVE_OK);
+    CHECK("a NULL catalogue is survivable",
+          asave_name_from_db(NULL, 0, "PSV", "PCSE00608", out, sizeof out) != ASAVE_OK);
+    CHECK("an empty title ID matches nothing",
+          asave_name_from_db(db, sizeof db - 1, "PSV", "", out, sizeof out) != ASAVE_OK);
+
+    /*
+     * Truncation, the same argument as everywhere else here: this file comes
+     * out of a zip, and a zip is a file somebody can hand you.
+     *
+     * What is checked is that anything returned is a PREFIX of the real name,
+     * never bytes from past the end. Not that it is the whole name: a file's
+     * last line legitimately has no terminator (see above), so a record cut
+     * short is indistinguishable from the last one in a complete file, and
+     * the honest answer is what is actually there.
+     */
+    {
+        static const char want[] = "Resident Evil: Revelations 2";
+        size_t at;
+        int    wrong = 0, whole = 0;
+
+        for (at = 0; at < sizeof db - 1; at++) {
+            if (asave_name_from_db(db, at, "PSV", "PCSE00608", out, sizeof out) != ASAVE_OK)
+                continue;
+            if (strncmp(out, want, strlen(out)) != 0) wrong++;
+            if (strcmp(out, want) == 0) whole++;
+        }
+        CHECK("every truncation returns a prefix of the real name, never more", wrong == 0);
+        CHECK("...and the untruncated ones return all of it", whole > 0);
+    }
+}
+
+/* ---- save icons --------------------------------------------------------- */
+
+static void put_be32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
+}
+
+/* Append one chunk, CRC and all. Real files carry a correct CRC even though
+ * the decoder does not check it, so the fixtures do too. */
+static size_t chunk(uint8_t *out, const char *type, const uint8_t *body, size_t len)
+{
+    uLong crc;
+
+    put_be32(out, (uint32_t)len);
+    memcpy(out + 4, type, 4);
+    if (len) memcpy(out + 8, body, len);
+    crc = crc32(0, out + 4, (uInt)(4 + len));
+    put_be32(out + 8 + len, (uint32_t)crc);
+    return 12 + len;
+}
+
+/*
+ * A PNG built to order: `rows` is height scanlines of `stride` bytes, each of
+ * which this prefixes with a filter byte of 0 (None). Everything the decoder
+ * has to get right is in how those bytes are then interpreted, which is what
+ * the callers below vary.
+ */
+static size_t make_png(uint8_t *out, size_t cap, int w, int h, int depth, int color,
+                       int interlace, const uint8_t *palette, size_t pal_len,
+                       const uint8_t *rows, size_t stride)
+{
+    static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n' };
+    uint8_t  ihdr[13];
+    uint8_t  raw[8192], packed[16384];
+    uLongf   packed_len = sizeof packed;
+    size_t   at = 0, raw_len = 0;
+    int      y;
+
+    if ((size_t)h * (stride + 1) > sizeof raw || cap < 1024)
+        return 0;
+
+    put_be32(ihdr, (uint32_t)w);
+    put_be32(ihdr + 4, (uint32_t)h);
+    ihdr[8]  = (uint8_t)depth;
+    ihdr[9]  = (uint8_t)color;
+    ihdr[10] = 0;   /* deflate  */
+    ihdr[11] = 0;   /* adaptive */
+    ihdr[12] = (uint8_t)interlace;
+
+    for (y = 0; y < h; y++) {
+        raw[raw_len++] = 0;                       /* filter: None */
+        memcpy(raw + raw_len, rows + (size_t)y * stride, stride);
+        raw_len += stride;
+    }
+    if (compress2(packed, &packed_len, raw, (uLong)raw_len, 9) != Z_OK)
+        return 0;
+
+    memcpy(out, sig, sizeof sig);
+    at = sizeof sig;
+    at += chunk(out + at, "IHDR", ihdr, sizeof ihdr);
+    if (pal_len) at += chunk(out + at, "PLTE", palette, pal_len);
+    at += chunk(out + at, "IDAT", packed, packed_len);
+    at += chunk(out + at, "IEND", NULL, 0);
+    return at;
+}
+
+static void check_icons(void)
+{
+    uint8_t  png[4096];
+    uint8_t *rgba = NULL;
+    size_t   len;
+    int      w = 0, h = 0;
+
+    printf("\nsave icons\n");
+
+    /* 8-bit RGB and 8-bit RGBA: between them, all 185 real icons. */
+    {
+        const uint8_t rows[2 * 6] = { 255,0,0,  0,255,0,
+                                      0,0,255,  255,255,255 };
+        len = make_png(png, sizeof png, 2, 2, 8, 2, 0, NULL, 0, rows, 6);
+        CHECK("an 8-bit RGB icon decodes", len > 0
+              && apng_decode(png, len, &rgba, &w, &h) == APNG_OK);
+        CHECK("...at the right size", w == 2 && h == 2);
+        CHECK("...with the first pixel opaque red",
+              rgba && rgba[0] == 255 && rgba[1] == 0 && rgba[2] == 0 && rgba[3] == 255);
+        CHECK("...and the last pixel white",
+              rgba && rgba[12] == 255 && rgba[13] == 255 && rgba[14] == 255);
+        apng_free(rgba); rgba = NULL;
+    }
+    {
+        const uint8_t rows[2 * 8] = { 1,2,3,0,    4,5,6,128,
+                                      7,8,9,255,  10,11,12,64 };
+        len = make_png(png, sizeof png, 2, 2, 8, 6, 0, NULL, 0, rows, 8);
+        CHECK("an 8-bit RGBA icon decodes", len > 0
+              && apng_decode(png, len, &rgba, &w, &h) == APNG_OK);
+        CHECK("...and alpha survives",
+              rgba && rgba[3] == 0 && rgba[7] == 128 && rgba[11] == 255 && rgba[15] == 64);
+        apng_free(rgba); rgba = NULL;
+    }
+
+    /* The rest of the non-interlaced format, which no save icon here uses but
+     * which the decoder claims to read. */
+    {
+        /* Four palette entries, and one byte holding four 2-bit indices:
+         * 0x1B is 00 01 10 11, so the row is entry 0, 1, 2, 3 in order. Every
+         * pixel after the first is the part the unpacking has to get right. */
+        const uint8_t pal[12] = { 255,0,0,  0,255,0,  0,0,255,  255,255,255 };
+        const uint8_t rows[1] = { 0x1B };
+        len = make_png(png, sizeof png, 4, 1, 2, 3, 0, pal, sizeof pal, rows, 1);
+        CHECK("a 2-bit palette icon decodes", len > 0
+              && apng_decode(png, len, &rgba, &w, &h) == APNG_OK);
+        CHECK("...at the right size", w == 4 && h == 1);
+        CHECK("...unpacking all four indices out of the one byte",
+              rgba
+              && rgba[0]  == 255 && rgba[1]  == 0   && rgba[2]  == 0     /* red   */
+              && rgba[4]  == 0   && rgba[5]  == 255 && rgba[6]  == 0     /* green */
+              && rgba[8]  == 0   && rgba[9]  == 0   && rgba[10] == 255   /* blue  */
+              && rgba[12] == 255 && rgba[13] == 255 && rgba[14] == 255); /* white */
+        CHECK("...opaque, with no tRNS in the file", rgba && rgba[3] == 255);
+        apng_free(rgba); rgba = NULL;
+    }
+    {
+        const uint8_t rows[2 * 4] = { 0x12,0x34, 0xAB,0xCD,
+                                      0x00,0xFF, 0xFF,0x00 };
+        len = make_png(png, sizeof png, 2, 2, 16, 0, 0, NULL, 0, rows, 4);
+        CHECK("a 16-bit greyscale icon decodes", len > 0
+              && apng_decode(png, len, &rgba, &w, &h) == APNG_OK);
+        CHECK("...taking the high byte of each sample",
+              rgba && rgba[0] == 0x12 && rgba[4] == 0xAB && rgba[3] == 255);
+        apng_free(rgba); rgba = NULL;
+    }
+
+    /* What it must refuse, and refuse without crashing or leaking a buffer. */
+    {
+        const uint8_t rows[6] = { 1,2,3, 4,5,6 };
+        len = make_png(png, sizeof png, 2, 1, 8, 2, 1 /* Adam7 */, NULL, 0, rows, 6);
+        CHECK("an interlaced PNG is refused, not guessed at",
+              len > 0 && apng_decode(png, len, &rgba, &w, &h) == APNG_ERR_SUPPORT);
+        CHECK("...and hands back no buffer", rgba == NULL);
+
+        len = make_png(png, sizeof png, 2, 1, 8, 2, 0, NULL, 0, rows, 6);
+        png[1] = 'X';
+        CHECK("a wrong signature is refused",
+              apng_decode(png, len, &rgba, &w, &h) == APNG_ERR_FORMAT);
+        png[1] = 'P';
+
+        CHECK("a NULL buffer is refused",
+              apng_decode(NULL, 64, &rgba, &w, &h) == APNG_ERR_FORMAT);
+        CHECK("an empty buffer is refused",
+              apng_decode(png, 0, &rgba, &w, &h) == APNG_ERR_FORMAT);
+
+        /*
+         * Every truncation. The decoder allocates from IHDR and fills from
+         * the inflate output, so a file that stops before the end of the
+         * image data must fail rather than hand back a half-filled buffer of
+         * whatever malloc had.
+         *
+         * A file cut inside the trailing IEND chunk is the exception and must
+         * still decode: all the image data is present by then, and refusing
+         * would throw away an icon over twelve missing bytes.
+         */
+        {
+            const size_t iend_at = len - 12;
+            uint8_t      copy[4096];
+            size_t       at;
+            int          early = 0, late = 0, wrong = 0;
+
+            for (at = 1; at < len; at++) {
+                memcpy(copy, png, at);
+                if (apng_decode(copy, at, &rgba, &w, &h) != APNG_OK)
+                    continue;
+                if (at < iend_at) early++;
+                else              late++;
+                if (w != 2 || h != 1 || rgba[0] != 1 || rgba[3] != 255) wrong++;
+                apng_free(rgba);
+                rgba = NULL;
+            }
+            CHECK("no truncation into the image data decodes", early == 0);
+            CHECK("...but one that loses only IEND still does", late == 12);
+            CHECK("...and what it decodes is the whole image", wrong == 0);
+        }
+
+        /* A file that claims an enormous image must not try to allocate it. */
+        len = make_png(png, sizeof png, 2, 1, 8, 2, 0, NULL, 0, rows, 6);
+        put_be32(png + 16, 0x7FFFFFFF);          /* IHDR width */
+        CHECK("an absurd width is refused by size, not by malloc",
+              apng_decode(png, len, &rgba, &w, &h) == APNG_ERR_SIZE);
+        CHECK("...and hands back no buffer", rgba == NULL);
+    }
+}
+
 /* ---- real files --------------------------------------------------------- */
 
 static uint8_t *slurp(const char *path, size_t *len)
@@ -607,8 +889,37 @@ static int run_scan(const char *root)
     return found ? 0 : 1;
 }
 
+/*
+ * Decode one real icon and print what came out, as "WxH crc32", so an
+ * independent decoder can be run over the same file and the two compared.
+ */
+static int run_icon(const char *path)
+{
+    size_t   len;
+    uint8_t *data = slurp(path, &len);
+    uint8_t *rgba = NULL;
+    int      w = 0, h = 0, rc;
+
+    if (!data) { fprintf(stderr, "cannot read %s\n", path); return 2; }
+
+    rc = apng_decode(data, len, &rgba, &w, &h);
+    if (rc != APNG_OK) {
+        printf("- - %s: %s\n", path, apng_strerror(rc));
+        free(data);
+        return 1;
+    }
+    printf("%dx%d %08lx %s\n", w, h,
+           (unsigned long)crc32(0, rgba, (uInt)((size_t)w * h * 4)), path);
+    apng_free(rgba);
+    free(data);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 2 && strcmp(argv[1], "--icon") == 0)
+        return run_icon(argv[2]);
+
     if (argc > 3 && strcmp(argv[1], "--sfo") == 0)
         return run_one(argv[2], argv[3]);
 
@@ -621,6 +932,8 @@ int main(int argc, char **argv)
     check_bounds();
     check_identify();
     check_title_ids();
+    check_title_db();
+    check_icons();
 
     printf("\nsave checks: %s\n", g_fails ? "FAILED" : "all passed");
     return g_fails ? 1 : 0;

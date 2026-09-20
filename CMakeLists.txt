@@ -64,6 +64,11 @@ set(MBEDTLS_DIR "${APOLLO_ROOT}/mbedtls-2.16.12")
 # build does not use it — the page fetches patches over the network instead —
 # but it costs nothing to carry in the shared library.
 #
+# core/png.c decodes a save's ICON0.PNG. Small enough to be worth writing
+# rather than vendoring: every one of the 185 real icons this was checked
+# against is 8-bit and non-interlaced, and zlib is already linked for the
+# engine's own use.
+#
 # core/sfo.c parses a PARAM.SFO, which every console since the PSP writes in
 # the same container, and core/saveinfo.c says which console wrote a given one
 # and what game it belongs to. That is what lets a front-end be pointed at a
@@ -97,7 +102,7 @@ set(PS3_SRCS
 
 add_library(apollo_engine STATIC ${ENGINE_SRCS} ${PSP_SRCS} ${PS3_SRCS}
                                  core/apollo_ctrl.c core/patchdb.c
-                                 core/sfo.c core/saveinfo.c)
+                                 core/sfo.c core/saveinfo.c core/png.c)
 target_include_directories(apollo_engine PUBLIC
     ${APOLLO_ROOT}/include
     ${APOLLO_ROOT}/tools          # provides dbglogger.h prototype

@@ -200,3 +200,81 @@ int asave_identify(const uint8_t *sfo, size_t sfo_len,
     out->encrypted = 1;
     return ASAVE_OK;
 }
+
+/* One field of a tab-separated line: its start and length, or 0 at the end of
+ * the line. `at` is advanced past the separator. */
+static size_t field(const char *text, size_t len, size_t *at, const char **start)
+{
+    size_t begin = *at;
+
+    *start = text + begin;
+    while (*at < len && text[*at] != '\t' && text[*at] != '\n' && text[*at] != '\r')
+        (*at)++;
+    {
+        const size_t n = *at - begin;
+        if (*at < len && text[*at] == '\t')
+            (*at)++;
+        return n;
+    }
+}
+
+/* Case-insensitive compare of a field against a NUL-terminated string. */
+static int same_text(const char *a, size_t a_len, const char *b)
+{
+    size_t i;
+
+    for (i = 0; i < a_len; i++) {
+        char x = a[i], y = b[i];
+
+        if (!y)
+            return 0;
+        if (x >= 'a' && x <= 'z') x = (char)(x - 'a' + 'A');
+        if (y >= 'a' && y <= 'z') y = (char)(y - 'a' + 'A');
+        if (x != y)
+            return 0;
+    }
+    return b[a_len] == '\0';
+}
+
+int asave_name_from_db(const char *text, size_t len,
+                       const char *platform, const char *title_id,
+                       char *out, size_t out_len)
+{
+    size_t at = 0;
+
+    if (!out || !out_len)
+        return ASAVE_ERR_WHICH;
+    out[0] = '\0';
+    if (!text || !platform || !title_id || !title_id[0])
+        return ASAVE_ERR_WHICH;
+
+    while (at < len) {
+        const char *plat, *id, *name;
+        size_t plat_len, id_len, name_len;
+
+        plat_len = field(text, len, &at, &plat);
+        id_len   = field(text, len, &at, &id);
+        name_len = field(text, len, &at, &name);
+
+        /* To the end of the line, whatever is left of it: a name is the last
+         * field, but a fourth one would otherwise be read as the next
+         * record's platform. make-bundle.py does not emit one -- this is so
+         * that a file which did could not make this parse nonsense. */
+        while (at < len && text[at] != '\n' && text[at] != '\r')
+            at++;
+        while (at < len && (text[at] == '\n' || text[at] == '\r'))
+            at++;
+
+        if (!name_len || !same_text(plat, plat_len, platform) || !same_text(id, id_len, title_id))
+            continue;
+
+        /* Refused rather than truncated: half a game's name in a list is
+         * worse than the folder name it would otherwise show. */
+        if (name_len >= out_len)
+            return ASAVE_ERR_WHICH;
+        memcpy(out, name, name_len);
+        out[name_len] = '\0';
+        return ASAVE_OK;
+    }
+    return ASAVE_ERR_WHICH;
+}

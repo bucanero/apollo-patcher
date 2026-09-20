@@ -47,6 +47,7 @@
 #include "psp_savedata.h"  // the PSP's own savedata encryption, below any patch
 #include "pfd_savedata.h"  // ...and the PS3's, which works the same way
 #include "saveinfo.h"     // which console wrote a PARAM.SFO, and for which game
+#include "png.h"          // ...and the ICON0.PNG beside it
 #include "kirk_engine.h"   // KIRK_HOST_FUSE_ID, the Fuse ID default
 
 #ifdef _WIN32
@@ -213,6 +214,11 @@ struct PatchDb {
     // than a first-wins approximation. Read from the save-scanning thread,
     // which is why it is built once at start-up and never touched again.
     std::unordered_map<std::string, int> by_title_id;
+    // titles.tsv out of the same zip: game names by title ID, for the saves
+    // that name no game themselves. Held as one buffer and scanned, rather
+    // than parsed into a map, because it is consulted only for those saves --
+    // in practice the Vita ones -- and never in a loop that matters.
+    std::string              titles;
     char                     search[128] = "";
     int                      platform = 0;     // index into platforms
     bool                     refilter = true;
@@ -1222,6 +1228,24 @@ static void init_patchdb() {
              n, patchdb_path(g_db.db));
     g_app.append_log(buf);
 
+    // The game-name catalogue. Optional: a bundle built before it existed
+    // simply has none, and every save that names itself is unaffected.
+    {
+        char*  text = nullptr;
+        size_t len  = 0;
+        if (patchdb_read_file(g_db.db, "titles.tsv", &text, &len)) {
+            g_db.titles.assign(text, len);
+            free(text);
+            snprintf(buf, sizeof buf, "Game names: %zu KB of title IDs",
+                     (g_db.titles.size() + 1023) / 1024);
+            g_app.append_log(buf);
+        } else {
+            g_app.append_log("[!] No titles.tsv in the bundle - Vita saves will "
+                             "be listed by folder unless the patch database "
+                             "happens to name them.");
+        }
+    }
+
     if (const char* cache = patchdb_cache_dir()) {
         int written = patchdb_extract_python(g_db.db, cache);
         if (written > 0) {
@@ -1439,6 +1463,7 @@ struct SaveEntry {
     std::vector<std::string> files;  // relative to path, metadata excluded
     int         suggest = -1;        // the one to open, or -1 for no data file
     bool        suggest_listed = false;  // ...and whether the console named it
+    std::string icon;                // ICON0.PNG, if the save has one
     std::string haystack;            // lowercased, for the filter box
 };
 
@@ -1494,6 +1519,10 @@ static SaveBrowser g_sb;
 static const int  SCAN_MAX_DEPTH = 8;
 static const int  SCAN_MAX_DIRS  = 40000;
 
+// Defined below, with the rest of the icon handling: a scan throws away the
+// save list, and the decoded icon belongs to one of its entries.
+static void icon_drop();
+
 static bool read_meta(const fs::path& p, std::vector<unsigned char>& out) {
     std::error_code ec;
     if (!fs::is_regular_file(p, ec)) return false;
@@ -1525,6 +1554,31 @@ static void collect_files(const fs::path& root, const fs::path& dir,
         // subfolder case, and is the better thing to lose.
         out.push_back(ec || rel.empty() ? leaf : rel);
     }
+}
+
+//
+// The save's icon: what the console's own save list shows for it, and the
+// quickest way to tell apart six folders with nearly the same name.
+//
+//   PSP, PS3    ICON0.PNG beside the data files
+//   PS4, Vita   sce_sys/icon0.png
+//
+// Both spellings of each are tried. The case is per console, and only some
+// filesystems care -- a save copied to a Mac and then opened on Linux is the
+// case that would otherwise lose its icon.
+//
+static std::string find_icon(const fs::path& dir) {
+    static const char* const candidates[] = {
+        "ICON0.PNG", "icon0.png",
+        "sce_sys/icon0.png", "sce_sys/ICON0.PNG",
+    };
+    std::error_code ec;
+
+    for (const char* name : candidates) {
+        const fs::path p = dir / name;
+        if (fs::is_regular_file(p, ec)) return p.string();
+    }
+    return std::string();
 }
 
 // Which of those files the console itself says is the save -- PARAM.SFO's
@@ -1600,6 +1654,7 @@ static bool examine(const fs::path& dir, SaveEntry& out) {
     collect_files(dir, dir, 2, out.files);
     std::sort(out.files.begin(), out.files.end());
     out.suggest = suggest_file(out, sfo, pfd);
+    out.icon    = find_icon(dir);
     return true;
 }
 
@@ -1658,9 +1713,27 @@ static void resolve_patches(std::vector<SaveEntry>& saves) {
                 }
             }
         }
-        // A Vita save has no name of its own (see saveinfo.h), so the
-        // database is where its name comes from when there is a patch.
+        //
+        // A name for a save that carries none -- which is every Vita save
+        // (see saveinfo.h), and the occasional one elsewhere.
+        //
+        // In this order, and the order is the point:
+        //
+        //   the save's own PARAM.SFO   what the console itself shows. Already
+        //                              in s.name by now when there is one.
+        //   the title catalogue        8783 games, keyed exactly by title ID
+        //   the patch database         the patch author's own wording, which
+        //                              carries region suffixes and varies
+        //
+        if (s.name.empty() && !g_db.titles.empty() && !s.title_id.empty()) {
+            char named[ASAVE_NAME_LEN] = "";
+            if (asave_name_from_db(g_db.titles.data(), g_db.titles.size(),
+                                   s.platform, s.title_id.c_str(),
+                                   named, sizeof named) == ASAVE_OK)
+                s.name = named;
+        }
         if (s.name.empty()) s.name = s.patch_name;
+
         s.haystack = lowered(s.name + " " + s.patch_name + " " + s.title_id
                              + " " + s.dir_name + " " + s.detail);
     }
@@ -1696,6 +1769,7 @@ static void scan_start(const std::string& root) {
     g_sb.hits.clear();
     g_sb.selected = -1;
     g_sb.pick     = -1;
+    icon_drop();               // it belongs to a save that is about to vanish
     g_sb.note     = "Scanning...";
     g_sb.running  = true;
     g_sb.done     = false;
@@ -1765,6 +1839,94 @@ static void refilter_saves() {
         g_sb.hits.push_back(int(i));
     }
     g_sb.refilter = false;
+}
+
+//
+// The one decoded icon on screen.
+//
+// One, not a cache of them: the detail pane shows the selected save and
+// nothing else, and a folder of 176 saves would otherwise be 176 PNGs decoded
+// and 40MB of texture uploaded for a list that displays them one at a time.
+// Re-decoding on every selection change costs a fraction of a millisecond for
+// an image this size.
+//
+struct SaveIcon {
+    std::string path;        // what is loaded, "" for nothing
+    unsigned    tex = 0;     // the GL texture name
+    int         w = 0, h = 0;      // the image
+    float       u = 1.0f, v = 1.0f;  // ...as a fraction of the texture
+    std::string error;       // why there is no picture, when there is a file
+};
+static SaveIcon g_icon;
+
+static void icon_drop() {
+    if (g_icon.tex) glDeleteTextures(1, (const GLuint*)&g_icon.tex);
+    g_icon = SaveIcon();
+}
+
+static void icon_load(const std::string& path) {
+    if (path == g_icon.path) return;   // already the one on screen
+    icon_drop();
+    g_icon.path = path;
+    if (path.empty()) return;
+
+    std::vector<unsigned char> file;
+    if (!read_all(path, file)) { g_icon.error = "could not be read"; return; }
+
+    uint8_t* rgba = nullptr;
+    int      w = 0, h = 0;
+    const int rc = apng_decode(file.data(), file.size(), &rgba, &w, &h);
+    if (rc != APNG_OK) { g_icon.error = apng_strerror(rc); return; }
+
+    //
+    // Padded to a power of two, and drawn with UVs that cut the padding back
+    // off.
+    //
+    // OpenGL 1.1 -- which is the floor this app targets, and exactly what
+    // Microsoft's software renderer offers on a GPU-less or Remote Desktop
+    // host -- takes only power-of-two textures. No save icon is one: they are
+    // 320x176, 228x128, 144x80. Without this the icon silently fails to
+    // appear on precisely the machines least able to say why.
+    //
+    int pw = 1, ph = 1;
+    while (pw < w) pw <<= 1;
+    while (ph < h) ph <<= 1;
+
+    std::vector<unsigned char> pot((size_t)pw * ph * 4, 0);
+    for (int y = 0; y < h; y++)
+        memcpy(&pot[(size_t)y * pw * 4], rgba + (size_t)y * w * 4, (size_t)w * 4);
+    apng_free(rgba);
+
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    // GL_CLAMP, not GL_CLAMP_TO_EDGE: the latter is 1.2, and the whole point
+    // of the padding above is that 1.1 is the floor.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pw, ph, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, pot.data());
+
+    g_icon.tex = tex;
+    g_icon.w   = w;
+    g_icon.h   = h;
+    g_icon.u   = float(w) / float(pw);
+    g_icon.v   = float(h) / float(ph);
+}
+
+// Draw it at up to `box_w` x `box_h`, keeping its shape. A PS3 icon is
+// 320x176 and a Vita one is square, so a fixed width would make the Vita
+// tower over the rest of the pane.
+static void icon_draw(float box_w, float box_h) {
+    if (!g_icon.tex) return;
+
+    const float scale = std::min(box_w / float(g_icon.w), box_h / float(g_icon.h));
+    ImGui::Image((ImTextureID)(intptr_t)g_icon.tex,
+                 ImVec2(float(g_icon.w) * scale, float(g_icon.h) * scale),
+                 ImVec2(0, 0), ImVec2(g_icon.u, g_icon.v));
 }
 
 //
@@ -2723,14 +2885,28 @@ static void render_save_browser() {
         } else {
             const SaveEntry& s = g_sb.saves[size_t(g_sb.selected)];
 
+            // The picture the console itself shows for this save. Decoded
+            // here rather than during the scan, so only the one on screen is.
+            icon_load(s.icon);
+            if (g_icon.tex) {
+                icon_draw(128.0f * g_ui_scale, 88.0f * g_ui_scale);
+                ImGui::SameLine();
+            }
+
+            ImGui::BeginGroup();
             ImGui::TextColored(ImVec4(0.80f, 0.80f, 0.95f, 1.0f), "%s",
                                s.name.empty() ? s.dir_name.c_str() : s.name.c_str());
             if (!s.detail.empty()) ImGui::TextDisabled("%s", s.detail.c_str());
-            ImGui::Spacing();
             ImGui::Text("%s   %s", s.platform, s.title_id.empty() ? "(no title ID)"
                                                                   : s.title_id.c_str());
+            ImGui::EndGroup();
+
             ImGui::TextDisabled("%s", s.dir_name.c_str());
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", s.path.c_str());
+            // Only when there IS an icon and it would not read. A save with
+            // no ICON0.PNG at all is ordinary and says nothing.
+            if (!g_icon.tex && !g_icon.error.empty())
+                ImGui::TextDisabled("(the icon is %s)", g_icon.error.c_str());
 
             ImGui::Spacing();
             if (s.patch_index >= 0) {
@@ -3478,6 +3654,9 @@ static int run_scan(const char* root, int pick) {
         printf("          %s\n", s.patch_index >= 0
                                      ? ("codes: " + s.patch_name).c_str()
                                      : "no codes");
+        if (!s.icon.empty())
+            printf("          icon: %s\n",
+                   s.icon.c_str() + (s.icon.size() > s.path.size() ? s.path.size() + 1 : 0));
     }
     printf("\n%s\n", g_sb.note.c_str());
 
@@ -3664,6 +3843,7 @@ int main(int argc, char** argv) {
     // disk, so quitting mid-scan closes the window now and not in a minute.
     g_sb.cancel = true;
     scan_join();
+    icon_drop();               // while there is still a GL context to drop it in
 
     g_app.close();
     ImGui_ImplOpenGL2_Shutdown();

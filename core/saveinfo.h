@@ -97,6 +97,30 @@ int asave_identify(const uint8_t *sfo, size_t sfo_len,
  * ASAVE_UNKNOWN. */
 const char *asave_platform_name(asave_platform_t platform);
 
+/*
+ * A game's name, looked up by title ID in the bundled catalogue.
+ *
+ * For the saves that name no game themselves. A Vita save is the reason this
+ * exists: it carries no TITLE_ID key and its TITLE is usually empty, so
+ * without a catalogue it can only be listed under its folder. The patch
+ * database knows the 123 Vita titles it has patches for; the catalogue knows
+ * 4581.
+ *
+ * `text` is titles.tsv out of apollo-patches.zip, which tools/make-bundle.py
+ * normalises from the per-console files in the patch checkout. One record per
+ * line, tab separated, sorted:
+ *
+ *     PSV<TAB>PCSE00608<TAB>Resident Evil: Revelations 2
+ *
+ * Buffer in, buffer out, like every other database lookup here: the front-end
+ * owns the file, and the web build has no filesystem to read one from.
+ *
+ * ASAVE_ERR_WHICH when the catalogue has no such title; `out` is emptied.
+ */
+int asave_name_from_db(const char *text, size_t len,
+                       const char *platform, const char *title_id,
+                       char *out, size_t out_len);
+
 #ifdef __cplusplus
 }
 #endif

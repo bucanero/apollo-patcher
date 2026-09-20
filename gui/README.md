@@ -107,6 +107,19 @@ Rebuilds are tracked — the glob over the patch files is `CONFIGURE_DEPENDS`, s
 pulling new patches rebuilds the zip and refreshes the app's copy on the next
 build. A build with nothing changed does neither.
 
+Besides the patches, the zip carries three generated or copied tables:
+`index.tsv` (game names per patch), the two console key databases
+(`PSP/gamekeys.txt`, `PS3/games.conf`), and **`titles.tsv`** — 8783 game names
+by title ID, normalised by `make-bundle.py` from apollo-patches'
+`psptitleid.txt` and `psvtitleid.txt`. That last one is what names a save the
+patch database has never heard of; see [Browsing saves](#browsing-saves).
+It costs about 110KB in the zip.
+
+`ps1titleid.txt` and `ps2titleid.txt` are deliberately left out — nothing
+browses a PS1 or PS2 save yet and they are another 250KB. `TITLE_DBS` in
+`make-bundle.py` is where to add them, with the note there that those two are
+Windows-1252 rather than UTF-8.
+
 Where it looks, in order: `$APOLLO_PATCHES_ZIP`, next to the executable,
 `../Resources/` (so a macOS `.app` is self-contained), then the working
 directory.
@@ -181,8 +194,23 @@ guessing:
 - **Vita** says neither. `TITLE` is usually empty and there is no `TITLE_ID`
   key; the title ID is nine bytes at `0x28` inside the binary `PARAMS` blob,
   with `PARENT_DIRECTORY` (`/PCSE00608`) as the fallback. So a Vita save is
-  **nameless** until the patch database is asked about its title ID, which is
-  where the name in the list comes from.
+  **nameless** and has to be looked up by title ID.
+
+For that last case the name comes from elsewhere, in this order:
+
+1. **the save's own `PARAM.SFO`** — what the console itself shows, so it wins
+   whenever there is one.
+2. **`titles.tsv`** in the bundle, which `make-bundle.py` normalises from
+   apollo-patches' `psptitleid.txt` and `psvtitleid.txt`: 8783 games by title
+   ID, 4581 of them Vita.
+3. **the patch database**, which names only the games it has patches for — 123
+   Vita titles.
+
+The catalogue sits above the patch database on purpose. It is a catalogue,
+keyed exactly by title ID, where a patch's name is whatever its author wrote on
+the file's second line and carries region suffixes and inconsistencies. More to
+the point it covers 37× as many Vita games, so a save for a game nobody has
+written codes for is still listed under its real name instead of `SLOT0`.
 
 A title ID is believed only when it is exactly nine characters of upper-case
 letters and digits. A folder somebody renamed still gets listed under its own
@@ -254,6 +282,34 @@ Across 176 real PS3 saves, 119 of which have codes: 101 suggestions already
 matched the patch's own target line, 3 were corrected by it, and 15 were left
 alone because the patch named several files or named one this save does not
 have.
+
+### The icon
+
+The picture the console's own save list shows — `ICON0.PNG` beside the data
+files on a PSP or PS3, `sce_sys/icon0.png` on a PS4 or Vita — appears next to
+the game's name in the detail pane. Both spellings of each are tried, because
+the case is per console and only some filesystems care: a save copied to a Mac
+and then opened on Linux is the one that would otherwise lose it.
+
+It is decoded when the selection changes, not during the scan. A folder of 176
+saves is 176 PNGs, and uploading all of them would be 40MB of texture for a
+list that shows one at a time; re-decoding a 320x176 image on each click costs
+a fraction of a millisecond.
+
+`core/png.c` does the decoding rather than a vendored library, because the job
+is small and the input is narrow: of 185 real icons across all four consoles,
+every single one is 8-bit, non-interlaced, and either RGB or RGBA. The rest of
+the non-interlaced format is handled anyway — palettes, greyscale, 1/2/4/16-bit,
+`tRNS` — since it is a few lines each. Adam7 interlacing is refused outright,
+being the one thing in the format that would double the size of that file. zlib
+was already linked for the engine's own use.
+
+The texture is **padded to a power of two** and drawn with UVs that cut the
+padding back off. OpenGL 1.1 is the floor this app targets — it is exactly what
+Microsoft's software renderer offers on a GPU-less or Remote Desktop host — and
+1.1 takes only power-of-two textures. No save icon is one: they are 320x176,
+228x128, 144x80. Without the padding the icon would silently fail to appear on
+precisely the machines least able to explain why.
 
 ### Checking a folder from a terminal
 
