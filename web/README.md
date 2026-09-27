@@ -201,6 +201,11 @@ and then recomputes `PARAM.PFD`'s hash of that file, so it hands back **two**
 files. Keep both: a `PARAM.SFO` carrying a new account beside a `PARAM.PFD`
 that still hashes the old one is a save that does not load.
 
+The panel shows **which account the save is signed to now**, read from the
+`PARAM.SFO` you supply, and marks it as yours when it matches Settings. It is
+not updated after signing, on purpose: the page hands back bytes rather than
+writing files, so the save has not changed until you save them.
+
 The console is cleared across that update and put back afterwards, because
 `apfd_update_file` re-binds `PARAM.SFO`'s console-keyed hashes whenever one is
 named — ambient state rather than an argument — and signing to an account has

@@ -559,6 +559,25 @@ leaves a save that will not load at all.
 fails, the save is one **Resign PARAM.PFD** away from correct rather than
 silently mismatched, and the log says so.
 
+**Which account a save is signed to** is read during the scan, for every PS3
+save, and shown in three places: a **Yours** column in the save list, the hover
+panel, and the patcher screen's save header. The column appears only once an
+account is named in Settings — which is exactly when the question has an answer
+worth a column.
+
+It is read during the scan rather than when a save is opened because that is
+when the question gets asked: *which of these are mine?* Reading it at open
+time would have missed every save whose game encrypts nothing, since the PS3
+section that would have shown it is hidden for those.
+
+PS3 only. A PS4 save has an `ACCOUNT_ID` too, but as eight raw bytes rather
+than sixteen ASCII digits, and its `PARAMS` blob holds something else at the
+offset this reads — so asking would not fail, it would answer with rubbish.
+
+The desktop updates the line after signing, because the files really are on
+disk by then; the web panel deliberately does not, since there the bytes are
+only offered for download and the save has not changed until you save them.
+
 The saves folder is in that file too, though nothing in this dialog sets it:
 choosing one in the save browser writes it there straight away. It is the one
 setting somebody changes by *using* the app, and having to re-find a memory

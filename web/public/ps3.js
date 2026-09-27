@@ -132,6 +132,14 @@ export async function ps3FolderFromSfo(bytes) {
     return res.ok ? (res.folder || '') : '';
 }
 
+/* Which account the save is signed to right now, so that signing it to
+ * another is a visible change rather than a leap of faith. "" when the file
+ * does not say. */
+export async function ps3AccountFromSfo(bytes) {
+    const res = await call('ps3AccountId', { sfo: bytes.slice().buffer });
+    return res.ok ? (res.account || '') : '';
+}
+
 /*
  * The secure file ID for one file, from the database, without asking.
  *
@@ -213,6 +221,7 @@ let keyNote = '';        /* where that key came from, for the user           */
 let keyHex = '';         /* what is in the hex box, valid or not             */
 let keyFor = '';         /* folder + entry the key belongs to                */
 let match = null;        /* null, or whether `data` matches its PFD entry    */
+let signedTo = '';       /* the account PARAM.SFO carries, when one was given */
 let outputs = [];
 
 /* ---- rendering ---------------------------------------------------------- */
@@ -285,6 +294,12 @@ function renderInfo() {
         <dd>${encrypted.length
             ? `<select id="ps3-listed" aria-label="Which listed file">${options}</select>`
             : '<span class="good-text">none</span> <span class="dim">— this game stores saves in the clear</span>'}</dd>
+        ${signedTo ? `<dt>Signed to</dt>
+        <dd><code>${escapeHtml(signedTo)}</code>${
+            hasAccountId() && signedTo.toLowerCase() === settings().ps3AccountId.toLowerCase()
+                ? ' <span class="good-text">· your account</span>'
+                : hasAccountId() ? ' <span class="dim">· another account</span>' : ''
+        }</dd>` : ''}
         <dt class="ps3-match-dt"${match === null ? ' hidden' : ''}>Recorded hash</dt>
         <dd class="ps3-match"${match === null ? ' hidden' : ''}>${matchHtml()}</dd>
       </dl>
@@ -477,6 +492,7 @@ async function loadFiles(list, into) {
         if (into === undefined && isSfoName(f.name)) {
             sfo = { name: f.name, bytes };
             folder = (await ps3FolderFromSfo(bytes)) || folder;
+            signedTo = await ps3AccountFromSfo(bytes);
             continue;
         }
 
@@ -750,6 +766,7 @@ export function initPs3(worker) {
      * re-enter it. */
     $('ps3').addEventListener('close', () => {
         pfd = data = sfo = info = null;
+        signedTo = '';
         listed = '';
         match = null;
         outputs = [];

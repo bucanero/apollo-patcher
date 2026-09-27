@@ -95,6 +95,11 @@ struct SaveEntry {
     int         suggest = -1;        // the one to open, or -1 for no data file
     bool        suggest_listed = false;  // ...and whether the console named it
     std::string icon;                // ICON0.PNG, if the save has one
+    // The PSN account this save is signed to, PS3 only. 16 hex digits, or
+    // empty when the save does not say. Read during the scan because the
+    // PARAM.SFO is open anyway, and because the question it answers -- is
+    // this one mine? -- is asked while looking at the LIST.
+    std::string account;
     std::string haystack;            // lowercased, for the filter box
 };
 
@@ -216,6 +221,7 @@ struct AppState {
         char        key_hex[33] = "";   // the editable field
         bool        hash_ok = true;     // does PARAM.PFD still describe the file
         bool        hash_checked = false;
+        char        account[APFD_ACCT_ID_LEN + 1] = "";  // what PARAM.SFO says now
 
         void clear() { *this = Ps3(); }
     };
@@ -1060,6 +1066,10 @@ static void ps3_detect() {
         if (apsp_sfo_directory(sfo.data(), sfo.size(), named, sizeof named) == APSP_OK
             && named[0])
             g_app.ps3.folder = named;
+        // Which account it is signed to now, so that signing it to another is
+        // a visible change rather than a leap of faith.
+        apfd_sfo_account_id(sfo.data(), sfo.size(),
+                            g_app.ps3.account, sizeof g_app.ps3.account);
     }
 
     if (ps3_key_from_bundle(g_app.ps3.folder, g_app.ps3.listed,
@@ -1271,6 +1281,13 @@ static bool ps3_account_resign() {
     }
 
     g_app.ps3.hash_checked = false;   // the file changed under the check
+    // Both files are on disk now, so the panel should say so. The web panel
+    // deliberately does NOT do this: there the bytes are only offered for
+    // download, and claiming the save had changed would be a lie until the
+    // person saved them.
+    snprintf(g_app.ps3.account, sizeof g_app.ps3.account, "%s", g_saved.account_hex);
+    if (g_app.has_save) g_app.save.account = g_saved.account_hex;
+
     g_app.append_log((std::string("PARAM.SFO signed to account ")
                       + g_saved.account_hex
                       + (was[0] ? std::string(" (was ") + was + ")" : std::string())
@@ -1793,6 +1810,16 @@ static bool examine(const fs::path& dir, SaveEntry& out) {
     std::sort(out.files.begin(), out.files.end());
     out.suggest = suggest_file(out, sfo, pfd);
     out.icon    = find_icon(dir);
+
+    // PS3 only. A PS4 save has an ACCOUNT_ID too, but as eight raw bytes
+    // rather than sixteen ASCII digits, and its PARAMS blob holds something
+    // else entirely at the offset this reads -- so asking would not fail, it
+    // would answer with rubbish.
+    if (info.platform == ASAVE_PS3) {
+        char id[APFD_ACCT_ID_LEN + 1] = "";
+        if (apfd_sfo_account_id(sfo.data(), sfo.size(), id, sizeof id) == APFD_OK)
+            out.account = id;
+    }
     return true;
 }
 
@@ -2881,6 +2908,19 @@ static void render_db_browser() {
 }
 
 //
+// Is this save signed to the account in Settings?
+//
+//   0  no account set in Settings, or the save does not say -- no opinion
+//   1  yours
+//  -1  somebody else's
+//
+static int account_verdict(const std::string& save_account) {
+    if (save_account.empty() || strlen(g_saved.account_hex) != APFD_ACCT_ID_LEN)
+        return 0;
+    return lowered(save_account) == lowered(g_saved.account_hex) ? 1 : -1;
+}
+
+//
 // Everything about one save, on hover.
 //
 // The icon the console shows, the slot, whether there are codes, and which
@@ -2912,6 +2952,17 @@ static void draw_save_tooltip(const SaveEntry& s) {
 
     ImGui::Separator();
     ImGui::TextDisabled("%s", s.path.c_str());
+
+    if (!s.account.empty()) {
+        const int mine = account_verdict(s.account);
+        ImGui::TextDisabled("Signed to account %s", s.account.c_str());
+        if (mine) {
+            ImGui::SameLine();
+            ImGui::TextColored(mine > 0 ? ImVec4(0.55f, 0.85f, 0.60f, 1.0f)
+                                        : ImVec4(0.95f, 0.75f, 0.45f, 1.0f), "%s",
+                                                  mine > 0 ? "- yours" : "- not yours");
+        }
+    }
 
     if (s.patch_index >= 0)
         ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.60f, 1.0f),
@@ -3143,7 +3194,9 @@ static void draw_saves_screen() {
     bool        open_now = false;
     const float footer = ImGui::GetFrameHeightWithSpacing() + st.ItemSpacing.y;
 
-    if (ImGui::BeginTable("##saverows", 5,
+    const bool know_account = strlen(g_saved.account_hex) == APFD_ACCT_ID_LEN;
+
+    if (ImGui::BeginTable("##saverows", know_account ? 6 : 5,
                           ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg,
                           ImVec2(0, -footer))) {
         // Both stretch, and the weights are the point: the slot is what tells
@@ -3158,6 +3211,11 @@ static void draw_saves_screen() {
                                 ImGui::CalcTextSize("NPUB31842 ").x);
         ImGui::TableSetupColumn("Codes", ImGuiTableColumnFlags_WidthFixed,
                                 ImGui::CalcTextSize("Codes ").x);
+        // Shown only once an account is named in Settings, which is exactly
+        // when "is this one mine?" has an answer worth a column.
+        if (know_account)
+            ImGui::TableSetupColumn("Yours", ImGuiTableColumnFlags_WidthFixed,
+                                    ImGui::CalcTextSize("Yours ").x);
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
@@ -3201,6 +3259,17 @@ static void draw_saves_screen() {
                     ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.60f, 1.0f), "yes");
                 else
                     ImGui::TextDisabled("-");
+                if (know_account) {
+                    ImGui::TableSetColumnIndex(5);
+                    switch (account_verdict(s.account)) {
+                        case 1:  ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.60f, 1.0f), "yes"); break;
+                        // Not an error, just somebody else's -- a save you
+                        // were given, which is the ordinary reason to re-sign
+                        // one in the first place.
+                        case -1: ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.45f, 1.0f), "no"); break;
+                        default: ImGui::TextDisabled("-"); break;
+                    }
+                }
                 ImGui::PopID();
             }
         }
@@ -3370,6 +3439,20 @@ static void draw_ps3_section() {
                         g_app.ps3.folder.c_str(), g_app.ps3.version,
                         g_app.ps3.trophy ? ", trophy folder" : "");
 
+    // The save header above already says this for a save opened from the
+    // list. Repeated here only for a target picked by hand, where there is
+    // no header to say it.
+    if (g_app.ps3.account[0] && (!g_app.has_save || g_advanced)) {
+        const int mine = account_verdict(g_app.ps3.account);
+        ImGui::TextDisabled("Signed to account %s", g_app.ps3.account);
+        if (mine) {
+            ImGui::SameLine();
+            ImGui::TextColored(mine > 0 ? ImVec4(0.55f, 0.85f, 0.60f, 1.0f)
+                                        : ImVec4(0.95f, 0.75f, 0.45f, 1.0f), "%s",
+                                                  mine > 0 ? "- yours" : "- not yours");
+        }
+    }
+
     // The secure file ID. Found in the bundled database for a game Apollo
     // knows; otherwise typed. Never guessed: without one, everything here
     // stays disabled rather than handing back noise.
@@ -3473,37 +3556,78 @@ static void draw_ps3_section() {
 // Which console saves are written FOR. A window rather than a modal: somebody
 // checking a value against their console's dumper wants to see the save behind
 // it.
+// Explanatory text under a setting. Dimmed, and WRAPPED to the window rather
+// than hard-wrapped at a column that was chosen for a smaller font.
+static void hint(const char* text) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("%s", text);
+    ImGui::PopStyleColor();
+}
+
 static void draw_settings_window() {
     if (!g_want_settings) return;
 
-    ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 34.0f, 0.0f), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Settings", &g_want_settings, ImGuiWindowFlags_AlwaysAutoResize)) {
+    //
+    // Sized to its own contents, measured rather than guessed.
+    //
+    // AlwaysAutoResize would fit exactly but has no upper bound, and a window
+    // taller than the display puts Save out of reach entirely. A fixed size
+    // has the opposite fault: a line too many and the body scrolls for the
+    // sake of one row. So the body reports what it needed last frame and the
+    // window asks for precisely that, clamped to the screen -- an exact fit
+    // in the ordinary case, and the buttons still pinned when a small display
+    // forces a clamp.
+    //
+    static float body_h = 0.0f;   // what the settings needed, measured below
+
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const ImGuiStyle&    st = ImGui::GetStyle();
+    const float room_w = vp->WorkSize.x - 80.0f;
+    const float room_h = vp->WorkSize.y - 80.0f;
+    const float footer = ImGui::GetFrameHeightWithSpacing()
+                       + ImGui::GetTextLineHeightWithSpacing()
+                       + st.ItemSpacing.y;
+    // Title bar, both window paddings, and a couple of pixels of slack --
+    // being a shade too tall costs a sliver of empty space, where being a
+    // shade too short costs the scrollbar this exists to avoid.
+    const float chrome = ImGui::GetFrameHeight() + st.WindowPadding.y * 2.0f + 4.0f;
+    const float want_h = body_h > 0.0f ? body_h + footer + chrome
+                                       : ImGui::GetFontSize() * 28.0f;
+
+    ImGui::SetNextWindowSizeConstraints(ImVec2(360.0f, 240.0f), ImVec2(room_w, room_h));
+    ImGui::SetNextWindowSize(ImVec2(std::min(ImGui::GetFontSize() * 34.0f, room_w),
+                                    std::min(want_h, room_h)),
+                             ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+                                   vp->WorkPos.y + vp->WorkSize.y * 0.5f),
+                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (!ImGui::Begin("Settings", &g_want_settings)) {
         ImGui::End();
         return;
     }
 
-    ImGui::TextWrapped("Which console Apollo writes saves FOR. Both are optional, "
-                       "and neither changes how a save is READ - only what is "
-                       "written back. Left blank, a save keeps whatever it "
-                       "already says.");
+    // Everything above the action row lives here; the row is drawn after this
+    // child and so is always on screen, whatever happens to the body.
+    ImGui::BeginChild("##setbody", ImVec2(0, -footer));
+
+    hint("Which console Apollo writes saves FOR. Every field is optional, and "
+         "none of them changes how a save is READ - only what is written back. "
+         "Left blank, a save keeps whatever it already says.");
 
     ImGui::SeparatorText("Save data");
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
     const char* ORDERS[] = { "Auto (detect from the patch)", "Big-endian", "Little-endian" };
     bool order_changed = ImGui::Combo("Byte order", &g_settings.byte_order,
                                       ORDERS, IM_ARRAYSIZE(ORDERS));
-    ImGui::TextDisabled("Auto is right for every patch in the database: PS3 saves are");
-    ImGui::TextDisabled("big-endian and everything else Apollo covers is not, and the");
-    ImGui::TextDisabled("database says which a patch is. Force one only for a loose patch");
-    ImGui::TextDisabled("file for a console it does not cover.");
+    hint("Auto is right for every patch in the database. Force one only for a "
+         "loose patch file for a console the database does not cover.");
     if (g_settings.byte_order != BYTE_ORDER_AUTO) {
-        ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f),
-                           "A forced order is remembered across runs, and applies to");
-        ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f),
-                           "every save. The patcher screen says so when it disagrees with");
-        ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f),
-                           "the patch you have open.");
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.65f, 0.35f, 1.0f));
+        ImGui::TextWrapped("Remembered across runs and applied to every save. The "
+                           "patcher screen says so when it disagrees with the patch "
+                           "you have open.");
+        ImGui::PopStyleColor();
     }
 
     ImGui::SeparatorText("PSP");
@@ -3512,10 +3636,10 @@ static void draw_settings_window() {
     changed |= ImGui::InputText("Fuse ID", g_settings.fuse_hex, sizeof g_settings.fuse_hex,
                                     ImGuiInputTextFlags_CharsHexadecimal |
                                     ImGuiInputTextFlags_CharsUppercase);
-    ImGui::TextDisabled("16 hex digits. Savedata modes 4 and 6 derive two PARAM.SFO");
-    ImGui::TextDisabled("hashes from the console's own fuse. A PSP loads a save whose");
-    ImGui::TextDisabled("values differ, so this only matters for reproducing one");
-    ImGui::TextDisabled("console's output byte for byte. Blank = FFFFFFFFFFFFFFFF.");
+    hint("16 hex digits. Two PARAM.SFO hashes are derived from the console's own "
+         "fuse in savedata modes 4 and 6. A PSP loads a save whose values differ, "
+         "so this only matters for reproducing one console's output byte for "
+         "byte. Blank = FFFFFFFFFFFFFFFF.");
 
     ImGui::SeparatorText("PS3");
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
@@ -3532,19 +3656,12 @@ static void draw_settings_window() {
                                 sizeof g_settings.account_hex,
                                 ImGuiInputTextFlags_CharsHexadecimal);
 
-    ImGui::TextDisabled("Two ways to re-sign a PS3 save, and the account is usually");
-    ImGui::TextDisabled("the one to reach for.");
-    ImGui::Spacing();
-    ImGui::TextDisabled("Account ID: 16 hex digits, your PSN account. It is written");
-    ImGui::TextDisabled("into the save's own PARAM.SFO, so the save loads on ANY PS3");
-    ImGui::TextDisabled("that account has signed in to - not just one machine.");
-    ImGui::Spacing();
-    ImGui::TextDisabled("Console ID (IDPS): 32 hex digits, one machine. Inside");
-    ImGui::TextDisabled("PARAM.PFD, one of PARAM.SFO's four hashes is keyed by it,");
-    ImGui::TextDisabled("and that is what binds a save to that console. The user");
-    ImGui::TextDisabled("number reaches only a trophy folder's hashes.");
-    ImGui::Spacing();
-    ImGui::TextDisabled("Name either and the PS3 section offers the matching action.");
+    hint("Two ways to re-sign a save, and the account is usually the one to "
+         "reach for: 16 hex digits, written into the save's own PARAM.SFO, so it "
+         "loads on ANY PS3 that account has signed in to. The console ID is 32 "
+         "hex digits and binds a save to one machine; the user number reaches "
+         "only a trophy folder's hashes. Name either and the PS3 section offers "
+         "the matching action.");
 
     // The fields are all-or-nothing: a half-typed value is not "no value", it
     // is one that would bind a save to the wrong machine, or the wrong account.
@@ -3563,6 +3680,11 @@ static void draw_settings_window() {
         settings_store();
     }
     if (changed) g_settings.status.clear();
+
+    // What all of the above came to, for the window size next frame.
+    body_h = ImGui::GetCursorPosY();
+
+    ImGui::EndChild();
 
     ImGui::Separator();
     ImGui::BeginDisabled(!ok);
@@ -3674,6 +3796,17 @@ static void draw_save_header() {
     // ICON0.PNG at all is ordinary and says nothing.
     if (!g_icon.tex && !g_icon.error.empty())
         ImGui::TextDisabled("(the icon is %s)", g_icon.error.c_str());
+
+    if (!s.account.empty()) {
+        const int mine = account_verdict(s.account);
+        ImGui::TextDisabled("Signed to account %s", s.account.c_str());
+        if (mine) {
+            ImGui::SameLine();
+            ImGui::TextColored(mine > 0 ? ImVec4(0.55f, 0.85f, 0.60f, 1.0f)
+                                        : ImVec4(0.95f, 0.75f, 0.45f, 1.0f), "%s",
+                                                  mine > 0 ? "- yours" : "- not yours, sign it below");
+        }
+    }
 
     if (s.encrypted)
         ImGui::TextDisabled("The %s encrypts this save; it is unwrapped on the way in "
@@ -4219,6 +4352,18 @@ static void print_open_state() {
     if (g_app.ps3.found)
         printf("  PS3 layer   %s, key %s (%s)\n", g_app.ps3.listed.c_str(),
                g_app.ps3.have_key ? "found" : "MISSING", g_app.ps3.key_note.c_str());
+    // The save's own reading, which the scan takes for every PS3 save. The
+    // ps3_detect copy is a fallback for a target picked by hand, where there
+    // is no scanned save behind it.
+    {
+        const std::string acct = g_app.has_save && !g_app.save.account.empty()
+                               ? g_app.save.account
+                               : std::string(g_app.ps3.account);
+        if (!acct.empty())
+            printf("  account     %s%s\n", acct.c_str(),
+                   account_verdict(acct) > 0 ? "  (yours)"
+                   : account_verdict(acct) < 0 ? "  (not yours)" : "");
+    }
     if (!g_app.psp.found && !g_app.ps3.found)
         printf("  no console encryption layer\n");
 }

@@ -423,6 +423,19 @@ const handlers = {
         }
     },
 
+    /* Which PSN account a PARAM.SFO is currently signed to, as 16 hex digits.
+     * "" when the file carries neither of the two fields that hold it. */
+    async ps3AccountId({ sfo }) {
+        await ready();
+        const bytes = new Uint8Array(sfo);
+        const ptr = alloc(bytes);
+        try {
+            return { ok: true, account: M.UTF8ToString(M._apw_ps3_account_id(ptr, bytes.length)) };
+        } finally {
+            M._free(ptr);
+        }
+    },
+
     /* 32 hex digits the user typed, validated by the same parser the database
      * lookup uses. */
     async ps3KeyFromHex({ hex }) {
