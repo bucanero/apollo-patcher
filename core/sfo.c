@@ -155,3 +155,48 @@ int asfo_u32(const uint8_t *sfo, size_t sfo_len, const char *key, uint32_t *out)
         *out = le32(sfo + off);
     return ASFO_OK;
 }
+
+static uint64_t le64(const uint8_t *p)
+{
+    return (uint64_t)le32(p) | ((uint64_t)le32(p + 4) << 32);
+}
+
+int asfo_account_id(const uint8_t *sfo, size_t sfo_len, uint64_t *out)
+{
+    size_t   off;
+    uint32_t used;
+    unsigned fmt;
+    int      rc = asfo_find(sfo, sfo_len, "ACCOUNT_ID", &off, &used, NULL, &fmt);
+
+    if (rc != ASFO_OK)
+        return rc;
+    /* Both checks matter: a PS3's ACCOUNT_ID is also ASFO_FMT_BIN, and it is
+       the length that tells the two apart. */
+    if (fmt != ASFO_FMT_BIN || used != ASFO_ACCT_BIN_LEN)
+        return ASFO_ERR_FORMAT;
+    if (out)
+        *out = le64(sfo + off);
+    return ASFO_OK;
+}
+
+int asfo_set_account_id(uint8_t *sfo, size_t sfo_len, uint64_t id)
+{
+    size_t   off;
+    uint32_t used;
+    unsigned fmt;
+    int      rc;
+    int      i;
+
+    if (!id)
+        return ASFO_ERR_SPACE;
+
+    rc = asfo_find(sfo, sfo_len, "ACCOUNT_ID", &off, &used, NULL, &fmt);
+    if (rc != ASFO_OK)
+        return rc;
+    if (fmt != ASFO_FMT_BIN || used != ASFO_ACCT_BIN_LEN)
+        return ASFO_ERR_FORMAT;
+
+    for (i = 0; i < ASFO_ACCT_BIN_LEN; i++)
+        sfo[off + i] = (uint8_t)(id >> (8 * i));
+    return ASFO_OK;
+}

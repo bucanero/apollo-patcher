@@ -363,6 +363,93 @@ static void check_bounds(void)
     }
 }
 
+/*
+ * ACCOUNT_ID, the PS4/Vita way: eight raw bytes, little-endian.
+ *
+ * The interesting case is the PS3, whose ACCOUNT_ID is the same key with the
+ * same ASFO_FMT_BIN format and a completely different meaning -- sixteen
+ * bytes of ASCII hex. Only the length tells them apart, so both directions
+ * are checked against a PS3 file as well as a PS4 one.
+ */
+static void check_account_id(void)
+{
+    uint8_t  buf[4096], before[4096];
+    uint64_t got = 0xDEADBEEF;
+    size_t   len, off;
+    uint32_t used;
+
+    printf("\nACCOUNT_ID (PS4/Vita: 8 raw bytes, little-endian)\n");
+
+    /* Read, from a file that has one. The fixture stores zeros. */
+    len = ps4_sfo(buf, sizeof buf);
+    CHECK("PS4 save: read succeeds", asfo_account_id(buf, len, &got) == ASFO_OK);
+    CHECK("PS4 save: an unset account reads as zero", got == 0);
+
+    len = psv_sfo(buf, sizeof buf, 1);
+    CHECK("Vita save: read succeeds", asfo_account_id(buf, len, NULL) == ASFO_OK);
+
+    /* Write, then read back. */
+    len = ps4_sfo(buf, sizeof buf);
+    CHECK("assigning an account succeeds",
+          asfo_set_account_id(buf, len, 0x135CD5AC1D86F213ull) == ASFO_OK);
+    CHECK("...and reads back the same value",
+          asfo_account_id(buf, len, &got) == ASFO_OK && got == 0x135CD5AC1D86F213ull);
+
+    /* The byte order is the one apollo-ps4 and apollo-vita write: a plain
+       memcpy of the u64, so the low byte lands first. Spelled out rather than
+       round-tripped, because a reader and writer that agreed with each other
+       and not with the console would pass a round-trip. */
+    CHECK("stored little-endian, low byte first",
+          asfo_find(buf, len, "ACCOUNT_ID", &off, &used, NULL, NULL) == ASFO_OK &&
+          used == 8 &&
+          buf[off + 0] == 0x13 && buf[off + 1] == 0xF2 &&
+          buf[off + 2] == 0x86 && buf[off + 3] == 0x1D &&
+          buf[off + 4] == 0xAC && buf[off + 5] == 0xD5 &&
+          buf[off + 6] == 0x5C && buf[off + 7] == 0x13);
+
+    /* Zero is refused: it would take the owner away rather than set one. */
+    memcpy(before, buf, len);
+    CHECK("assigning zero is refused", asfo_set_account_id(buf, len, 0) == ASFO_ERR_SPACE);
+    CHECK("...and the file is untouched", memcmp(before, buf, len) == 0);
+
+    /* A PS3 file: same key, sixteen ASCII bytes, must not be read as a number
+       nor overwritten with one. */
+    len = ps3_sfo(buf, sizeof buf);
+    memcpy(before, buf, len);
+    got = 0xDEADBEEF;
+    CHECK("PS3 save: 16-byte ACCOUNT_ID is not read as a number",
+          asfo_account_id(buf, len, &got) == ASFO_ERR_FORMAT);
+    CHECK("...and the out-parameter is left alone", got == 0xDEADBEEF);
+    CHECK("PS3 save: assigning is refused",
+          asfo_set_account_id(buf, len, 0x1122334455667788ull) == ASFO_ERR_FORMAT);
+    CHECK("...and the file is untouched", memcmp(before, buf, len) == 0);
+
+    /* A PSP save has no such key at all -- neither does a game's own SFO. */
+    len = psp_sfo(buf, sizeof buf);
+    CHECK("PSP save: reported missing, not malformed",
+          asfo_account_id(buf, len, NULL) == ASFO_ERR_MISSING);
+    CHECK("PSP save: assigning is reported missing",
+          asfo_set_account_id(buf, len, 0x1122334455667788ull) == ASFO_ERR_MISSING);
+
+    /*
+     * Truncation. Cutting the file in half is not the test it looks like:
+     * ACCOUNT_ID is the first value in the data table, so half a file still
+     * holds all eight bytes and reading them is the right answer. The bounds
+     * that matter are the VALUE's, so the cut goes through the middle of it.
+     */
+    len = ps4_sfo(buf, sizeof buf);
+    CHECK("the value can be located at all",
+          asfo_find(buf, len, "ACCOUNT_ID", &off, NULL, NULL, NULL) == ASFO_OK);
+    memcpy(before, buf, len);
+    CHECK("a value cut short is not read",
+          asfo_account_id(buf, off + 4, NULL) != ASFO_OK);
+    CHECK("a value cut short is not written",
+          asfo_set_account_id(buf, off + 4, 0x1122334455667788ull) != ASFO_OK);
+    CHECK("...and nothing was written before it gave up", memcmp(before, buf, len) == 0);
+    CHECK("a file that is not an SFO at all is rejected",
+          asfo_account_id((const uint8_t *)"not an sfo", 10, NULL) == ASFO_ERR_FORMAT);
+}
+
 static void check_identify(void)
 {
     uint8_t      sfo[8192];
@@ -806,6 +893,21 @@ static void print_info(const char *path, const asave_info_t *info)
            path);
 }
 
+/* --accounts: print the account rather than the name for each save found, so
+ * a whole folder of real ones can be diffed against an independent reader. */
+static int g_show_accounts;
+
+/* "-" covers both "no such key" and "the key is the PS3's sixteen-byte one". */
+static void print_account(const char *path, const uint8_t *sfo, size_t len)
+{
+    uint64_t id;
+
+    if (asfo_account_id(sfo, len, &id) == ASFO_OK)
+        printf("  %016llX  %s\n", (unsigned long long)id, path);
+    else
+        printf("  %-16s  %s\n", "-", path);
+}
+
 static int run_one(const char *where, const char *path)
 {
     asave_where_t at = strcmp(where, "sce") == 0 ? ASAVE_AT_SCE : ASAVE_AT_ROOT;
@@ -851,14 +953,16 @@ static int walk(const char *root, int depth, int *found)
         snprintf(path, sizeof path, "%s/sce_sys/param.sfo", root);
         sfo = slurp(path, &len);
         if (sfo && asave_identify(sfo, len, ASAVE_AT_SCE, 0, &info) == ASAVE_OK) {
-            print_info(root, &info);
+            if (g_show_accounts) print_account(root, sfo, len);
+            else                 print_info(root, &info);
             (*found)++;
             free(sfo);
             closedir(d);
             return 1;
         }
     } else if (asave_identify(sfo, len, ASAVE_AT_ROOT, 0, &info) == ASAVE_OK) {
-        print_info(root, &info);
+        if (g_show_accounts) print_account(root, sfo, len);
+        else                 print_info(root, &info);
         (*found)++;
         free(sfo);
         closedir(d);
@@ -926,10 +1030,16 @@ int main(int argc, char **argv)
     if (argc > 2 && strcmp(argv[1], "--scan") == 0)
         return run_scan(argv[2]);
 
+    if (argc > 2 && strcmp(argv[1], "--accounts") == 0) {
+        g_show_accounts = 1;
+        return run_scan(argv[2]);
+    }
+
     printf("PARAM.SFO reader and save identification\n");
 
     check_reader();
     check_bounds();
+    check_account_id();
     check_identify();
     check_title_ids();
     check_title_db();

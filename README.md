@@ -118,7 +118,8 @@ core/     apollo_ctrl.[ch] — stdio-free engine facade, shared by both front-en
                              (incl. the PS3 big-endian guess both apply)
           patchdb.[ch]     — reads the bundled patch database (apollo-patches.zip)
           sfo.[ch]         — the PARAM.SFO container, which every console since
-                             the PSP writes identically; one parser for all
+                             the PSP writes identically; one parser for all,
+                             and the PS4/Vita account ID read and assigned
           saveinfo.[ch]    — ...and which console wrote a given one, for which
                              game. What lets the desktop app be pointed at a
                              folder of saves and produce a list, including the

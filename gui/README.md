@@ -685,9 +685,10 @@ leaves a save that will not load at all.
 fails, the save is one **Resign PARAM.PFD** away from correct rather than
 silently mismatched, and the log says so.
 
-**Which account a save is signed to** is read during the scan, for every PS3
-save, and shown in three places: an **Owner** column in the save list, the
-hover panel, and the patcher screen's save header. The column appears only once
+**Which account a save is signed to** is read during the scan, for every save
+on a console that has the concept, and shown in three places: an **Owner**
+column in the save list, the hover panel, and the patcher screen's save
+header. The column appears only once
 an account is named in Settings — which is exactly when the question has an
 answer worth a column.
 
@@ -698,20 +699,87 @@ drift apart. Marking only the matches keeps the column scannable: what the eye
 runs down it for is the saves that **are** yours, and a word in every row would
 bury those among the rest. Whose a save is instead — and whether it names an
 account at all — is in the hover panel, which reads *"Signed to account … —
-yours"* or *"— not yours, sign it below"*.
+yours"* or *"— not yours"*.
 
 It is read during the scan rather than when a save is opened because that is
 when the question gets asked: *which of these are mine?* Reading it at open
 time would have missed every save whose game encrypts nothing, since the PS3
 section that would have shown it is hidden for those.
 
-PS3 only. A PS4 save has an `ACCOUNT_ID` too, but as eight raw bytes rather
-than sixteen ASCII digits, and its `PARAMS` blob holds something else at the
-offset this reads — so asking would not fail, it would answer with rubbish.
+`--scan` and `--open` report it too, as `account: … (yours)`. Getting that
+working turned up a separate bug: both modes returned from the argument loop
+**before** `settings_load()` ran, so they answered every question against a
+blank configuration — no account, so never "yours", and no console ID either,
+so the console layer looked unavailable when it was configured. A file named
+on the command line or handed over by Finder is opened in that same loop, so
+it had the same problem, and the same save opened a second later through the
+browser would behave differently. Settings are now loaded before the loop.
 
-The desktop updates the line after signing, because the files really are on
-disk by then; the web panel deliberately does not, since there the bytes are
-only offered for download and the save has not changed until you save them.
+#### The same number, written two ways
+
+The PSN account ID is one 64-bit number and it is the same number on every
+console that carries it, which is why **one** field in Settings serves all of
+them. What differs is how a save writes it down:
+
+| | key | stored as | read by |
+|---|---|---|---|
+| **PS3** | `ACCOUNT_ID`, and again inside `PARAMS` at `+0x30` | **16 bytes** of ASCII hex | `apfd_sfo_account_id()` |
+| **PS4** | `ACCOUNT_ID` in `sce_sys/param.sfo` | **8 raw bytes**, little-endian | `asfo_account_id()` |
+| **Vita** | the same | the same | the same |
+| **PSP** | — | no account in `PARAM.SFO` | never asked |
+| **PS1, PS2** | — | no such concept | never asked |
+
+The trap is that a PS3 and a PS4 use the **same key with the same binary
+format code** and mean entirely different things by it. Only the length tells
+them apart, so each reader checks it and returns an error on the other's file
+rather than reading a number that is not there — `asfo_account_id()` on a PS3
+save gives `ASFO_ERR_FORMAT`, not a plausible-looking 64 bits of ASCII. Both
+directions are covered in `test_save.c`.
+
+An `ACCOUNT_ID` of **zero** is left as "no account" rather than reported as an
+owner. It is what a decrypted or shared save usually carries — 28 of the 49
+real PS4 and Vita saves to hand — and treating it as an owner would mark every
+one of them as somebody else's.
+
+Measured against an independent reader over 230 real `PARAM.SFO` files: every
+value agrees.
+
+#### Assigning one
+
+**PS3** goes through `ps3_account_resign()`, which must also rewrite
+`PARAM.PFD` so its hash of `PARAM.SFO` still matches — see above for why that
+is one action and not two buttons.
+
+**PS4 and Vita** go through `sfo_account_resign()`, which is very much
+simpler: these are decrypted saves with the console's own layer already off,
+so there is no signature to keep in step. `asfo_set_account_id()` rewrites the
+value at its own eight bytes, so the file neither grows nor moves. Verified on
+real saves: the file stays 2,728 bytes and **exactly eight contiguous bytes
+change**, the `ACCOUNT_ID` and nothing else.
+
+That is also why there is no `.bak` for it — an eight-byte overwrite at a
+known offset is undone by signing the save back, and a stray `param.sfo.bak`
+inside `sce_sys` is worse than the thing it guards against.
+
+The button lives in a different place per console, and deliberately: a PS3
+save has a whole section below the header for its encryption layer, and the
+button belongs there with the rest of it. A PS4 or Vita save has no such
+section, because nothing about it is encrypted, so its one button sits in the
+header beside the account line.
+
+Re-signing updates **both** copies of the save — the open one and the list's,
+which are separate because a rescan re-sorts the list and a reference into it
+would dangle. `note_account_change()` does that, so the Owner column ticks at
+once instead of waiting for a rescan.
+
+The desktop updates the account line after signing, because the files really
+are on disk by then. The web front-end's PS3 panel deliberately does not:
+there the bytes are only offered for download, and the save has not changed
+until you save them.
+
+That panel is the whole of the web front-end's involvement. It handles one
+file at a time and only for PSP and PS3 — the two consoles with an encryption
+layer worth a panel — so there is no PS4 or Vita side of it to extend.
 
 The saves folder is in that file too, though nothing in this dialog sets it:
 choosing one in the save browser writes it there straight away. It is the one

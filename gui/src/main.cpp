@@ -48,6 +48,7 @@
 #include "psp_savedata.h"  // the PSP's own savedata encryption, below any patch
 #include "pfd_savedata.h"  // ...and the PS3's, which works the same way
 #include "saveinfo.h"     // which console wrote a PARAM.SFO, and for which game
+#include "sfo.h"         // ...and reading/assigning the PS4/Vita account in one
 #include "png.h"          // ...and the ICON0.PNG beside it
 #include "kirk_engine.h"   // KIRK_HOST_FUSE_ID, the Fuse ID default
 #ifdef __APPLE__
@@ -121,6 +122,7 @@ struct SaveEntry {
     std::string detail;      // ...and the slot: "AUTOSAVE", "Slot 1"
     std::string title_id;
     const char* platform = "?";
+    int         platform_id = ASAVE_UNKNOWN;   // ...and the same thing to switch on
     bool        encrypted = false;   // a console layer sits under the patch
     int         patch_index = -1;    // into the database, or -1 for no codes
     std::string patch_name;          // the database's name for the game
@@ -129,10 +131,16 @@ struct SaveEntry {
     int         suggest = -1;        // the one to open, or -1 for no data file
     bool        suggest_listed = false;  // ...and whether the console named it
     std::string icon;                // ICON0.PNG, if the save has one
-    // The PSN account this save is signed to, PS3 only. 16 hex digits, or
-    // empty when the save does not say. Read during the scan because the
-    // PARAM.SFO is open anyway, and because the question it answers -- is
-    // this one mine? -- is asked while looking at the LIST.
+    // The PSN account this save is signed to: PS3, PS4 and Vita, the three
+    // that have the concept. 16 hex digits either way -- the same 64-bit
+    // number, which a PS3 stores as ASCII and a PS4 or Vita as eight raw
+    // bytes. Empty when the save does not say, which covers PSP (no account
+    // in its PARAM.SFO), PS1 and PS2 (no such concept), and a PS4 or Vita
+    // save whose ACCOUNT_ID is zero.
+    //
+    // Read during the scan because the PARAM.SFO is open anyway, and because
+    // the question it answers -- is this one mine? -- is asked while looking
+    // at the LIST.
     std::string account;
     std::string haystack;            // lowercased, for the filter box
 };
@@ -1251,6 +1259,11 @@ static bool ps3_resign() {
 // Re-bind the save to the console named in Settings: rewrite the three
 // PARAM.SFO hashes that name a machine, and resign PARAM.PFD around them.
 //
+// Defined with the save browser, further down: the list keeps its own copy of
+// every save, and the Owner column reads from that one rather than from the
+// save that happens to be open.
+static void note_account_change(const std::string& save_path, const char *account);
+
 // PARAM.SFO is read, not written. Its own account fields are a separate
 // binding, and this does not touch them.
 //
@@ -1336,12 +1349,84 @@ static bool ps3_account_resign() {
     // download, and claiming the save had changed would be a lie until the
     // person saved them.
     snprintf(g_app.ps3.account, sizeof g_app.ps3.account, "%s", g_saved.account_hex);
-    if (g_app.has_save) g_app.save.account = g_saved.account_hex;
+    if (g_app.has_save) {
+        g_app.save.account = g_saved.account_hex;
+        note_account_change(g_app.save.path, g_saved.account_hex);
+    }
 
     g_app.append_log((std::string("PARAM.SFO signed to account ")
                       + g_saved.account_hex
                       + (was[0] ? std::string(" (was ") + was + ")" : std::string())
                       + ", and PARAM.PFD updated to match").c_str());
+    return true;
+}
+
+//
+// The same thing for a PS4 or Vita save, which is very much simpler.
+//
+// There is no PARAM.PFD and no hash to keep in step -- these are decrypted
+// saves with the console's own layer already off -- so this is one value in
+// one file. ACCOUNT_ID is rewritten at its own eight bytes, so the file
+// neither grows nor moves and nothing else in it has to be touched.
+//
+// Which is also why there is no .bak: an eight-byte overwrite at a known
+// offset is undone by signing the save back, and a stray param.sfo.bak inside
+// sce_sys is worse than the thing it guards against.
+//
+static bool sfo_account_resign() {
+    std::vector<unsigned char> sfo;
+
+    if (!g_app.has_save ||
+        (g_app.save.platform_id != ASAVE_PS4 && g_app.save.platform_id != ASAVE_PSV)) {
+        g_app.append_log("[!] Signing this way is for PS4 and Vita saves");
+        return false;
+    }
+    if (strlen(g_saved.account_hex) != APFD_ACCT_ID_LEN) {
+        g_app.append_log("[!] No account ID in Settings, so there is nothing to sign to");
+        return false;
+    }
+
+    // The same 16 hex digits the PS3 writes as text are the PS4's number.
+    const uint64_t want = strtoull(g_saved.account_hex, nullptr, 16);
+    if (!want) {
+        g_app.append_log("[!] An account ID of zero would take the save's owner away "
+                         "rather than set one");
+        return false;
+    }
+
+    const std::string path = (fs::path(g_app.save.path) / "sce_sys" / "param.sfo").string();
+    if (!read_all(path, sfo)) {
+        g_app.append_log(("[!] Could not read " + path).c_str());
+        return false;
+    }
+
+    uint64_t was = 0;
+    const bool had = asfo_account_id(sfo.data(), sfo.size(), &was) == ASFO_OK;
+
+    int rc = asfo_set_account_id(sfo.data(), sfo.size(), want);
+    if (rc != ASFO_OK) {
+        g_app.append_log(rc == ASFO_ERR_MISSING
+            ? "[!] This save's param.sfo carries no ACCOUNT_ID to assign"
+            : "[!] This save's ACCOUNT_ID is not the eight-byte kind a PS4 or Vita writes");
+        return false;
+    }
+    if (!write_all(path, sfo.data(), sfo.size())) {
+        g_app.append_log(("[!] Could not write " + path).c_str());
+        return false;
+    }
+
+    char now[17];
+    snprintf(now, sizeof now, "%016llx", (unsigned long long)want);
+    g_app.save.account = now;
+    note_account_change(g_app.save.path, now);
+
+    char msg[256];
+    if (had && was)
+        snprintf(msg, sizeof msg, "param.sfo signed to account %s (was %016llx)",
+                 now, (unsigned long long)was);
+    else
+        snprintf(msg, sizeof msg, "param.sfo signed to account %s (it named none before)", now);
+    g_app.append_log(msg);
     return true;
 }
 
@@ -1719,6 +1804,20 @@ struct SaveBrowser {
 };
 static SaveBrowser g_sb;
 
+/*
+ * A save was just re-signed, so the row in the list has to agree.
+ *
+ * The open save is a COPY of the list's entry -- a rescan re-sorts the list,
+ * so holding a reference would dangle -- which means writing one of the two
+ * leaves the other stale, and the Owner column would go on reporting the old
+ * owner until the next rescan.
+ */
+static void note_account_change(const std::string& save_path, const char *account)
+{
+    for (SaveEntry& e : g_sb.saves)
+        if (e.path == save_path) { e.account = account; return; }
+}
+
 // How deep to go looking, and how much to look at. A PS3's savedata sits five
 // levels down (dev_hdd0/home/00000001/savedata/<save>), so eight is generous;
 // the directory cap is only there so that pointing this at a whole disk stops
@@ -1855,7 +1954,8 @@ static bool examine(const fs::path& dir, SaveEntry& out) {
     out.name      = info.name;
     out.detail    = info.detail;
     out.title_id  = info.title_id;
-    out.platform  = asave_platform_name(info.platform);
+    out.platform    = asave_platform_name(info.platform);
+    out.platform_id = info.platform;
     out.encrypted = info.encrypted != 0;
 
     collect_files(dir, dir, 2, out.files);
@@ -1863,14 +1963,33 @@ static bool examine(const fs::path& dir, SaveEntry& out) {
     out.suggest = suggest_file(out, sfo, pfd);
     out.icon    = find_icon(dir);
 
-    // PS3 only. A PS4 save has an ACCOUNT_ID too, but as eight raw bytes
-    // rather than sixteen ASCII digits, and its PARAMS blob holds something
-    // else entirely at the offset this reads -- so asking would not fail, it
-    // would answer with rubbish.
+    // Which PSN account the save is signed to. The same 64-bit number on
+    // every console that has the concept, written two different ways:
+    //
+    //   PS3        ACCOUNT_ID as SIXTEEN bytes of ASCII hex, and again inside
+    //              the PARAMS blob -- apfd_sfo_account_id() reads both.
+    //   PS4, Vita  ACCOUNT_ID as EIGHT raw bytes, little-endian.
+    //
+    // Only the length tells the two apart, so each reader checks it and
+    // refuses the other's file rather than reading a number that is not there.
+    //
+    // PSP has no account in its PARAM.SFO, and PS1 and PS2 have no such
+    // concept at all, so those are simply never asked.
     if (info.platform == ASAVE_PS3) {
         char id[APFD_ACCT_ID_LEN + 1] = "";
         if (apfd_sfo_account_id(sfo.data(), sfo.size(), id, sizeof id) == APFD_OK)
             out.account = id;
+    } else if (info.platform == ASAVE_PS4 || info.platform == ASAVE_PSV) {
+        uint64_t id = 0;
+        // Zero is left as "no account". It is what a decrypted or shared save
+        // usually carries -- 28 of the 49 real PS4/Vita saves to hand -- and
+        // calling that an owner would mark every one of them as somebody
+        // else's.
+        if (asfo_account_id(sfo.data(), sfo.size(), &id) == ASFO_OK && id) {
+            char hex[17];
+            snprintf(hex, sizeof hex, "%016llx", (unsigned long long)id);
+            out.account = hex;
+        }
     }
     return true;
 }
@@ -3916,14 +4035,36 @@ static void draw_save_header() {
     if (!g_icon.tex && !g_icon.error.empty())
         ImGui::TextDisabled("(the icon is %s)", g_icon.error.c_str());
 
-    if (!s.account.empty()) {
+    // Where signing happens differs by console: a PS3 save has a whole
+    // section below for its encryption layer and the button belongs there
+    // with the rest of it, while a PS4 or Vita save has no such section --
+    // nothing is encrypted -- so its one button belongs here.
+    const bool sfo_account = (s.platform_id == ASAVE_PS4 || s.platform_id == ASAVE_PSV);
+    const bool know_account = strlen(g_saved.account_hex) == APFD_ACCT_ID_LEN;
+
+    if (!s.account.empty() || (sfo_account && know_account)) {
         const int mine = account_verdict(s.account);
-        ImGui::TextDisabled("Signed to account %s", s.account.c_str());
+        if (s.account.empty())
+            ImGui::TextDisabled("This save names no account");
+        else
+            ImGui::TextDisabled("Signed to account %s", s.account.c_str());
         if (mine) {
             ImGui::SameLine();
             ImGui::TextColored(mine > 0 ? ImVec4(0.55f, 0.85f, 0.60f, 1.0f)
                                         : ImVec4(0.95f, 0.75f, 0.45f, 1.0f), "%s",
-                                                  mine > 0 ? "- yours" : "- not yours, sign it below");
+                               mine > 0 ? "- yours"
+                                        : (sfo_account ? "- not yours"
+                                                       : "- not yours, sign it below"));
+        }
+        if (sfo_account && know_account && mine <= 0) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Sign to your account"))
+                { if (!sfo_account_resign()) g_app.show_log = true; }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Write account %s into this save's sce_sys/param.sfo,\n"
+                                  "so the console treats it as yours. Nothing else in the\n"
+                                  "save changes - there is no signature to keep in step.",
+                                  g_saved.account_hex);
         }
     }
 
@@ -4599,6 +4740,11 @@ static int run_scan(const char* root, const std::vector<int>& picks) {
         if (!s.icon.empty())
             printf("          icon: %s\n",
                    s.icon.c_str() + (s.icon.size() > s.path.size() ? s.path.size() + 1 : 0));
+        if (!s.account.empty()) {
+            const int mine = account_verdict(s.account);
+            printf("          account: %s%s\n", s.account.c_str(),
+                   mine > 0 ? "  (yours)" : mine < 0 ? "  (not yours)" : "");
+        }
     }
     printf("\n%s\n", g_sb.note.c_str());
 
@@ -4687,6 +4833,17 @@ int main(int argc, char** argv) {
     // and the log, which the panel picks up when it first draws.
     //
     // In the order given, so an explicit patch beats the one a save's title ID
+    // Settings first, because everything below this line depends on them: the
+    // diagnostics report whether a save is yours and whether its console
+    // layer can be opened, and a file named on the command line or handed
+    // over by Finder is opened right here. Loading them afterwards -- which
+    // is what used to happen -- meant all of that ran against a blank
+    // configuration and answered differently from the same save opened a
+    // second later through the browser.
+    //
+    // Nothing in here touches GLFW or ImGui, so it is safe this early.
+    settings_load();
+
     // would have auto-loaded, whichever way round they are written.
     for (int i = 1; i < argc; i++) {
         if (!argv[i] || !*argv[i]) continue;
@@ -4796,11 +4953,6 @@ int main(int argc, char** argv) {
     apply_style();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL2_Init();
-
-    // Which console saves are written FOR, from the user's config directory.
-    // Applied before anything can use it -- a save patched in the first second
-    // has to be written for the same console as one patched in the tenth.
-    settings_load();
 
     // The folder from last time, scanned in the background while the window
     // comes up. Costs nothing when there is none, and means the saves screen

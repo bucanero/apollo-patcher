@@ -83,6 +83,35 @@ int asfo_blob(const uint8_t *sfo, size_t sfo_len, const char *key,
 /* Read a ASFO_FMT_U32 value. ASFO_ERR_FORMAT if it is not four bytes. */
 int asfo_u32(const uint8_t *sfo, size_t sfo_len, const char *key, uint32_t *out);
 
+/*
+ * The PSN account a save is signed to, as PS4 and Vita write it: ACCOUNT_ID,
+ * eight raw bytes, little-endian, the same 64-bit number the console reports
+ * for the signed-in user.
+ *
+ * A PS3 writes the same key as SIXTEEN bytes of ASCII hex instead, so the
+ * length is checked and a PS3 save comes back ASFO_ERR_FORMAT rather than
+ * being read as a number it does not hold -- see apfd_sfo_account_id() for
+ * that side. ASFO_ERR_MISSING when the key is absent, which is what a PSP
+ * save and a PS4 application's own param.sfo both give.
+ *
+ * Zero is a real stored value and is returned as zero. It means nobody: a
+ * decrypted or shared save usually carries it, and the writer refuses it for
+ * the same reason.
+ */
+#define ASFO_ACCT_BIN_LEN 8
+
+int asfo_account_id(const uint8_t *sfo, size_t sfo_len, uint64_t *out);
+
+/*
+ * Assign one, in place. The value is rewritten at its own length, so the file
+ * neither grows nor moves and every other offset in it stays good.
+ *
+ * ASFO_ERR_SPACE for an id of zero: writing it would strip the save of its
+ * owner rather than give it one, and apollo-ps4 and apollo-vita both refuse
+ * it too.
+ */
+int asfo_set_account_id(uint8_t *sfo, size_t sfo_len, uint64_t id);
+
 #ifdef __cplusplus
 }
 #endif
