@@ -582,11 +582,36 @@ patch loaded — the same thing as picking it from the list. A folder that is no
 a save says so rather than becoming a target nothing can read, and neither does
 a path that is not there.
 
-Files can also be **dropped on the window**, which takes the same route. Note
-that on macOS a `.app` launched from Finder is handed documents through Apple
-Events rather than `argv`, so dragging onto the Dock icon is not the same
-gesture and is not wired up — the command line covers a terminal, a script and
-a Windows/Linux file association, and the drop handler covers the window.
+Files can also be **dropped on the window**, which takes the same route.
+
+### From Finder, on macOS
+
+Double-clicking a `.savepatch`, dropping a save on the **Dock icon**, and
+**Open With** are all the same mechanism — `kAEOpenDocuments` — and all three
+work. A `.app` launched from Finder is handed its documents through Apple
+Events rather than `argv`, so this takes two halves, and neither is any use
+alone:
+
+- **`Info.plist.in`** claims the types. macOS sends these events only for
+  types an app has claimed, so without this the Dock icon would not even
+  highlight when a save was dragged over it. `.savepatch` is claimed at
+  `Owner` rank, since nothing else opens those; `public.data` and
+  `public.folder` — a save is any file, or a folder — at **`Alternate`**,
+  deliberately, so the app turns up in *Open With* and accepts Dock drops
+  without volunteering to become the default application for every file on
+  the machine.
+- **`src/macos_open_docs.mm`** receives them. GLFW installs its own
+  `NSApplication` delegate and does not implement `application:openFiles:`,
+  so rather than subclass or swizzle it this registers with the Apple Event
+  manager directly, which GLFW leaves alone. It is registered before the
+  window exists, because a double-click launch sends the event almost
+  immediately.
+
+Each path goes to the same `open_path()` the drop handler and the command line
+use, so a save folder opened from Finder arrives identified — named, iconned,
+files listed, codes loaded — exactly as one picked from the list.
+
+Windows and Linux file associations go through `argv`, which already worked.
 
 ## Viewing and editing data
 
@@ -677,8 +702,9 @@ a Windows/Linux file association, and the drop handler covers the window.
 - **The patch finds itself**: choosing a target looks its title ID up in the
   bundled database and loads that game's patch, or offers it when one is
   already open.
-- **Files on the command line and dropped on the window**, including a save
-  folder, which is identified exactly as one picked from the list. See
+- **Files on the command line, dropped on the window, and opened from Finder**
+  (double-click, Dock icon, *Open With* — macOS), including a save folder,
+  which is identified exactly as one picked from the list. See
   [Opening things](#opening-things).
 - **Save icons**, decoded by `core/png.c` and shown beside the game's name.
   See [The icon](#the-icon).

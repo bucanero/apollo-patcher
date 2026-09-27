@@ -157,8 +157,32 @@ if(APPLE)
     target_sources(apollo_patcher_gui PRIVATE ${APP_ICNS})
     set_source_files_properties(${APP_ICNS} PROPERTIES
         MACOSX_PACKAGE_LOCATION Resources)
+
+    # Files opened from Finder. A .app is handed its documents through Apple
+    # Events rather than argv, so this is what makes double-clicking a save,
+    # dropping one on the Dock icon and "Open With" do anything at all. The
+    # Info.plist template beside it is the other half: macOS sends those
+    # events only for the types an app has claimed.
+    #
+    # Compiled as Objective-C++ by a per-source flag, NOT by
+    # enable_language(OBJCXX). Enabling the language is project-wide, and with
+    # OBJC left off CMake then picks OBJCXX for every .m it can see -- which
+    # means GLFW's Cocoa backend, C code that has no business being compiled
+    # as C++. This keeps the change to the one file that needs it.
+    #
+    target_sources(apollo_patcher_gui PRIVATE src/macos_open_docs.mm)
+    set_source_files_properties(src/macos_open_docs.mm PROPERTIES
+        LANGUAGE CXX
+        COMPILE_OPTIONS "-x;objective-c++")
+
     set_target_properties(apollo_patcher_gui PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_BUNDLE_NAME "Apollo Save Patcher"
-        MACOSX_BUNDLE_ICON_FILE icon.icns)
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.bucanero.apollo-patcher"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+        MACOSX_BUNDLE_BUNDLE_VERSION "1.0"
+        MACOSX_BUNDLE_ICON_FILE icon.icns
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in")
+
+    target_link_libraries(apollo_patcher_gui PRIVATE "-framework AppKit")
 endif()

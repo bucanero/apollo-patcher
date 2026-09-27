@@ -49,6 +49,9 @@
 #include "saveinfo.h"     // which console wrote a PARAM.SFO, and for which game
 #include "png.h"          // ...and the ICON0.PNG beside it
 #include "kirk_engine.h"   // KIRK_HOST_FUSE_ID, the Fuse ID default
+#ifdef __APPLE__
+#include "macos_open_docs.h"   // files Finder asks the app to open
+#endif
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -3982,10 +3985,10 @@ static void fatal(const std::string& msg) {
 // Files dragged onto the window. GLFW delivers these on the main thread from
 // glfwPollEvents(), so touching app state here is safe.
 //
-// This is what "drag the app a file" means on macOS: a .app launched from
-// Finder is handed documents through Apple Events, not argv, so the command
-// line below covers a terminal, a script and a Windows/Linux file association,
-// and this covers the gesture people actually reach for.
+// One of three routes into open_path(), which is the point: the command line
+// covers a terminal, a script and a Windows/Linux file association, this
+// covers the window, and macos_open_docs.mm covers Finder on a Mac -- where a
+// .app is handed its documents through Apple Events rather than argv.
 static void drop_cb(GLFWwindow*, int count, const char** paths) {
     for (int i = 0; i < count; i++)
         if (paths[i] && *paths[i]) open_path(paths[i]);
@@ -4214,8 +4217,34 @@ int main(int argc, char** argv) {
     _putenv_s("GALLIUM_DRIVER", "llvmpipe");
 #endif
 
+#ifdef __APPLE__
+    // BEFORE glfwInit, which calls [NSApp run] itself and so lets AppKit
+    // finish launching -- and finish handling the document a double-click
+    // launched us with. The hook has to exist by then or that first file is
+    // answered with "cannot open files in the ... format" before the app has
+    // drawn a frame. See macos_open_docs.mm.
+    //
+    // open_path is the same entry point the drop callback and the command
+    // line use, so all three behave identically: a save folder arrives
+    // identified, a .savepatch loads, and either way the patcher screen
+    // comes up.
+    const auto macos_open = [](const char* path) {
+        if (path && *path) open_path(path);
+    };
+    const bool macos_hooked = apollo_macos_watch_open_documents(macos_open) != 0;
+#endif
+
     glfwSetErrorCallback(glfw_error_cb);
     if (!glfwInit()) { fatal("Failed to initialize GLFW.\n\n" + g_glfw_error); return 1; }
+
+#ifdef __APPLE__
+    // Again, now that the delegate is a real object: the call above finds the
+    // class by name, and this covers that name ever changing.
+    if (!apollo_macos_watch_open_documents(macos_open) && !macos_hooked)
+        g_app.append_log("[!] Files opened from Finder will not reach the app "
+                         "(the application delegate could not be hooked). "
+                         "Dropping them on the window still works.");
+#endif
     int win_w = 0, win_h = 0;
     default_window_size(&win_w, &win_h);   // needs glfwInit, for the monitor
 
