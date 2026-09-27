@@ -8,7 +8,7 @@ drive the same `libapollo` engine the console apps use.
 
 | Front-end | What it is |
 |-----------|------------|
-| [`gui/`](gui/README.md) | Native desktop app (Dear ImGui + GLFW) for Windows, macOS and Linux — **point it at a folder of saves and pick a game by name**, with the patch database bundled offline |
+| [`gui/`](gui/README.md) | Native desktop app (Dear ImGui + GLFW) for Windows, macOS and Linux — **opens on your saves**: point it at a folder, pick a game by name, patch it. The patch database is bundled offline |
 | [`web/`](web/README.md) | The engine compiled to WebAssembly, running in a browser tab — the patcher, with the patch database searchable in-page and **PSP and PS3 savedata panels** for the consoles' own encryption, plus a **tools page** offering one decrypt / re-encrypt pair per game |
 
 The command-line tools (`patcher`, `dumper`) and the engine itself live in
@@ -236,8 +236,8 @@ cmake --build build -j
 Targets:
 - `apollo_patcher_gui` — the desktop app (macOS: `build/gui/apollo_patcher_gui.app`).
   Takes files on the command line, or dropped on its window: a `.savepatch`, a
-  save, or a PSP or PS3 save folder. `--scan DIR` lists the saves under a
-  folder without opening a window
+  save, or a save folder. `--scan DIR` lists the saves under a folder without
+  opening a window, and `--open PATH` reports where one path would land
 - `apollo_patches_bundle` — `apollo-patches.zip`, the database the app browses
   and the console key databases it needs. Built automatically when an
   `apollo-patches` checkout is present (see below) and copied into the app;

@@ -161,15 +161,38 @@ including the Windows-1252 fallback that 245 of the patch files need. Without it
 the app would have to inflate 2247 entries at startup just to read their second
 line.
 
-## Browsing saves
+## Two screens
 
-**Browse saves...** (Ctrl+B, or File ▸ Browse saves...) is the way in. Point it
-at wherever the saves are — a memory stick, a folder pulled off a PS3's hard
-drive, a USB stick of PS4 exports — and it finds every save underneath and
-lists them by game. Pick one and the target, the game key, the byte order and
-the codes all follow. The alternative, *Find a game*, starts from the patch
-database instead, which is what you want when the save is not on this machine
-yet.
+The app opens on **your saves**, not on a file picker.
+
+| Screen | | |
+|---|---|---|
+| **Saves** | Ctrl+B | The list. Point it at a folder and every save underneath turns up, by game. |
+| **Patcher** | Ctrl+P | One save: its icon, which of its files is the target, the console's encryption, the codes, Apply. |
+
+Picking a save goes to the patcher; **< Saves** comes back. Going back closes
+nothing — the patch stays open, so you can look at the list and return.
+
+There is no third screen for the old file-first flow, because everything after
+*"which file, and which patch"* is the same work: the code list, the option
+dropdowns, Apply, the log, the hex editor. **File ▸ Advanced** is a *door* into
+the patcher screen rather than a room of its own — it swaps the save header for
+**Open .savepatch...** and **Choose target...** so a loose file or a patch of
+your own can be driven by hand. Everything below is identical either way.
+
+A screen swap rather than a pop-up, for a concrete reason: an ImGui modal
+*"blocks every interaction behind the window"*, and the hex editor and the
+per-code editors are windows behind it. As a modal, the patcher would have made
+its own hex editor unreachable.
+
+### Browsing saves
+
+Point it at wherever the saves are — a memory stick, a folder pulled off a PS3's
+hard drive, a USB stick of PS4 exports — and it finds every save underneath and
+lists them by game, slot, console, title ID, and whether the database has codes.
+Pick one and the target, the game key, the byte order and the codes all follow.
+*Find a game* starts from the patch database instead, which is what you want
+when the save is not on this machine yet.
 
 Finding them is the same question on all four consoles and has the same answer:
 **a save is a folder with a `PARAM.SFO` in it**. Where that SFO sits is itself
@@ -244,7 +267,13 @@ along with the file, and that is what the database is asked about.
   and quitting mid-scan cancels rather than waiting for the disk.
 
 The folder is remembered in the settings file and re-scanned in the background
-at startup, so the list is there the next time rather than asking again.
+at startup, so the list is there the next time rather than asking again. With no
+folder set, the saves screen says what to do instead of showing an empty table.
+
+Going back to the list never loses anything, and opening a *different* save is
+the one place work could go — it closes the patch that holds any edited code
+bodies. `apctl_code_is_edited()` makes that detectable, so it is asked rather
+than assumed.
 
 The browser is two panes, and a modal cannot be wider than the window around
 it — ImGui clips it rather than growing the window — so the app's own window
@@ -255,8 +284,9 @@ losing an edge.
 
 ### Which file inside the save
 
-A save is a folder, and a patch addresses one file in it. The right one is
-starred, and for the two encrypted consoles it is not a guess: the console's
+A save is a folder, and a patch addresses one file in it. The **File** dropdown
+on the patcher screen is where that is chosen; the right one is starred, and for
+the two encrypted consoles it is not a guess: the console's
 own metadata says which files it wrapped — `SAVEDATA_FILE_LIST` in a PSP's
 `PARAM.SFO`, the entry table in a PS3's `PARAM.PFD` — and that is the same list
 that answers "which file comes out as garbage if you patch it as-is". PS4 and
@@ -321,13 +351,26 @@ actually hold":
 apollo_patcher_gui --scan /Volumes/PSP
 ```
 
-Add a save's number to have it opened as well, which reports the target, the
-patch, the code count, the byte order and the state of the encryption layer —
-everything the main window would be showing had you clicked it:
+Add a save's number to open it as well — the same call the list makes — which
+reports the save, its files, the target, the patch, the code count, the byte
+order and the state of the encryption layer. What it prints is what the patcher
+screen would be showing had you clicked it:
 
 ```bash
 apollo_patcher_gui --scan /Volumes/PSP 2
 ```
+
+`--open` takes one path the way a **dropped file** does and reports the same,
+which is how that path is tested:
+
+```bash
+apollo_patcher_gui --open /Volumes/PS3/PS3/SAVEDATA/BLUS30917-AUTOSAVE
+```
+
+A dropped save **folder** goes through the browser's own identification, so it
+arrives named, iconned, with its files listed and its codes loaded — the same
+thing as one picked from the list. A loose file has no save behind it, so the
+patcher shows the pickers instead of a save header.
 
 ## PSP and PS3 saves
 
@@ -449,26 +492,26 @@ deliberately off.
 apollo_patcher_gui [FILE...]
 ```
 
-Files on the command line are the other way in, alongside **Browse saves...**
-above. A `.savepatch` is opened as the patch; anything else is opened as the
-save to patch, which pulls in everything that follows from it — the PSP game
-key, and that game's patch from the database. Arguments are taken in the order given, so
-an explicit patch beats the one a save's title ID would have auto-loaded,
-whichever way round they are written. `--help` prints this and exits, and
-`--scan DIR [N]` lists the saves under a folder without opening a window (see
-[Browsing saves](#browsing-saves)).
+Files on the command line are the other way in, alongside the
+[saves screen](#two-screens), and they land on the patcher screen. A
+`.savepatch` is opened as the patch; anything else is opened as the save to
+patch, which pulls in everything that follows — the PSP game key, and that
+game's patch from the database. Arguments are taken in the order given, so an
+explicit patch beats the one a save's title ID would have auto-loaded,
+whichever way round they are written. `--help` prints this and exits;
+`--scan` and `--open` are described [above](#checking-a-folder-from-a-terminal).
 
-**A folder works too**, which is the obvious thing to drag for either console's
-save: its `PARAM.SFO` or `PARAM.PFD` already says which files the console
-encrypted, and the first of those becomes the target. So
+**A folder works too**, which is the obvious thing to drag for a console save:
 
 ```bash
 apollo_patcher_gui /Volumes/PSP/PSP/SAVEDATA/ULUS10391
 ```
 
-opens the save, finds its key, and loads Monster Hunter Freedom Unite's patch —
-from the folder alone, and a PS3 folder takes the same route. A folder that is
-neither says so rather than becoming a target nothing can read.
+It goes through the same identification the save list uses, so it arrives
+**named, iconned, with its files listed** and Monster Hunter Freedom Unite's
+patch loaded — the same thing as picking it from the list, rather than the bare
+target it used to become. A folder that is not a save says so rather than
+becoming a target nothing can read, and neither does a path that is not there.
 
 Files can also be **dropped on the window**, which takes the same route. Note
 that on macOS a `.app` launched from Finder is handed documents through Apple
@@ -558,10 +601,10 @@ a Windows/Linux file association, and the drop handler covers the window.
   naming the console a save is written for. See
   [PSP and PS3 saves](#psp-and-ps3-saves)
   above.
-- **Browse saves**: point the app at a folder and it finds every PSP, PS3, PS4
-  and Vita save under it, lists them by game, and opens the one you pick —
-  target, key, byte order and codes together. See
-  [Browsing saves](#browsing-saves).
+- **Two screens**: the app opens on your saves, not on a file picker. Pick one
+  and the patcher screen has its target, key, byte order and codes ready.
+  **File ▸ Advanced** drives a loose file or your own `.savepatch` by hand.
+  See [Two screens](#two-screens).
 - **The patch finds itself**: choosing a target looks its title ID up in the
   bundled database and loads that game's patch, or offers it when one is
   already open.
