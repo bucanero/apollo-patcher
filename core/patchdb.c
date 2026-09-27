@@ -400,6 +400,11 @@ static int locate(char *out, size_t cap)
  * public entry points
  * ------------------------------------------------------------------------- */
 
+int patchdb_exe_dir(char *out, size_t cap)
+{
+    return exe_dir(out, cap);
+}
+
 patchdb_t *patchdb_open(const char *path)
 {
     g_error = "";

@@ -46,6 +46,16 @@ void        patchdb_close(patchdb_t *db);
 /* Where the open archive was found, for the UI to show. */
 const char *patchdb_path(const patchdb_t *db);
 
+/*
+ * The directory the running executable is in, without a trailing separator.
+ * 1 on success, 0 if the platform will not say.
+ *
+ * Exported because several things ship beside the app -- the patch database
+ * and the desktop font -- and all are found the same way: next to the
+ * executable, or in ../Resources for a macOS .app.
+ */
+int patchdb_exe_dir(char *out, size_t cap);
+
 /* Why the last patchdb call failed (open or extract). Static, never NULL. */
 const char *patchdb_last_error(void);
 

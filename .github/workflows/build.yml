@@ -97,14 +97,59 @@ jobs:
           cp build/gui/apollo_patcher_gui dist/
         fi
 
-    - name: Bundle the patch database
+    # The zip is BUILT BY THE STEP ABOVE, not here.
+    #
+    # apollo-patches is checked out in-tree, which is one of the two layouts
+    # CMakeLists.txt looks in, so `cmake --build` already ran make-bundle.py
+    # and copied the result into the app -- Contents/Resources for the .app,
+    # beside the executable elsewhere. Running the script again here would put
+    # two zips in one run, and the one the facade test reads below would not be
+    # the one the app ships.
+    #
+    # So this collects and CHECKS rather than rebuilds. The check matters: the
+    # CMake side treats a missing patch checkout or interpreter as a warning
+    # and carries on, which is right for somebody building locally and wrong
+    # for a release artifact -- without it the app would ship with an empty
+    # game browser and nothing would have said so.
+    - name: Collect the patch database
       run: |
-        py=$(command -v python3 || command -v python)
-        "$py" tools/make-bundle.py apollo-patches dist/apollo-patches.zip
-        # macOS: also inside the .app, so a dragged-out bundle is self-contained.
-        if [ "${{ matrix.os }}" = "macos-latest" ]; then
-          cp dist/apollo-patches.zip dist/apollo_patcher_gui.app/Contents/Resources/
+        if [ ! -f build/apollo-patches.zip ]; then
+          echo "::error::CMake did not build apollo-patches.zip. Look in the"
+          echo "::error::configure output above for 'apollo-patches not found'"
+          echo "::error::or 'No Python interpreter'."
+          exit 1
         fi
+        cp build/apollo-patches.zip dist/
+
+        # ...and that CMake's copy into the app happened, so a dragged-out
+        # bundle is self-contained. Checked rather than assumed: a regression
+        # in that copy rule would otherwise ship an app with no database.
+        if [ "${{ matrix.os }}" = "macos-latest" ]; then
+          app=dist/apollo_patcher_gui.app/Contents/Resources/apollo-patches.zip
+          if [ ! -f "$app" ]; then
+            echo "::error::the .app has no patch database in Contents/Resources"
+            exit 1
+          fi
+        fi
+
+        # The font, the same way. It is vendored in this repo, so unlike the
+        # patch database there is no configuration in which it is legitimately
+        # absent -- an artifact without it would draw '?' for every trade mark
+        # sign and every Japanese title.
+        if [ "${{ matrix.os }}" = "macos-latest" ]; then
+          font=dist/apollo_patcher_gui.app/Contents/Resources/NotoSansJP-Medium.otf
+          if [ ! -f "$font" ]; then
+            echo "::error::the .app has no font in Contents/Resources"
+            exit 1
+          fi
+        else
+          if [ ! -f build/gui/NotoSansJP-Medium.otf ]; then
+            echo "::error::the build produced no font beside the executable"
+            exit 1
+          fi
+          cp build/gui/NotoSansJP-Medium.otf build/gui/OFL.txt dist/
+        fi
+        ls -l dist/
 
     # Sanity-check the facade against the engine on every build: it lists the
     # codes of a real patch file exactly like the library's own CLI does, and

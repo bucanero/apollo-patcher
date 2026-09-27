@@ -251,27 +251,40 @@
 #PS3	BLES00450	nfs-undercover-decrypter/samples/USR-DATA.enc	nfs-undercover-decrypter/samples/USR-DATA.dec	1
 #PS3	BLUS30248	nfs-undercover-decrypter/samples/USR-DATA.enc	nfs-undercover-decrypter/samples/USR-DATA.dec	1
 #
-# THE CONSOLE'S OWN LAYER (8th column, `psp=<32 hex digits>` or `psp=-`).
+# THE CONSOLE'S OWN LAYER (8th column).
 #
-# A PSP save is wrapped twice: the console encrypts it with a per-title game
-# key, and the game encrypts what is inside that. Every sample below is the
+#   psp=<32 hex>   the PSP game key, from apollo-patches PSP/gamekeys.txt
+#   psp=-          a PSP game the console stores unkeyed
+#   ps3=<32 hex>   the PS3 secure file ID
+#   ps3=db         ...looked up in the real PS3/games.conf by title id and
+#                  file name, so the row also proves that lookup
+#
+# A PSP or PS3 save is wrapped twice: the console encrypts it with a key of its
+# own, and the game encrypts what is inside that. Every sample below is the
 # INNER form, because that is where the reference decrypters start -- so
-# nothing here exercised the outer wrapper, and the tools page's PSP cards now
-# take it off before the patch runs and put it back after.
+# nothing here exercised the outer wrapper, and both consoles' panels now take
+# it off before the patch runs and put it back after.
 #
-# A row carrying `psp=` has this suite wrap the sample as a console would have
-# stored it (a PARAM.SFO fixture plus the real game key), then requires the
-# full two-stage chain to reach the same plaintext a one-stage row reaches --
-# and, on the way back, to reproduce the wrapped bytes exactly. The key is the
-# one from apollo-patches PSP/gamekeys.txt, which is where the page gets it;
-# `-` is for a game the console stores unkeyed.
+# A row carrying one of these has this suite wrap the sample as a console would
+# have stored it (a PARAM.SFO or PARAM.PFD fixture plus the real key), then
+# requires the full two-stage chain to reach the same plaintext a one-stage row
+# reaches -- and, on the way back, to reproduce the wrapped bytes AND the
+# rewritten metadata exactly, from a fresh fixture rather than a carried-over
+# one.
 #
 # What that proves is the COMPOSITION -- order, routing, both directions. It
-# does not re-prove the console layer itself: core/test_psp.c does that against
-# known-answer vectors taken from the unmodified apollo-psp implementation, and
-# against real console-written saves. A row without `psp=` is unaffected and
-# still proves the patch alone, which is also what the page does when no
-# PARAM.SFO is supplied.
+# does not re-prove the console layer itself: core/test_psp.c and
+# core/test_ps3.c do that against known-answer vectors cross-checked with the
+# unmodified upstream implementations, and against real console-written saves.
+# A row without an 8th column is unaffected and still proves the patch alone,
+# which is also what the page does when no metadata file is supplied.
+#
+# FOUR PS3 ROWS CARRY NO `ps3=`, and each is right not to. BCES00509 and
+# BCUS98123 are Uncharted 2 and BLES00269 is [PROTOTYPE]; games.conf files all
+# three as UNPROTECTEDGAME, which means the console encrypts nothing in them --
+# there is no layer to prove. BLUS31460 (Kingdom Hearts: Birth by Sleep) is not
+# in games.conf at all. `ps3=db` FAILS rather than inventing a key in either
+# case, which is why these read as absences rather than as passes.
 #
 # ROUND TRIP. Every decrypt row also re-encrypts what the decrypt produced and
 # requires the original encrypted sample back, byte for byte. Without it the
@@ -439,21 +452,21 @@
 # question unanswered fails too, since the engine would refuse the apply.
 #
 # platform	title_id	encrypted sample	expected plaintext	big_endian	[variant]	[options]
-PS3	BLUS30557	maxpayne3-decrypter/samples/RAGE.SAV.enc	maxpayne3-decrypter/samples/RAGE.SAV.dec	1	0	noroundtrip
-PS3	BLUS31188	diablo3-decrypter/samples/ACCOUNT.DAT.enc	diablo3-decrypter/samples/ACCOUNT.DAT.dec	1
-PS3	BLJM61128	dw8xl-decrypter/samples/APP.BIN	dw8xl-decrypter/samples/APP.BIN.dec	1
-PS3	BLUS30810	silent-hill3-decrypter/samples/SAVEDATA.DAT.enc	silent-hill3-decrypter/samples/SAVEDATA.DAT.dec	1
-PS3	BLES01031	cod-blackops-decrypter/samples/GPAD0_CM.PRF.enc	cod-blackops-decrypter/samples/GPAD0_CM.PRF.dec	1
-PS3	BLES01698	dmc-decrypter/samples/PROFILE.enc	dmc-decrypter/samples/PROFILE.dec	1
-PS3	NPEB02226	re-remaster-decrypter/samples/DATA0.DAT.enc	re-remaster-decrypter/samples/DATA0.DAT.dec	1
-PS3	BLES01807	gta5-decrypter/samples/RAGE.SAV.enc	gta5-decrypter/samples/RAGE.SAV.dec	1
-PS3	BLES02040	re-revelations2-decrypter/samples/DATA0.DAT.enc	re-revelations2-decrypter/samples/DATA0.DAT.dec	1
-PS3	NPUB31594	mgs5-tpp-decrypter/samples/TPP_GAM0.enc	mgs5-tpp-decrypter/samples/TPP_GAM0.dec	1
-PS3	NPEB02140	mgs5-tpp-decrypter/samples/TPP_GAM0.NPEB.enc	mgs5-tpp-decrypter/samples/TPP_GAM0.NPEB.dec	1
-PS3	NPEB01889	mgs5-tpp-decrypter/samples/SAVE0.GZ.NPEB.enc	mgs5-tpp-decrypter/samples/SAVE0.GZ.NPEB.dec	1
-PS3	NPUB31318	mgs5-tpp-decrypter/samples/SAVE1.GZ.NPUB.enc	mgs5-tpp-decrypter/samples/SAVE1.GZ.NPUB.dec	1
-PS3	BLJS10330	berseria-decrypter/samples/SAVE.enc	berseria-decrypter/samples/SAVE.dec	1
-PS3	BLES01623	doa5-decrypter/samples/SAVE_SYS.DAT.PS3.enc	doa5-decrypter/samples/SAVE_SYS.DAT.PS3.dec	1
+PS3	BLUS30557	maxpayne3-decrypter/samples/RAGE.SAV.enc	maxpayne3-decrypter/samples/RAGE.SAV.dec	1	0	noroundtrip	ps3=db
+PS3	BLUS31188	diablo3-decrypter/samples/ACCOUNT.DAT.enc	diablo3-decrypter/samples/ACCOUNT.DAT.dec	1			ps3=db
+PS3	BLJM61128	dw8xl-decrypter/samples/APP.BIN	dw8xl-decrypter/samples/APP.BIN.dec	1			ps3=db
+PS3	BLUS30810	silent-hill3-decrypter/samples/SAVEDATA.DAT.enc	silent-hill3-decrypter/samples/SAVEDATA.DAT.dec	1			ps3=db
+PS3	BLES01031	cod-blackops-decrypter/samples/GPAD0_CM.PRF.enc	cod-blackops-decrypter/samples/GPAD0_CM.PRF.dec	1			ps3=db
+PS3	BLES01698	dmc-decrypter/samples/PROFILE.enc	dmc-decrypter/samples/PROFILE.dec	1			ps3=db
+PS3	NPEB02226	re-remaster-decrypter/samples/DATA0.DAT.enc	re-remaster-decrypter/samples/DATA0.DAT.dec	1			ps3=db
+PS3	BLES01807	gta5-decrypter/samples/RAGE.SAV.enc	gta5-decrypter/samples/RAGE.SAV.dec	1			ps3=db
+PS3	BLES02040	re-revelations2-decrypter/samples/DATA0.DAT.enc	re-revelations2-decrypter/samples/DATA0.DAT.dec	1			ps3=db
+PS3	NPUB31594	mgs5-tpp-decrypter/samples/TPP_GAM0.enc	mgs5-tpp-decrypter/samples/TPP_GAM0.dec	1			ps3=db
+PS3	NPEB02140	mgs5-tpp-decrypter/samples/TPP_GAM0.NPEB.enc	mgs5-tpp-decrypter/samples/TPP_GAM0.NPEB.dec	1			ps3=db
+PS3	NPEB01889	mgs5-tpp-decrypter/samples/SAVE0.GZ.NPEB.enc	mgs5-tpp-decrypter/samples/SAVE0.GZ.NPEB.dec	1			ps3=db
+PS3	NPUB31318	mgs5-tpp-decrypter/samples/SAVE1.GZ.NPUB.enc	mgs5-tpp-decrypter/samples/SAVE1.GZ.NPUB.dec	1			ps3=db
+PS3	BLJS10330	berseria-decrypter/samples/SAVE.enc	berseria-decrypter/samples/SAVE.dec	1			ps3=db
+PS3	BLES01623	doa5-decrypter/samples/SAVE_SYS.DAT.PS3.enc	doa5-decrypter/samples/SAVE_SYS.DAT.PS3.dec	1			ps3=db
 PS4	CUSA07823	ps4-borderlands3-decrypter/samples/profile.enc	ps4-borderlands3-decrypter/samples/profile.dec	0
 PS4	CUSA42502	smt5-decrypter/samples/Megaten5.ps4.sav.enc	smt5-decrypter/samples/Megaten5.ps4.sav.dec	0
 PS4	CUSA32171	rgg-decrypter/samples/data.ps4.sav.enc	rgg-decrypter/samples/data.ps4.sav.dec	0
@@ -489,16 +502,16 @@ PSV	PCSE00235	doa5-decrypter/samples/SAVE_SYS.DAT.vita.enc	doa5-decrypter/sample
 # (the RE Engine ones, the Trails ones), and "a Resident Evil save proves the
 # Monster Hunter Rise patch" is not a claim worth making. Patches left out
 # this way are mostly picked up anyway by the identical-chain expansion.
-PS3	BLES01401	dbz-checksum-fixer/samples/SYS-DATA	-	1
-PS3	BLES02152	toz-checksum-fixer/samples/SAVE.PS3	-	1
-PS3	BLUS30823	dbz-checksum-fixer/samples/SYS-DATA	-	1
-PS3	BLUS31441	digimon-checksum-fixer/samples/SAVEDATA	-	1
-PS3	BLUS31476	tears2-checksum-fixer/samples/GAMEDATA.DAT	-	1
-PS3	BLUS31533	toz-checksum-fixer/samples/SAVE.PS3	-	1
-PS3	NPEB02078	digimon-checksum-fixer/samples/SAVEDATA	-	1
-PS3	NPUB31126	ducktales-checksum-fixer/samples/SAVE.DAT	-	1
-PS3	NPUB31564	sw4-checksum-fixer/samples/DATA.BIN	-	1
-PS3	NPUB31675	toz-checksum-fixer/samples/SAVE.PS3	-	1
+PS3	BLES01401	dbz-checksum-fixer/samples/SYS-DATA	-	1			ps3=db
+PS3	BLES02152	toz-checksum-fixer/samples/SAVE.PS3	-	1			ps3=db
+PS3	BLUS30823	dbz-checksum-fixer/samples/SYS-DATA	-	1			ps3=db
+PS3	BLUS31441	digimon-checksum-fixer/samples/SAVEDATA	-	1			ps3=db
+PS3	BLUS31476	tears2-checksum-fixer/samples/GAMEDATA.DAT	-	1			ps3=db
+PS3	BLUS31533	toz-checksum-fixer/samples/SAVE.PS3	-	1			ps3=db
+PS3	NPEB02078	digimon-checksum-fixer/samples/SAVEDATA	-	1			ps3=db
+PS3	NPUB31126	ducktales-checksum-fixer/samples/SAVE.DAT	-	1			ps3=db
+PS3	NPUB31564	sw4-checksum-fixer/samples/DATA.BIN	-	1			ps3=db
+PS3	NPUB31675	toz-checksum-fixer/samples/SAVE.PS3	-	1			ps3=db
 PS4	CUSA03617	mafia3-checksum-fixer/samples/HEAD	-	0
 PS4	CUSA03652	mafia3-checksum-fixer/samples/HEAD	-	0
 PS4	CUSA04437	re5-checksum-fixer/samples/savedata.bin	-	0
@@ -533,35 +546,35 @@ PSP	ULJM05800	monsterhunter-psp-decrypter/samples/MHP3RD.BIN.ENC	monsterhunter-p
 # PS3 checksum fixers whose sample is named for the game rather than a title
 # ID. Each is a single-game (or single-file) tool, so which patch the sample
 # belongs to is not in doubt; the proof is still per-patch.
-PS3	BLES01047	castlevania-checksum-fixer/samples/DATA.DAT.LOS1	-	1
-PS3	BLES01644	castlevania-checksum-fixer/samples/DATA.DAT.LOS2	-	1
+PS3	BLES01047	castlevania-checksum-fixer/samples/DATA.DAT.LOS1	-	1			ps3=db
+PS3	BLES01644	castlevania-checksum-fixer/samples/DATA.DAT.LOS2	-	1			ps3=db
 PS4	CUSA05904	far-cry-5-checksum-fixer/samples/memory.dat	-	0
-PS3	BLES01697	alien-checksum-fixer/samples/STHEFILE	-	1
+PS3	BLES01697	alien-checksum-fixer/samples/STHEFILE	-	1			ps3=db
 # LEGO: one GAME1 sample, four patches. Ambiguous by filename — but all four
 # carry the same "Update Checksum for GAME1" code, each is proved against the
 # sample on its own, and they fold into one chain group regardless. Listing
 # them individually is what makes that a measurement rather than a guess.
-PS3	BLES01516	lego-checksum-fixer/samples/GAME1	-	1
-PS3	BLES01613	lego-checksum-fixer/samples/GAME1	-	1
-PS3	BLES01348	lego-checksum-fixer/samples/GAME1	-	1
-PS3	BLES01239	lego-checksum-fixer/samples/GAME1	-	1
+PS3	BLES01516	lego-checksum-fixer/samples/GAME1	-	1			ps3=db
+PS3	BLES01613	lego-checksum-fixer/samples/GAME1	-	1			ps3=db
+PS3	BLES01348	lego-checksum-fixer/samples/GAME1	-	1			ps3=db
+PS3	BLES01239	lego-checksum-fixer/samples/GAME1	-	1			ps3=db
 # Naughty Dog, one engine across two consoles and three save layouts. The
 # tool's own -A/-B/-C game types are exactly the sample directories, and which
 # patch belongs to which is a measurement, not a guess: Uncharted 2 and 3
 # Remastered failed against the type-A PS4 sample and passed against type C,
 # which is where the Nathan Drake Collection actually lives.
-PS3	BCES01585	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
-PS3	BCUS98174	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
-PS3	BCAS20270	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
+PS3	BCES01585	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1			ps3=db
+PS3	BCUS98174	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1			ps3=db
+PS3	BCAS20270	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1			ps3=db
 PS3	BCES00509	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
 PS3	BCUS98123	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
-PS3	BCES01176	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
-PS3	BCUS98233	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
+PS3	BCES01176	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1			ps3=db
+PS3	BCUS98233	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1			ps3=db
 PS4	CUSA07820	naughtydog-decrypter/samples/B/USR-DATA.enc	naughtydog-decrypter/samples/B/USR-DATA.dec	0
 PS4	CUSA17962	naughtydog-decrypter/samples/B/USR-DATA.enc	naughtydog-decrypter/samples/B/USR-DATA.dec	0
-PS3	BCUS98174	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
-PS3	BCES01585	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
-PS3	BCAS20270	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1
+PS3	BCUS98174	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1			ps3=db
+PS3	BCES01585	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1			ps3=db
+PS3	BCAS20270	naughtydog-decrypter/samples/A/USR-DATA.PS3.enc	naughtydog-decrypter/samples/A/USR-DATA.PS3.dec	1			ps3=db
 PS4	CUSA00552	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0
 PS4	CUSA00556	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0
 PS4	CUSA00552	naughtydog-decrypter/samples/A/USR-DATA.PS4.enc	naughtydog-decrypter/samples/A/USR-DATA.PS4.dec	0
@@ -577,12 +590,12 @@ PS4	CUSA34119	re7-checksum-fixer/samples/data00-90.bin	-	0
 PS4	CUSA28934	trails-zero-checksum-fixer/samples/zeroSAVEDATA.DAT	-	0
 PS4	CUSA29189	trails-zero-checksum-fixer/samples/azureSAVEDATA.DAT	-	0
 PS4	CUSA00362	alien-checksum-fixer/samples/THEFILE	-	0
-PS3	BLES01733	deadspace-checksum-fixer/samples/HED-DATA,deadspace-checksum-fixer/samples/USR-DATA	-	1
+PS3	BLES01733	deadspace-checksum-fixer/samples/HED-DATA,deadspace-checksum-fixer/samples/USR-DATA	-	1			ps3=db
 PS3	BLES00269	prototype-checksum-fixer/samples/ICON0.PNG,prototype-checksum-fixer/samples/USERDATA.BIN,prototype-checksum-fixer/samples/CRC.BIN	-	1
 PS3	BLUS31460	kh25-checksum-fixer/samples/USR-00.kh25r,kh25-checksum-fixer/samples/SAVEDATA.DAT.khbbs	-	1
 PS4	CUSA48262	lunar-checksum-fixer/samples/1/GAME.BIN,lunar-checksum-fixer/samples/2/GAME.BIN	-	0
-PS3	BLUS30847	mgs-hd-decrypter/samples/mgs2/MASTER.BIN,mgs-hd-decrypter/samples/mgs2/DATA.BIN	prefix:mgs-hd-decrypter/samples/mgs2/MASTER.BIN.dec,mgs-hd-decrypter/samples/mgs2/DATA.BIN.dec	1	0
-PS3	BLES01419	mgs-hd-decrypter/samples/mgs3/MASTER.BIN,mgs-hd-decrypter/samples/mgs3/DATA.BIN	prefix:mgs-hd-decrypter/samples/mgs3/MASTER.BIN.dec,mgs-hd-decrypter/samples/mgs3/DATA.BIN.dec	1	1
+PS3	BLUS30847	mgs-hd-decrypter/samples/mgs2/MASTER.BIN,mgs-hd-decrypter/samples/mgs2/DATA.BIN	prefix:mgs-hd-decrypter/samples/mgs2/MASTER.BIN.dec,mgs-hd-decrypter/samples/mgs2/DATA.BIN.dec	1	0		ps3=db
+PS3	BLES01419	mgs-hd-decrypter/samples/mgs3/MASTER.BIN,mgs-hd-decrypter/samples/mgs3/DATA.BIN	prefix:mgs-hd-decrypter/samples/mgs3/MASTER.BIN.dec,mgs-hd-decrypter/samples/mgs3/DATA.BIN.dec	1	1		ps3=db
 # Final Fantasy XIII, XIII-2 and Lightning Returns. XIII-2 and Lightning
 # Returns read an encryption key out of a SECOND file before touching the save
 # ("Read Encryption KEY.DAT", which classifies as neither decrypt nor checksum
@@ -590,9 +603,9 @@ PS3	BLES01419	mgs-hd-decrypter/samples/mgs3/MASTER.BIN,mgs-hd-decrypter/samples/
 # row. KEY.DAT is listed as its own expected output, which is the assertion
 # that the chain only READS it — if a code ever wrote to the key file, these
 # rows would fail.
-PS3	BLUS30416	ff13-decrypter/samples/ff13-1/APP.DAT.enc	ff13-decrypter/samples/ff13-1/APP.DAT.dec	1
-PS3	BLES01269	ff13-decrypter/samples/ff13-2/KEY.DAT,ff13-decrypter/samples/ff13-2/APP.DAT.enc	ff13-decrypter/samples/ff13-2/KEY.DAT,ff13-decrypter/samples/ff13-2/APP.DAT.dec	1
-PS3	BLJM60558	ff13-decrypter/samples/ff13-3/KEY.DAT,ff13-decrypter/samples/ff13-3/APP.DAT.enc	ff13-decrypter/samples/ff13-3/KEY.DAT,ff13-decrypter/samples/ff13-3/APP.DAT.dec	1
+PS3	BLUS30416	ff13-decrypter/samples/ff13-1/APP.DAT.enc	ff13-decrypter/samples/ff13-1/APP.DAT.dec	1			ps3=db
+PS3	BLES01269	ff13-decrypter/samples/ff13-2/KEY.DAT,ff13-decrypter/samples/ff13-2/APP.DAT.enc	ff13-decrypter/samples/ff13-2/KEY.DAT,ff13-decrypter/samples/ff13-2/APP.DAT.dec	1			ps3=db
+PS3	BLJM60558	ff13-decrypter/samples/ff13-3/KEY.DAT,ff13-decrypter/samples/ff13-3/APP.DAT.enc	ff13-decrypter/samples/ff13-3/KEY.DAT,ff13-decrypter/samples/ff13-3/APP.DAT.dec	1			ps3=db
 # L.A. Noire, both consoles and both branches. The 7th column answers the
 # patch's {TAG} question; the branch it names IS the AES key, so each row needs
 # its own sample pair and neither could be guessed at from the other. Matched
@@ -600,7 +613,7 @@ PS3	BLJM60558	ff13-decrypter/samples/ff13-3/KEY.DAT,ff13-decrypter/samples/ff13-
 # here instead of quietly proving the wrong branch. PS3 spells the tag {ST} and
 # PS4 {LA_NOIRE_AES_CBC256_KEY_OPTION}; the tag is omitted below because each
 # chain asks exactly one question.
-PS3	BLUS30554	la-noire-decrypter/samples/SAVEDATA.enc	la-noire-decrypter/samples/SAVEDATA.dec	1	0	Game Savedata
-PS3	BLUS30554	la-noire-decrypter/samples/SAVEDATA.profile.enc	la-noire-decrypter/samples/SAVEDATA.profile.dec	1	0	User Profile
+PS3	BLUS30554	la-noire-decrypter/samples/SAVEDATA.enc	la-noire-decrypter/samples/SAVEDATA.dec	1	0	Game Savedata	ps3=db
+PS3	BLUS30554	la-noire-decrypter/samples/SAVEDATA.profile.enc	la-noire-decrypter/samples/SAVEDATA.profile.dec	1	0	User Profile	ps3=db
 PS4	CUSA09084	la-noire-decrypter/samples/lansavegame.ps4.sav.enc	la-noire-decrypter/samples/lansavegame.ps4.sav.dec	0	0	Game Savedata
 PS4	CUSA09084	la-noire-decrypter/samples/lansavegame.ps4.sav.profile.enc	la-noire-decrypter/samples/lansavegame.ps4.sav.profile.dec	0	0	User Profile

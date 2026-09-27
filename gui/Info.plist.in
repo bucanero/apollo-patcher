@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The .app's Info.plist.
+
+  CMake's default template would do for everything but the document types,
+  and those are the reason this file exists: macOS hands an app the files it
+  was asked to open through Apple Events, and it only ever does so for types
+  the app has CLAIMED here. Without the claim, the handler in
+  src/macos_open_docs.mm would sit waiting for events that are never sent --
+  the Dock icon would not even highlight when a save was dragged over it.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>            <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
+    <key>CFBundleName</key>                  <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+    <key>CFBundleIdentifier</key>            <string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
+    <key>CFBundleIconFile</key>              <string>${MACOSX_BUNDLE_ICON_FILE}</string>
+    <key>CFBundleShortVersionString</key>    <string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
+    <key>CFBundleVersion</key>               <string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+    <key>CFBundlePackageType</key>           <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key> <string>6.0</string>
+    <key>NSHighResolutionCapable</key>       <true/>
+
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <!--
+          Patch files. Owner rank: nothing else on the system opens these, so
+          the app is happy to be their default.
+        -->
+        <dict>
+            <key>CFBundleTypeName</key>       <string>Apollo save patch</string>
+            <key>CFBundleTypeExtensions</key> <array><string>savepatch</string></array>
+            <key>CFBundleTypeRole</key>       <string>Editor</string>
+            <key>LSHandlerRank</key>          <string>Owner</string>
+        </dict>
+        <!--
+          Saves. A save is any file, or a folder, so the claim has to be that
+          broad -- but Alternate rank, deliberately: it puts the app in "Open
+          With" and lets the Dock icon accept a drop without volunteering to
+          become the default application for every file on the machine.
+        -->
+        <dict>
+            <key>CFBundleTypeName</key>       <string>Console save data</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.data</string>
+                <string>public.folder</string>
+            </array>
+            <key>CFBundleTypeRole</key>       <string>Editor</string>
+            <key>LSHandlerRank</key>          <string>Alternate</string>
+        </dict>
+    </array>
+</dict>
+</plist>

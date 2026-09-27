@@ -61,13 +61,16 @@ TOOLS       = $(DIST)/tools.json
 # it; a plain build just reads it, so dist/ can be wiped without losing it.
 VERIFIED    = ../tools/verified.json
 
-# ../core/psp/ is the PSP's own savedata encryption -- the layer below
-# anything a .savepatch does. It needs only mbedTLS's AES and SHA1, which
-# this module already links for libapollo's own decrypters, so it rides in
-# the same wasm rather than a second one: ~10KB gzipped against a separate
-# module's duplicated crypto, second heap and second instantiate.
-SRCS        = src/apollo_wasm.c ../core/apollo_ctrl.c \
-			  ../core/psp/kirk_engine.c ../core/psp/psp_savedata.c
+# ../core/psp/ and ../core/ps3/ are the consoles' own savedata encryption --
+# the layer below anything a .savepatch does. They need only mbedTLS's AES and
+# SHA1, which this module already links for libapollo's own decrypters, so they
+# ride in the same wasm rather than separate ones: ~12KB gzipped against a
+# second module's duplicated crypto, second heap and second instantiate.
+# ../core/sfo.c is the PARAM.SFO container, which the PSP path now shares with
+# every other console rather than carrying its own copy of.
+SRCS        = src/apollo_wasm.c ../core/apollo_ctrl.c ../core/sfo.c \
+			  ../core/psp/kirk_engine.c ../core/psp/psp_savedata.c \
+			  ../core/ps3/pfd_savedata.c
 STATIC      = $(wildcard public/*)
 
 CC          = emcc
@@ -121,6 +124,7 @@ CFLAGS      = -O3 -Wall \
 			  -I$(APOLLO_LIB)/mbedtls-2.16.12/include \
 			  -I../core \
 			  -I../core/psp \
+			  -I../core/ps3 \
 			  --use-port=zlib
 
 # -sSTACK_SIZE: Emscripten's 64KB default is below MicroPython's own 40KB stack
@@ -143,7 +147,7 @@ LDFLAGS     = -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=worker \
 			  --profiling-funcs \
 			  -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4MB -sINVOKE_RUN=0 \
 			  -sEXPORTED_RUNTIME_METHODS='["FS","UTF8ToString","stringToNewUTF8","HEAPU8"]' \
-			  -sEXPORTED_FUNCTIONS='["_malloc","_free","_apw_version","_apw_is_be","_apw_open","_apw_close","_apw_codes_json","_apw_code_text","_apw_set_code_text","_apw_code_is_edited","_apw_code_flags","_apw_set_code_type","_apw_code_type","_apw_export_patch","_apw_export_size","_apw_export_mismatches","_apw_revert_code","_apw_set_option","_apw_apply","_apw_reset_vars","_apw_psp_sfo_json","_apw_psp_key_from_file","_apw_psp_key_from_db","_apw_psp_decrypt","_apw_psp_encrypt","_apw_psp_resign","_apw_psp_out","_apw_psp_out_size","_apw_psp_error"]'
+			  -sEXPORTED_FUNCTIONS='["_malloc","_free","_apw_version","_apw_is_be","_apw_open","_apw_close","_apw_codes_json","_apw_code_text","_apw_set_code_text","_apw_code_is_edited","_apw_code_flags","_apw_set_code_type","_apw_code_type","_apw_export_patch","_apw_export_size","_apw_export_mismatches","_apw_revert_code","_apw_set_option","_apw_apply","_apw_reset_vars","_apw_psp_sfo_json","_apw_psp_key_from_file","_apw_psp_key_from_db","_apw_psp_decrypt","_apw_psp_encrypt","_apw_psp_resign","_apw_psp_set_fuse_id","_apw_psp_fuse_id","_apw_savedata_out","_apw_savedata_out_size","_apw_psp_error","_apw_ps3_pfd_json","_apw_ps3_sfo_directory","_apw_ps3_key_from_hex","_apw_ps3_key_from_db","_apw_ps3_decrypt","_apw_ps3_encrypt","_apw_ps3_verify","_apw_ps3_resign","_apw_ps3_error","_apw_ps3_set_console","_apw_ps3_console","_apw_ps3_dhk_from_db","_apw_ps3_rebind","_apw_ps3_account_id","_apw_ps3_account_resign"]'
 
 .PHONY: all serve verify clean
 

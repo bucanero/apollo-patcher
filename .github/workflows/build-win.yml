@@ -60,14 +60,38 @@ jobs:
           CC=gcc make static
           cp libmbedcrypto.a ../build/library
 
+      # The patch database is built by `cmake --build` here rather than by a
+      # step of its own: apollo-patches is checked out in-tree, which is one of
+      # the layouts CMakeLists.txt looks in. See build.yml for why one zip per
+      # run rather than two.
+      #
+      # Python3_EXECUTABLE is passed explicitly because this is the one place
+      # CMake might not find an interpreter on its own -- MSYS2's bash sees the
+      # runner's Windows Python through the inherited PATH, and CMake's own
+      # search does not necessarily look in the same places. The workflow has
+      # already found it, so it is simply handed over.
       - name: Build Apollo Save Patcher (Desktop)
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          py=$(command -v python3 || command -v python)
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DPython3_EXECUTABLE="$py"
           cmake --build build
           mkdir -p dist
           cp build/gui/apollo_patcher_gui.exe dist/
-          py=$(command -v python3 || command -v python)
-          "$py" tools/make-bundle.py apollo-patches dist/apollo-patches.zip
+          if [ ! -f build/apollo-patches.zip ]; then
+            echo "::error::CMake did not build apollo-patches.zip - see the"
+            echo "::error::configure output above."
+            exit 1
+          fi
+          cp build/apollo-patches.zip dist/
+          # The font. Vendored in this repo, so its absence is a broken build
+          # rather than a configuration: without it every trade mark sign and
+          # every Japanese title draws as '?'.
+          if [ ! -f build/gui/NotoSansJP-Medium.otf ]; then
+            echo "::error::the build produced no font beside the executable"
+            exit 1
+          fi
+          cp build/gui/NotoSansJP-Medium.otf build/gui/OFL.txt dist/
 
       # Ship a self-contained Mesa software opengl32.dll in a softgl/ subfolder of
       # the GUI artifact. It's NOT loaded by default (subfolder), so the app uses
@@ -136,16 +160,36 @@ jobs:
           cmake --build apollo-lib/mbedtls-2.16.12/build --target mbedcrypto -j
           ls -l apollo-lib/mbedtls-2.16.12/build/library/libmbedcrypto.a
 
+      # As in the msys job: the zip comes out of the CMake build, not a step of
+      # its own. Python3_EXECUTABLE matters more here than anywhere -- the
+      # toolchain file sets CMAKE_SYSTEM_NAME to Windows, so CMake's own search
+      # would look for a Windows interpreter while the only one present is this
+      # Linux host's. It is a host tool, which the toolchain's
+      # CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER already allows for.
       - name: Cross-build Apollo Save Patcher (i686)
         run: |
+          py=$(command -v python3 || command -v python)
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/gui/cmake/mingw-i686.cmake"
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/gui/cmake/mingw-i686.cmake" \
+            -DPython3_EXECUTABLE="$py"
           cmake --build build
           mkdir -p dist
           cp build/gui/apollo_patcher_gui.exe dist/
           file dist/apollo_patcher_gui.exe
-          py=$(command -v python3 || command -v python)
-          "$py" tools/make-bundle.py apollo-patches dist/apollo-patches.zip
+          if [ ! -f build/apollo-patches.zip ]; then
+            echo "::error::CMake did not build apollo-patches.zip - see the"
+            echo "::error::configure output above."
+            exit 1
+          fi
+          cp build/apollo-patches.zip dist/
+          # The font. Vendored in this repo, so its absence is a broken build
+          # rather than a configuration: without it every trade mark sign and
+          # every Japanese title draws as '?'.
+          if [ ! -f build/gui/NotoSansJP-Medium.otf ]; then
+            echo "::error::the build produced no font beside the executable"
+            exit 1
+          fi
+          cp build/gui/NotoSansJP-Medium.otf build/gui/OFL.txt dist/
 
       # Same self-contained Mesa 17.2.6 software opengl32.dll, x86, under softgl/.
       - name: Bundle software OpenGL fallback (Mesa 17.2.6, x86) under softgl/

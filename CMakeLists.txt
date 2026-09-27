@@ -64,12 +64,23 @@ set(MBEDTLS_DIR "${APOLLO_ROOT}/mbedtls-2.16.12")
 # build does not use it — the page fetches patches over the network instead —
 # but it costs nothing to carry in the shared library.
 #
-# core/psp/ is the PSP's own savedata encryption — the layer BELOW anything a
-# .savepatch does, and the reason a save taken straight off a Memory Stick used
-# to come out of the patch engine as garbage. Vendored from apollo-psp; see the
-# note at the top of core/psp/psp_savedata.c for why it lives here rather than
-# in apollo-lib, and what would move it there. It needs only mbedTLS's AES and
-# SHA1, both of which the engine already links.
+# core/png.c decodes a save's ICON0.PNG. Small enough to be worth writing
+# rather than vendoring: every one of the 185 real icons this was checked
+# against is 8-bit and non-interlaced, and zlib is already linked for the
+# engine's own use.
+#
+# core/sfo.c parses a PARAM.SFO, which every console since the PSP writes in
+# the same container, and core/saveinfo.c says which console wrote a given one
+# and what game it belongs to. That is what lets a front-end be pointed at a
+# folder of saves and produce a list instead of asking for one file at a time.
+#
+# core/psp/ and core/ps3/ are the consoles' own savedata encryption — the layer
+# BELOW anything a .savepatch does, and the reason a save taken straight off a
+# Memory Stick or a PS3 hard drive comes out of the patch engine as garbage.
+# Derived from apollo-psp and pfdtool respectively; see the note at the top of
+# core/psp/psp_savedata.c for why they live here rather than in apollo-lib, and
+# what would move them there. They need only mbedTLS's AES and SHA1, both of
+# which the engine already links.
 # ---------------------------------------------------------------------------
 set(ENGINE_SRCS
     ${APOLLO_ROOT}/source/crc_util.c
@@ -86,14 +97,19 @@ set(PSP_SRCS
     core/psp/kirk_engine.c
     core/psp/psp_savedata.c)
 
-add_library(apollo_engine STATIC ${ENGINE_SRCS} ${PSP_SRCS}
-                                 core/apollo_ctrl.c core/patchdb.c)
+set(PS3_SRCS
+    core/ps3/pfd_savedata.c)
+
+add_library(apollo_engine STATIC ${ENGINE_SRCS} ${PSP_SRCS} ${PS3_SRCS}
+                                 core/apollo_ctrl.c core/patchdb.c
+                                 core/sfo.c core/saveinfo.c core/png.c)
 target_include_directories(apollo_engine PUBLIC
     ${APOLLO_ROOT}/include
     ${APOLLO_ROOT}/tools          # provides dbglogger.h prototype
     ${MBEDTLS_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/core
-    ${CMAKE_CURRENT_SOURCE_DIR}/core/psp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/psp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/ps3)
 target_compile_definitions(apollo_engine PRIVATE _GNU_SOURCE _USE_MBEDTLS)
 
 # mbedcrypto: prefer the prebuilt static lib (built by CI), else expect a
@@ -200,6 +216,62 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# The desktop app's font.
+#
+# ImGui's built-in font covers U+0020-00FF and nothing else, which is a
+# problem for the names this app displays: across the patch database, the
+# title catalogue and a corpus of real saves there are 592 characters outside
+# ASCII, and 357 of them are the trade mark sign alone. Two of 176 saves have
+# Japanese titles, which no system font can be relied on for.
+#
+# Noto Sans JP answers both, and is the same font the console apps ship. It is
+# VENDORED at gui/assets/fonts rather than found in a sibling checkout: unlike
+# apollo-lib and apollo-patches, which are code and data you want to update
+# independently, this is a frozen asset the app needs in order to render
+# correctly. One copy means one appearance on every machine.
+#
+# Still not fatal if it goes missing -- the app falls back to ImGui's own font
+# and says so -- but that is a safety net, not a supported configuration.
+#
+#   -DAPOLLO_FONT_FILE=/path/to/Some.otf   to ship a different face
+# ---------------------------------------------------------------------------
+set(APOLLO_FONT_FILE "" CACHE FILEPATH "TTF/OTF the desktop app ships with")
+
+if(APOLLO_FONT_FILE)
+    set(_font_candidates "${APOLLO_FONT_FILE}")
+else()
+    set(_font_candidates
+        "${CMAKE_CURRENT_SOURCE_DIR}/gui/assets/fonts/NotoSansJP-Medium.otf")
+endif()
+
+set(APOLLO_FONT "")
+foreach(_f IN LISTS _font_candidates)
+    if(EXISTS "${_f}")
+        get_filename_component(APOLLO_FONT "${_f}" ABSOLUTE)
+        break()
+    endif()
+endforeach()
+
+if(APOLLO_FONT)
+    message(STATUS "Desktop font from ${APOLLO_FONT}")
+    # The SIL Open Font License travels with the font when there is one to
+    # travel with: redistributing it without the licence is not allowed.
+    get_filename_component(_font_dir "${APOLLO_FONT}" DIRECTORY)
+    if(EXISTS "${_font_dir}/OFL.txt")
+        set(APOLLO_FONT_LICENSE "${_font_dir}/OFL.txt")
+    endif()
+else()
+    string(REPLACE ";" "\n    " _font_tried "${_font_candidates}")
+    # A checkout is missing a file it is supposed to have, so this is louder
+    # than the patch database's equivalent: the app still builds and runs, but
+    # it will draw '?' for the trade mark sign and every Japanese title.
+    message(WARNING
+        "The desktop font is missing, so the app will fall back to ImGui's own\n"
+        "  and lose the trade mark sign and any Japanese title. It is vendored,\n"
+        "  so this means the checkout is incomplete. Looked for:\n    ${_font_tried}")
+endif()
+
+# ---------------------------------------------------------------------------
 # Headless parity test (no GUI deps) — always buildable.
 # ---------------------------------------------------------------------------
 add_executable(apollo_ctrl_test core/test_ctrl.c)
@@ -213,6 +285,22 @@ target_link_libraries(apollo_ctrl_test PRIVATE apollo_engine)
 add_executable(apollo_psp_test core/test_psp.c)
 target_link_libraries(apollo_psp_test PRIVATE apollo_engine)
 
+# PS3 savedata: bounds checks on the PARAM.PFD parser, known-answer vectors for
+# the file cipher, and the games.conf lookup rules. `--corpus DIR` walks a tree
+# of real saves and checks every hash the console wrote against one recomputed
+# here, which is what says the implementation is right rather than merely
+# self-consistent.
+add_executable(apollo_ps3_test core/test_ps3.c)
+target_link_libraries(apollo_ps3_test PRIVATE apollo_engine)
+
+# The PARAM.SFO reader and the save identification over it. Bounds checks on a
+# parser every front-end now shares (the PSP encryption path included), and
+# per-console cases built from the key sets real saves carry -- a save listed
+# under the wrong game would be patched with that game's codes.
+# `--scan DIR` walks a tree of real saves the way the desktop browser does.
+add_executable(apollo_save_test core/test_save.c)
+target_link_libraries(apollo_save_test PRIVATE apollo_engine)
+
 # ---------------------------------------------------------------------------
 # Front-ends.
 #
@@ -222,4 +310,13 @@ target_link_libraries(apollo_psp_test PRIVATE apollo_engine)
 option(APOLLO_BUILD_GUI "Build the Dear ImGui GUI (needs OpenGL/GLFW)" ON)
 if(APOLLO_BUILD_GUI)
     add_subdirectory(gui)
+else()
+    # Said out loud because the option is STICKY: a build directory once
+    # configured with -DAPOLLO_BUILD_GUI=OFF keeps skipping the app, and a
+    # later `cmake --build build` reports success for the tests while the app
+    # binary sits there untouched from whenever it was last built. The failure
+    # looks like "my change did not take effect", which is the hardest kind to
+    # trace. Re-enable with -DAPOLLO_BUILD_GUI=ON.
+    message(STATUS "APOLLO_BUILD_GUI=OFF: the desktop app will NOT be built "
+                   "or updated by this build directory")
 endif()

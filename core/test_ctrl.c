@@ -39,20 +39,30 @@ static int run_db(const char *query)
     printf("database: %s\n", patchdb_path(db));
     printf("patches:  %d\n", n);
 
-    /* The PSP game-key database travels in the same zip, so the desktop app
-     * can take the console's own encryption off a save with no network. A
-     * bundle built without it leaves every PSP save needing a key typed by
-     * hand, which is worth failing loudly for rather than discovering later. */
+    /* The console key databases travel in the same zip, so the desktop app can
+     * take a console's own encryption off a save with no network. A bundle
+     * built without one leaves every save on that platform needing a key typed
+     * by hand, which is worth failing loudly for rather than discovering
+     * later. */
     {
-        char *keys = NULL;
-        size_t klen = 0;
-        if (!patchdb_read_file(db, "PSP/gamekeys.txt", &keys, &klen)) {
-            fprintf(stderr, "psp keys: MISSING (%s)\n", patchdb_last_error());
-            patchdb_close(db);
-            return 1;
+        static const struct { const char *label, *path; } KEY_DBS[] = {
+            { "psp keys", "PSP/gamekeys.txt" },
+            { "ps3 keys", "PS3/games.conf"   },
+        };
+
+        for (size_t i = 0; i < sizeof(KEY_DBS) / sizeof(KEY_DBS[0]); i++) {
+            char *keys = NULL;
+            size_t klen = 0;
+
+            if (!patchdb_read_file(db, KEY_DBS[i].path, &keys, &klen)) {
+                fprintf(stderr, "%s: MISSING (%s)\n",
+                        KEY_DBS[i].label, patchdb_last_error());
+                patchdb_close(db);
+                return 1;
+            }
+            printf("%s: %zu bytes\n", KEY_DBS[i].label, klen);
+            free(keys);
         }
-        printf("psp keys: %zu bytes\n", klen);
-        free(keys);
     }
 
     /* Per-platform tally, so a bundle missing a whole platform is obvious. */

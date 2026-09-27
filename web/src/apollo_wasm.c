@@ -23,6 +23,8 @@
 #include "apollo.h"
 #include "apollo_ctrl.h"
 #include "psp_savedata.h"
+#include "pfd_savedata.h"
+#include "kirk_engine.h"      /* KIRK_HOST_FUSE_ID, the Fuse ID default */
 
 static apctl_session_t *g_session = NULL;
 
@@ -394,54 +396,59 @@ void apw_reset_vars(void)
 }
 
 /* ---------------------------------------------------------------------------
- * PSP savedata
+ * Console savedata encryption
  *
- * The PSP's own encryption, which wraps a save BELOW anything a .savepatch
- * touches -- see core/psp/psp_savedata.h. Separate from everything above: it
- * holds no session, needs no patch, and a page can drive it for any PSP save
- * at all, including the ~60 PSP titles the patch database covers but the tool
- * catalog does not.
+ * The PSP's and the PS3's own encryption, which wraps a save BELOW anything a
+ * .savepatch touches -- see core/psp/psp_savedata.h and core/ps3/pfd_savedata.h.
+ * Separate from everything above: these hold no session, need no patch, and a
+ * page can drive them for any save at all, including titles the patch database
+ * covers but the tool catalog does not.
  *
- * Buffers cross the boundary the way the worker's withBytes() already does:
- * JS mallocs, copies in, calls, reads back out. Output lands in a buffer owned
- * here and read through apw_psp_out()/apw_psp_out_size(), the same shape as
- * apw_export_patch(). Encryption additionally rewrites the PARAM.SFO IN PLACE,
- * at the pointer JS passed in, so the caller reads its updated bytes back from
- * where it put them and there is no second output buffer to manage.
+ * Buffers cross the boundary the way the worker's withBytes() already does: JS
+ * mallocs, copies in, calls, reads back out. Output lands in the one buffer
+ * below and is read through apw_savedata_out()/apw_savedata_out_size(), the
+ * same shape as apw_export_patch(). One buffer serves both consoles because
+ * only one call is ever in flight -- the worker awaits each before starting
+ * the next -- and two would only make it possible to read the wrong one.
+ *
+ * Encryption additionally rewrites the metadata file IN PLACE, at the pointer
+ * JS passed in: PARAM.SFO for the PSP, PARAM.PFD for the PS3. The caller reads
+ * the updated bytes back from where it put them, so there is no second output
+ * buffer to manage.
  * ------------------------------------------------------------------------- */
 
 
-static unsigned char *g_psp_out = NULL;
-static size_t         g_psp_out_len = 0;
+static unsigned char *g_sd_out = NULL;
+static size_t         g_sd_out_len = 0;
 
-static void psp_out_free(void)
+static void sd_out_free(void)
 {
-    free(g_psp_out);
-    g_psp_out = NULL;
-    g_psp_out_len = 0;
+    free(g_sd_out);
+    g_sd_out = NULL;
+    g_sd_out_len = 0;
 }
 
 /* Allocate the result buffer for a call about to run. Returns NULL on OOM,
  * having already cleared any previous result. */
-static unsigned char *psp_out_alloc(size_t len)
+static unsigned char *sd_out_alloc(size_t len)
 {
-    psp_out_free();
+    sd_out_free();
     if (!len) return NULL;
-    g_psp_out = malloc(len);
-    if (g_psp_out) g_psp_out_len = len;
-    return g_psp_out;
+    g_sd_out = malloc(len);
+    if (g_sd_out) g_sd_out_len = len;
+    return g_sd_out;
 }
 
 EMSCRIPTEN_KEEPALIVE
-const char *apw_psp_out(void)
+const char *apw_savedata_out(void)
 {
-    return (const char *)g_psp_out;
+    return (const char *)g_sd_out;
 }
 
 EMSCRIPTEN_KEEPALIVE
-int apw_psp_out_size(void)
+int apw_savedata_out_size(void)
 {
-    return (int)g_psp_out_len;
+    return (int)g_sd_out_len;
 }
 
 /* A result code as something a user can read. */
@@ -549,21 +556,21 @@ int apw_psp_decrypt(const char *sfo, int sfo_len,
     int rc;
 
     apctl_set_log_sink(log_sink, NULL);
-    psp_out_free();
+    sd_out_free();
 
     if (!sfo || sfo_len <= 0 || !in || in_len <= 0 || !key) return APSP_ERR_ARG;
 
     want = apsp_decrypted_size((size_t)in_len);
     if (!want) return APSP_ERR_SIZE;
 
-    out = psp_out_alloc(want);
+    out = sd_out_alloc(want);
     if (!out) return APSP_ERR_MEM;
 
     rc = apsp_decrypt((const unsigned char *)sfo, (size_t)sfo_len,
                       (const unsigned char *)in, (size_t)in_len,
                       (const unsigned char *)key, out, want, &got);
-    if (rc != APSP_OK) psp_out_free();
-    else g_psp_out_len = got;
+    if (rc != APSP_OK) sd_out_free();
+    else g_sd_out_len = got;
     return rc;
 }
 
@@ -581,7 +588,7 @@ int apw_psp_encrypt(char *sfo, int sfo_len, const char *name,
     int rc;
 
     apctl_set_log_sink(log_sink, NULL);
-    psp_out_free();
+    sd_out_free();
 
     if (!sfo || sfo_len <= 0 || !name || !in || in_len <= 0 || !key)
         return APSP_ERR_ARG;
@@ -589,15 +596,65 @@ int apw_psp_encrypt(char *sfo, int sfo_len, const char *name,
     want = apsp_encrypted_size((size_t)in_len);
     if (!want) return APSP_ERR_SIZE;
 
-    out = psp_out_alloc(want);
+    out = sd_out_alloc(want);
     if (!out) return APSP_ERR_MEM;
 
     rc = apsp_encrypt((unsigned char *)sfo, (size_t)sfo_len, name,
                       (const unsigned char *)in, (size_t)in_len,
                       (const unsigned char *)key, out, want, &got);
-    if (rc != APSP_OK) psp_out_free();
-    else g_psp_out_len = got;
+    if (rc != APSP_OK) sd_out_free();
+    else g_sd_out_len = got;
     return rc;
+}
+
+/*
+ * The Fuse ID the KIRK engine runs with, as 16 hex digits, or "" to go back to
+ * the default (all ones, which is also what apollo-psp falls back to on a
+ * console where the kernel read fails).
+ *
+ * It reaches only the two PARAM.SFO hashes that savedata modes 4 and 6 derive
+ * from the console's own fuse, so setting it changes what apw_psp_encrypt()
+ * and apw_psp_resign() write and nothing else. Decryption never touches it.
+ *
+ * Returns 0, or APSP_ERR_ARG for something that is not 16 hex digits.
+ */
+EMSCRIPTEN_KEEPALIVE
+int apw_psp_set_fuse_id(const char *hex)
+{
+    unsigned long long value = 0;
+
+    if (!hex || !*hex) {
+        apsp_set_fuse_id(KIRK_HOST_FUSE_ID);
+        return APSP_OK;
+    }
+
+    for (int i = 0; i < 16; i++) {
+        char c = hex[i];
+        int  n;
+
+        if      (c >= '0' && c <= '9') n = c - '0';
+        else if (c >= 'a' && c <= 'f') n = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') n = c - 'A' + 10;
+        else return APSP_ERR_ARG;
+
+        value = (value << 4) | (unsigned)n;
+    }
+    if (hex[16] != '\0')
+        return APSP_ERR_ARG;
+
+    apsp_set_fuse_id((uint64_t)value);
+    return APSP_OK;
+}
+
+/* The Fuse ID in effect, as 16 hex digits. */
+EMSCRIPTEN_KEEPALIVE
+const char *apw_psp_fuse_id(void)
+{
+    static char hex[17];
+
+    snprintf(hex, sizeof hex, "%016llX",
+             (unsigned long long)apsp_get_fuse_id());
+    return hex;
 }
 
 /* Regenerate the PARAM.SFO hashes in place, touching no data file. */
@@ -605,8 +662,410 @@ EMSCRIPTEN_KEEPALIVE
 int apw_psp_resign(char *sfo, int sfo_len)
 {
     apctl_set_log_sink(log_sink, NULL);
-    psp_out_free();
+    sd_out_free();
 
     if (!sfo || sfo_len <= 0) return APSP_ERR_ARG;
     return apsp_resign((unsigned char *)sfo, (size_t)sfo_len);
+}
+
+/* ---------------------------------------------------------------------------
+ * PS3 savedata
+ *
+ * Same job as the PSP block above, one console up. The differences the page
+ * has to cope with:
+ *
+ *   - the metadata file is PARAM.PFD, not PARAM.SFO, and it is what says which
+ *     files are protected at all -- there is no separate list to consult
+ *   - the key is per game AND per file, so the database lookup takes both
+ *   - some entries carry a built-in key (PARAM.SFO, the trophy files) and need
+ *     no lookup; `sfid` is 0 for those
+ * ------------------------------------------------------------------------- */
+
+/* A result code as something a user can read. */
+EMSCRIPTEN_KEEPALIVE
+const char *apw_ps3_error(int rc)
+{
+    return apfd_strerror(rc);
+}
+
+/*
+ * What a PARAM.PFD says about the save it belongs to, as one JSON crossing:
+ *
+ *   {"ok":true,"version":3,"trophy":false,"entries":[
+ *      {"name":"PARAM.SFO","size":2736,"builtin":true,"encrypted":false},
+ *      {"name":"SAVEDATA","size":73448,"builtin":false,"encrypted":true}]}
+ *   {"ok":false,"error":"PARAM.PFD is missing, truncated or malformed"}
+ *
+ * `entries` is the authoritative answer to what in the folder is protected:
+ * the page offers exactly these and nothing else, so nobody can feed it an
+ * ICON0.PNG. `builtin` says the entry needs no key from the database, and
+ * `encrypted` distinguishes the one entry that is listed but stored in the
+ * clear.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *apw_ps3_pfd_json(const char *pfd, int pfd_len)
+{
+    sbuf_t b = {0};
+    char name[APFD_NAME_LEN];
+    int rc, n, i;
+
+    apctl_set_log_sink(log_sink, NULL);
+
+    if (!pfd || pfd_len <= 0) rc = APFD_ERR_ARG;
+    else rc = apfd_valid((const unsigned char *)pfd, (size_t)pfd_len);
+
+    if (rc != APFD_OK) {
+        sb_puts(&b, "{\"ok\":false,\"error\":");
+        sb_json_str(&b, apfd_strerror(rc));
+        sb_puts(&b, "}");
+        return publish(&b);
+    }
+
+    sb_printf(&b, "{\"ok\":true,\"version\":%d,\"trophy\":%s,\"entries\":[",
+              apfd_version((const unsigned char *)pfd, (size_t)pfd_len),
+              apfd_is_trophy((const unsigned char *)pfd, (size_t)pfd_len)
+                  ? "true" : "false");
+
+    n = apfd_entry_count((const unsigned char *)pfd, (size_t)pfd_len);
+    for (i = 0; i < n; i++) {
+        long long size;
+
+        if (apfd_entry_name((const unsigned char *)pfd, (size_t)pfd_len,
+                            i, name, sizeof name) != APFD_OK)
+            continue;
+        size = apfd_entry_size((const unsigned char *)pfd, (size_t)pfd_len, i);
+
+        if (i) sb_puts(&b, ",");
+        sb_puts(&b, "{\"name\":");
+        sb_json_str(&b, name);
+        sb_printf(&b, ",\"size\":%lld,\"builtin\":%s,\"encrypted\":%s}",
+                  size < 0 ? 0 : size,
+                  apfd_entry_has_builtin_key(name) ? "true" : "false",
+                  strcmp(name, "PARAM.SFO") == 0 ? "false" : "true");
+    }
+    sb_puts(&b, "]}");
+    return publish(&b);
+}
+
+/*
+ * SAVEDATA_DIRECTORY out of a PS3 PARAM.SFO, or "" if it is not there.
+ *
+ * That string is what games.conf files its sections under, and PARAM.PFD does
+ * not carry it -- so for the eleven title ids whose save folders differ
+ * (DiRT 3's seven regions and one game's PS2 classics), this is the only way
+ * to tell which section a save belongs to.
+ *
+ * Answered by the PSP module because PARAM.SFO is one format across both
+ * consoles; only the savedata-specific keys inside it differ, and this is not
+ * one of those. Note it does NOT go through apsp_sfo_valid(), which asks for
+ * the PSP's SAVEDATA_PARAMS -- a PS3 SFO has no such key.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *apw_ps3_sfo_directory(const char *sfo, int sfo_len)
+{
+    static char dir[64];
+
+    dir[0] = '\0';
+    if (sfo && sfo_len > 0)
+        apsp_sfo_directory((const unsigned char *)sfo, (size_t)sfo_len,
+                           dir, sizeof dir);
+    return dir;
+}
+
+/* 32 hex digits into 16 bytes, for a key the user typed. In C so the page and
+ * the desktop app accept exactly the same thing. */
+EMSCRIPTEN_KEEPALIVE
+int apw_ps3_key_from_hex(const char *hex, char *out16)
+{
+    if (!hex || !out16) return APFD_ERR_ARG;
+    return apfd_sfid_from_hex(hex, (unsigned char *)out16);
+}
+
+/*
+ * A secure file ID out of apollo-patches' PS3/games.conf, by save directory
+ * and file name.
+ *
+ * The page fetches the file and hands the text straight over rather than
+ * parsing it in JS, so both of the rules that database needs -- longest
+ * directory prefix for the section, first pattern in file order for the file
+ * -- live in one place, shared with the desktop app.
+ *
+ * Writes 16 bytes to `out16` and returns 0, or a negative result code. `id`,
+ * when given, receives the section id that matched.
+ */
+EMSCRIPTEN_KEEPALIVE
+int apw_ps3_key_from_db(const char *text, int len, const char *directory,
+                        const char *file, char *out16, char *id, int id_cap)
+{
+    if (!text || len < 0 || !directory || !file || !out16) return APFD_ERR_ARG;
+    return apfd_sfid_from_conf(text, (size_t)len, directory, file,
+                               (unsigned char *)out16, id,
+                               (size_t)(id_cap > 0 ? id_cap : 0));
+}
+
+/* Unwrap one protected file. The plaintext is in apw_savedata_out(). */
+EMSCRIPTEN_KEEPALIVE
+int apw_ps3_decrypt(const char *pfd, int pfd_len, const char *name,
+                    const char *in, int in_len, const char *sfid)
+{
+    unsigned char *out;
+    long long want;
+    size_t got = 0;
+    int rc;
+
+    apctl_set_log_sink(log_sink, NULL);
+    sd_out_free();
+
+    if (!pfd || pfd_len <= 0 || !name || !in || in_len <= 0) return APFD_ERR_ARG;
+
+    want = apfd_decrypted_size((const unsigned char *)pfd, (size_t)pfd_len, name);
+    if (want < 0) return (int)want;
+
+    out = sd_out_alloc((size_t)want);
+    if (!out && want) return APFD_ERR_MEM;
+
+    rc = apfd_decrypt((const unsigned char *)pfd, (size_t)pfd_len, name,
+                      (const unsigned char *)in, (size_t)in_len,
+                      (const unsigned char *)sfid, out, (size_t)want, &got);
+    if (rc != APFD_OK) sd_out_free();
+    else g_sd_out_len = got;
+    return rc;
+}
+
+/*
+ * Wrap one back up. The ciphertext is in apw_savedata_out(); the PARAM.PFD at
+ * `pfd` has been REWRITTEN in place and the caller must keep both -- a save put
+ * back with a stale PARAM.PFD does not load.
+ */
+EMSCRIPTEN_KEEPALIVE
+int apw_ps3_encrypt(char *pfd, int pfd_len, const char *name,
+                    const char *in, int in_len, const char *sfid)
+{
+    unsigned char *out;
+    size_t want, got = 0;
+    int rc;
+
+    apctl_set_log_sink(log_sink, NULL);
+    sd_out_free();
+
+    if (!pfd || pfd_len <= 0 || !name || !in || in_len <= 0) return APFD_ERR_ARG;
+
+    want = apfd_encrypted_size((size_t)in_len);
+    if (!want) return APFD_ERR_SIZE;
+
+    out = sd_out_alloc(want);
+    if (!out) return APFD_ERR_MEM;
+
+    rc = apfd_encrypt((unsigned char *)pfd, (size_t)pfd_len, name,
+                      (const unsigned char *)in, (size_t)in_len,
+                      (const unsigned char *)sfid, out, want, &got);
+    if (rc != APFD_OK) sd_out_free();
+    else g_sd_out_len = got;
+    return rc;
+}
+
+/*
+ * Does the PARAM.PFD's recorded hash match this file as it sits on disk?
+ *
+ * Worth offering before anything else: a save whose PARAM.PFD already
+ * disagrees with its files was damaged before it reached the page, and
+ * patching it would re-sign the damage into place.
+ */
+EMSCRIPTEN_KEEPALIVE
+int apw_ps3_verify(const char *pfd, int pfd_len, const char *name,
+                   const char *disk, int disk_len, const char *sfid)
+{
+    apctl_set_log_sink(log_sink, NULL);
+
+    if (!pfd || pfd_len <= 0 || !name || !disk || disk_len < 0) return APFD_ERR_ARG;
+    return apfd_verify_file((const unsigned char *)pfd, (size_t)pfd_len, name,
+                            (const unsigned char *)disk, (size_t)disk_len,
+                            (const unsigned char *)sfid);
+}
+
+/* Regenerate the PARAM.PFD signatures in place, touching no data file. */
+EMSCRIPTEN_KEEPALIVE
+int apw_ps3_resign(char *pfd, int pfd_len)
+{
+    apctl_set_log_sink(log_sink, NULL);
+    sd_out_free();
+
+    if (!pfd || pfd_len <= 0) return APFD_ERR_ARG;
+    return apfd_resign((unsigned char *)pfd, (size_t)pfd_len);
+}
+
+/* ---------------------------------------------------------------------------
+ * Which console a save belongs to
+ *
+ * PARAM.SFO's entry in a PARAM.PFD carries four hashes, and the second is
+ * keyed by the IDPS of the machine the save came off. Naming one here makes
+ * apw_ps3_rebind() rewrite that hash, which is the PFD half of moving a save
+ * to a different console. Naming none -- the default -- leaves it alone, which
+ * is what patching a save in place wants.
+ * ------------------------------------------------------------------------- */
+
+/*
+ * Set the console, or clear it with an empty (or all-zero) id. `user_id` is
+ * the PS3 user number and reaches only a trophy folder's hashes.
+ *
+ * Returns 0, or APFD_ERR_ARG for an id that is not 32 hex digits.
+ */
+EMSCRIPTEN_KEEPALIVE
+int apw_ps3_set_console(const char *console_id_hex, int user_id)
+{
+    apfd_console_t console;
+
+    memset(&console, 0, sizeof console);
+
+    if (!console_id_hex || !*console_id_hex) {
+        apfd_set_console(NULL);
+        return APFD_OK;
+    }
+
+    if (apfd_sfid_from_hex(console_id_hex, console.console_id) != APFD_OK)
+        return APFD_ERR_ARG;
+
+    console.user_id = (uint32_t)(user_id > 0 ? user_id : 1);
+    apfd_set_console(&console);
+    return APFD_OK;
+}
+
+/*
+ * The console in effect as JSON, or {"set":false}:
+ *
+ *   {"set":true,"consoleId":"00000001...","userId":1}
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *apw_ps3_console(void)
+{
+    apfd_console_t console;
+    sbuf_t b = {0};
+
+    if (!apfd_get_console(&console))
+        return (sb_puts(&b, "{\"set\":false}"), publish(&b));
+
+    sb_puts(&b, "{\"set\":true,\"consoleId\":\"");
+    for (int i = 0; i < APFD_CONSOLE_ID_LEN; i++)
+        sb_printf(&b, "%02X", console.console_id[i]);
+    sb_printf(&b, "\",\"userId\":%u}", (unsigned)console.user_id);
+    return publish(&b);
+}
+
+/* The disc hash key a games.conf section names, as 32 hex digits, or "" when
+ * it names none -- which is the ordinary case and means "use the fallback". */
+EMSCRIPTEN_KEEPALIVE
+const char *apw_ps3_dhk_from_db(const char *text, int len, const char *directory)
+{
+    static char hex[APFD_DHK_LEN * 2 + 1];
+    uint8_t dhk[APFD_DHK_LEN];
+
+    hex[0] = '\0';
+    if (!text || len <= 0 || !directory)
+        return hex;
+
+    if (apfd_dhk_from_conf(text, (size_t)len, directory, dhk) != APFD_OK)
+        return hex;
+
+    for (int i = 0; i < APFD_DHK_LEN; i++)
+        snprintf(hex + i * 2, 3, "%02X", dhk[i]);
+    return hex;
+}
+
+/*
+ * Re-bind a save to the console named above: rewrite PARAM.SFO's three
+ * console-keyed hashes and resign the PARAM.PFD around them.
+ *
+ * `dhk_hex` is the game's disc hash key from apw_ps3_dhk_from_db(), or "" for
+ * the built-in fallback. It is per save rather than per console, so it rides
+ * with the call instead of being part of the setting, and the ambient console
+ * is put back exactly as it was afterwards.
+ *
+ * The PARAM.PFD at `pfd` is rewritten IN PLACE; the caller keeps it.
+ */
+/*
+ * The account a PARAM.SFO is signed to, as 16 hex digits. "" when the file
+ * carries neither of the two fields that hold it, which means it is not a
+ * savedata PARAM.SFO.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *apw_ps3_account_id(const char *sfo, int sfo_len)
+{
+    static char id[APFD_ACCT_ID_LEN + 1];
+
+    id[0] = '\0';
+    if (sfo && sfo_len > 0)
+        apfd_sfo_account_id((const unsigned char *)sfo, (size_t)sfo_len,
+                            id, sizeof id);
+    return id;
+}
+
+/*
+ * Sign a save to a PSN account.
+ *
+ * The other way to re-sign, and usually the better one: re-binding writes the
+ * IDPS of one machine into a PARAM.PFD hash, where an account ID travels with
+ * the account and the save then loads on any PS3 signed in to it.
+ *
+ * BOTH buffers are rewritten in place and BOTH must be kept. A PARAM.SFO
+ * carrying a new account beside a PARAM.PFD that still hashes the old one is
+ * a save that does not load at all -- worse than where it started.
+ *
+ * The console is cleared across the update and put back afterwards, because
+ * apfd_update_file re-binds PARAM.SFO's console-keyed hashes whenever one is
+ * named. That is ambient state rather than an argument, and this call has no
+ * business doing the console's job.
+ */
+EMSCRIPTEN_KEEPALIVE
+int apw_ps3_account_resign(char *pfd, int pfd_len, char *sfo, int sfo_len,
+                           const char *account)
+{
+    apfd_console_t saved;
+    int had, rc;
+
+    apctl_set_log_sink(log_sink, NULL);
+
+    if (!pfd || pfd_len <= 0 || !sfo || sfo_len <= 0)
+        return APFD_ERR_ARG;
+
+    rc = apfd_sfo_set_account_id((unsigned char *)sfo, (size_t)sfo_len, account);
+    if (rc != APFD_OK)
+        return rc;
+
+    had = apfd_get_console(&saved);
+    if (had) apfd_set_console(NULL);
+
+    rc = apfd_update_file((unsigned char *)pfd, (size_t)pfd_len, "PARAM.SFO",
+                          (const unsigned char *)sfo, (size_t)sfo_len, NULL);
+
+    if (had) apfd_set_console(&saved);
+    return rc;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int apw_ps3_rebind(char *pfd, int pfd_len, const char *sfo, int sfo_len,
+                   const char *dhk_hex)
+{
+    apfd_console_t console, saved;
+    int rc;
+
+    apctl_set_log_sink(log_sink, NULL);
+
+    if (!pfd || pfd_len <= 0 || !sfo || sfo_len <= 0)
+        return APFD_ERR_ARG;
+
+    if (!apfd_get_console(&saved))
+        return APFD_ERR_NO_KEY;
+
+    console = saved;
+    memset(console.disc_hash_key, 0, APFD_DHK_LEN);
+    if (dhk_hex && *dhk_hex &&
+        apfd_sfid_from_hex(dhk_hex, console.disc_hash_key) != APFD_OK)
+        return APFD_ERR_ARG;
+
+    apfd_set_console(&console);
+    rc = apfd_update_file((unsigned char *)pfd, (size_t)pfd_len, "PARAM.SFO",
+                          (const unsigned char *)sfo, (size_t)sfo_len, NULL);
+    apfd_set_console(&saved);
+
+    return rc;
 }

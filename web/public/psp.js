@@ -28,23 +28,6 @@ const MODE_KEYED = 0x60;
 
 export const NULL_KEY = new Uint8Array(16);
 
-/*
- * Platforms whose saves the CONSOLE encrypts, underneath whatever the game
- * does. Only the PSP today, and the set exists so the rule is named once
- * rather than spelled `platform === 'PSP'` in the page, the per-game dialog
- * and the verifier separately.
- *
- * The stage order is the other half of the rule, and it is not symmetric:
- *
- *   opening a save   unwrap the console's layer, THEN run the patch's decrypt
- *   putting it back  run the patch's encrypt, THEN wrap the console's layer
- *
- * Getting that backwards produces a file that looks plausible and that the
- * game refuses, so both the page and tools/verify-tools.mjs drive it from
- * here.
- */
-export const wrapsNatively = (platform) => platform === 'PSP';
-
 /* Does this save need a game key at all? A PARAM.SFO whose mode byte sets
  * neither keyed bit describes a save the console wrote unkeyed, and asking
  * for a key that does not exist is the quickest way to lose someone. */
@@ -491,6 +474,11 @@ let pickInto;
 
 export function initPsp(worker) {
     call = worker;
+
+    /* The panel's markup is on the patcher page only. The tools page still
+     * calls this, because the per-game dialogs there drive the SAME console
+     * layer through the shared functions above and those need `call`. */
+    if (!$('psp-open')) return;
 
     $('psp-open').addEventListener('click', () => {
         setStatus('');
