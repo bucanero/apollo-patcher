@@ -84,6 +84,7 @@ enum {
     APFD_ERR_HASH     = -9,  /* the entry's hash does not match the file      */
 };
 
+#define APFD_ACCT_ID_LEN    16    /* an account ID, as 16 ASCII hex digits   */
 #define APFD_SFID_LEN       0x10  /* a secure file ID                        */
 #define APFD_CONSOLE_ID_LEN 0x10  /* the IDPS                                */
 #define APFD_DHK_LEN        0x10  /* a disc hash key                         */
@@ -285,6 +286,41 @@ int apfd_encrypt(uint8_t *pfd, size_t pfd_len, const char *name,
 int apfd_update_file(uint8_t *pfd, size_t pfd_len, const char *name,
                      const uint8_t *plain, size_t plain_len,
                      const uint8_t sfid[APFD_SFID_LEN]);
+
+/*
+ * Write a PSN account ID into a PARAM.SFO, in place.
+ *
+ * THE OTHER WAY TO RE-SIGN A SAVE, and usually the better one. Binding to a
+ * console ID ties the save to one machine (see apfd_set_console); an account
+ * ID travels with the PSN account instead, so the save loads on any PS3 the
+ * account has signed in to.
+ *
+ * `account` is 16 ASCII hex digits -- the account ID as PARAM.SFO stores it,
+ * which is the text of a 64-bit number, not the number's bytes. Exactly 16:
+ * anything else is refused rather than padded, because a short value written
+ * into a fixed field is a different account, not a shorter one.
+ *
+ * It lands in BOTH places the SFO keeps it -- the ACCOUNT_ID field and the
+ * copy at offset 0x30 inside the binary PARAMS blob. Across 172 real saves
+ * those two always agree, and a console reads whichever it likes, so writing
+ * one and not the other would leave the save disagreeing with itself.
+ *
+ * This only touches the SFO. The PFD's hashes are taken over these bytes, so
+ * the caller must follow with apfd_update_file() for "PARAM.SFO", which
+ * recomputes the entry's hash and re-signs the database around it. Skip that
+ * and the save will not load.
+ *
+ * APFD_ERR_NO_ENTRY when the SFO carries neither field, which means it is not
+ * a savedata PARAM.SFO.
+ */
+int apfd_sfo_set_account_id(uint8_t *sfo, size_t sfo_len, const char *account);
+
+/*
+ * Read the account ID a PARAM.SFO already carries, as 16 hex digits plus a
+ * terminator. For showing what a save is currently signed to.
+ */
+int apfd_sfo_account_id(const uint8_t *sfo, size_t sfo_len,
+                        char *out, size_t out_cap);
 
 /*
  * Does the entry's recorded hash match these bytes? `disk` is the file exactly

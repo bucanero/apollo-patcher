@@ -460,6 +460,21 @@
   </div>
 
   <div class="set-group">
+    <p class="psp-key-head"><span class="option-label">PS3 &mdash; account ID (PSN)</span></p>
+    <div class="psp-key-inputs">
+      <input id="set-acct" type="text" inputmode="latin" spellcheck="false"
+             autocomplete="off" maxlength="16" placeholder="16 hex digits"
+             aria-label="PS3 PSN account ID, as 16 hex digits">
+    </div>
+    <p class="psp-key-why">
+      Your PSN account, and usually the one to reach for. It is written into the
+      save&rsquo;s own <code>PARAM.SFO</code>, so the save loads on <em>any</em>
+      PS3 that account has signed in to rather than on one machine. Name one and
+      the PS3 tool offers <strong>Sign to your account</strong>.
+    </p>
+  </div>
+
+  <div class="set-group">
     <p class="psp-key-head"><span class="option-label">PS3 &mdash; console ID (IDPS)</span></p>
     <div class="psp-key-inputs">
       <input id="set-cid" type="text" inputmode="latin" spellcheck="false"
@@ -477,9 +492,10 @@
       trophy folder&rsquo;s hashes.
     </p>
     <p class="psp-key-why">
-      Re-binding is the <code>PARAM.PFD</code> half of moving a save. A save
-      also carries account fields in its own <code>PARAM.SFO</code>, and those
-      are not touched here.
+      The two are independent and both can be used. Re-binding is the
+      <code>PARAM.PFD</code> half of moving a save; signing to an account is the
+      <code>PARAM.SFO</code> half, and it rewrites both files &mdash; keep both,
+      or the save will not load.
     </p>
   </div>
 

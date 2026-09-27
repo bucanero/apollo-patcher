@@ -529,6 +529,10 @@ is what patching one in place wants.
   `PARAM.SFO` hashes from the console's own fuse. A PSP loads a save whose
   values differ, so this only matters for reproducing one console's output byte
   for byte.
+- **PS3, account ID** (16 hex digits) — your PSN account, and **usually the
+  one to reach for**. It is written into the save's own `PARAM.SFO`, so the
+  save loads on *any* PS3 that account has signed in to rather than on one
+  machine. Name one and the PS3 section offers **Sign to your account**.
 - **PS3, console ID / IDPS** (32 hex digits, plus a user number). Inside
   `PARAM.PFD`, one of `PARAM.SFO`'s four hashes is keyed by the IDPS of a single
   machine — that is what binds a save to a console. Name one and the PS3 section
@@ -540,8 +544,20 @@ one that would bind a save to the wrong machine, so Save stays disabled until
 each is empty or complete. The byte order has nothing to validate, so it takes
 effect and is saved the moment it is picked.
 
-Re-binding is the `PARAM.PFD` half of moving a save between consoles. A save
-also carries account fields in its own `PARAM.SFO`, and those are not touched.
+The two are independent and both can be used. Re-binding is the `PARAM.PFD`
+half of moving a save; signing to an account is the `PARAM.SFO` half.
+
+**Signing to an account** writes the ID into *both* places `PARAM.SFO` keeps
+it — the `ACCOUNT_ID` field and the copy at offset `0x30` inside the binary
+`PARAMS` blob. Across 172 real saves those two always agree, and a console may
+read either, so writing one and not the other would leave the save disagreeing
+with itself. The PFD's hash of `PARAM.SFO` is taken over those bytes, so it is
+recomputed and the database re-signed in the same action — stopping half way
+leaves a save that will not load at all.
+
+`PARAM.SFO` is written before `PARAM.PFD` deliberately: if the second write
+fails, the save is one **Resign PARAM.PFD** away from correct rather than
+silently mismatched, and the log says so.
 
 The saves folder is in that file too, though nothing in this dialog sets it:
 choosing one in the save browser writes it there straight away. It is the one

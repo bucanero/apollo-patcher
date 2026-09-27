@@ -28,7 +28,7 @@
  * the page uses (core/ps3/, compiled in). Nothing is uploaded.
  */
 import { CDN } from './cdn.js';
-import { hasConsoleId } from './settings.js';
+import { hasConsoleId, hasAccountId, settings } from './settings.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -332,6 +332,20 @@ function renderActions() {
           hint: 'Recompute the PARAM.PFD signatures alone, leaving every file as it is.' },
     ];
 
+    /* Offered only once an account has been named in Settings. Listed before
+     * the console because it is the one to reach for: an account ID travels
+     * between machines where an IDPS does not. */
+    if (hasAccountId())
+        buttons.push({
+            key: 'account',
+            label: 'Sign to your account',
+            on: !!pfd && !!sfo,
+            hint: sfo
+                ? 'Write your PSN account into PARAM.SFO and update PARAM.PFD to match, '
+                  + 'so the save loads on any PS3 signed in to that account.'
+                : 'Add the folder’s PARAM.SFO as well — the account fields live in it.',
+        });
+
     /* Offered only once a console has been named in Settings, because without
      * one there is nothing to re-bind TO, and a button that always sat there
      * disabled would raise a question it could not answer. */
@@ -511,12 +525,18 @@ async function run(what) {
     $('ps3-outputs').innerHTML = '';
     outputs = [];
     $('ps3-actions').querySelectorAll('.action').forEach((b) => { b.disabled = true; });
-    setBusy({ resign: 'Resigning…', rebind: 'Re-binding…',
+    setBusy({ resign: 'Resigning…', rebind: 'Re-binding…', account: 'Signing…',
               decrypt: 'Decrypting…', encrypt: 'Re-encrypting…' }[what]);
 
     let res;
     if (what === 'resign') {
         res = await call('ps3Resign', { pfd: pfd.bytes.slice().buffer });
+    } else if (what === 'account') {
+        res = await call('ps3AccountResign', {
+            pfd: pfd.bytes.slice().buffer,
+            sfo: sfo.bytes.slice().buffer,
+            account: settings().ps3AccountId,
+        });
     } else if (what === 'rebind') {
         /* The disc hash key keys one of the three hashes and is per GAME, not
          * per console, so it is looked up here rather than kept in Settings.
@@ -586,16 +606,20 @@ async function run(what) {
         <button type="button" class="linkish ps3-save" data-i="${i}">Save</button>
       </div>`).join('');
     $('ps3-outputs').hidden = false;
-    setStatus('Re-encrypted. Save BOTH files back into the save folder — '
-              + 'PARAM.PFD changed too, and the save will not load without it.', 'good');
+    setStatus(what === 'account'
+        ? 'Signed to your account. Save BOTH files back into the save folder — '
+          + 'PARAM.SFO carries the account and PARAM.PFD hashes it, and a save '
+          + 'with only one of them will not load.'
+        : 'Re-encrypted. Save BOTH files back into the save folder — '
+          + 'PARAM.PFD changed too, and the save will not load without it.', 'good');
 }
 
 /* ---- wiring ------------------------------------------------------------- */
 
 let pickInto;
 
-/* Settings can be changed while the panel is open, and the re-bind action
- * only exists when a console is named there. */
+/* Settings can be changed while the panel is open, and two of the actions
+ * exist only when an account or a console is named there. */
 export function ps3SettingsChanged() {
     if ($('ps3').open) renderActions();
 }

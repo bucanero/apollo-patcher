@@ -23,7 +23,7 @@ public/psp.js        the PSP savedata panel — the console's own encryption,
                      optional stage inside the tools page's game dialogs
 public/ps3.js        the PS3's, the same layer one console up
 public/settings.js   byte order, and which console a save is written FOR (the
-                     PSP's Fuse ID, the PS3's console ID). The dialog is on the
+                     PSP's Fuse ID, the PS3's console and account IDs). The dialog is on the
                      patcher page; the store is read by both
 public/tools.css     its layout, on style.css's tokens
 public/toolkit.js    which codes each action runs; shared with verify-tools.mjs
@@ -179,21 +179,38 @@ Everything in it is optional, and every default is the safe one.
   contradicts the patch that is open. The patcher page carries the same control
   inline, next to Apply, since it has no Settings dialog of its own.
 
-The other two name the console a save is written *for*. Both change only what is
-WRITTEN, and leaving them blank keeps whatever a save already says.
+The rest name the console or account a save is written *for*. All change only
+what is WRITTEN, and leaving them blank keeps whatever a save already says.
 
 - **PSP, Fuse ID.** Savedata modes 4 and 6 derive two `PARAM.SFO` hashes from
   the console's own fuse. A PSP loads a save whose values differ, so this only
   matters for reproducing one console's output byte for byte.
+- **PS3, account ID (PSN).** 16 hex digits, and usually the one to reach for.
+  It is written into the save's own `PARAM.SFO`, so the save loads on *any* PS3
+  that account has signed in to rather than on one machine. Name one and the
+  PS3 panel offers **Sign to your account**.
 - **PS3, console ID (IDPS).** Inside `PARAM.PFD`, one of `PARAM.SFO`'s four
   hashes is keyed by the IDPS of a single machine. Name one and the PS3 panel
   offers **Re-bind to your console**, which rewrites that hash and re-signs the
   database around it.
 
-The values live in the wasm module, which belongs to the worker, so the page
-pushes them there on every change and once at start-up; `localStorage` keeps
-them across visits, since they describe your console rather than the save you
-happen to be holding.
+The two PS3 settings are independent and both can be used. Signing to an
+account writes the ID into *both* places `PARAM.SFO` keeps it — the
+`ACCOUNT_ID` field and the copy at `0x30` inside the binary `PARAMS` blob —
+and then recomputes `PARAM.PFD`'s hash of that file, so it hands back **two**
+files. Keep both: a `PARAM.SFO` carrying a new account beside a `PARAM.PFD`
+that still hashes the old one is a save that does not load.
+
+The console is cleared across that update and put back afterwards, because
+`apfd_update_file` re-binds `PARAM.SFO`'s console-keyed hashes whenever one is
+named — ambient state rather than an argument — and signing to an account has
+no business doing the console's job as well.
+
+The Fuse ID and console ID live in the wasm module, which belongs to the
+worker, so the page pushes them there on every change and once at start-up.
+The account ID does not: it is passed with the call that uses it. `localStorage`
+keeps all of them across visits, since they describe your console or account
+rather than the save you happen to be holding.
 
 ## Verifying the tools
 

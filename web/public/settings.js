@@ -17,6 +17,13 @@
  *                      offers to re-bind a save to it; leave it blank and
  *                      every save keeps the binding it arrived with.
  *
+ *   PS3, account ID    The PSN account, and usually the better of the two:
+ *                      it is written into the save's own PARAM.SFO, so the
+ *                      save loads on ANY PS3 that account has signed in to
+ *                      rather than on one machine. Unlike the two above it
+ *                      never reaches the wasm module as a setting -- it is
+ *                      passed with the call that uses it.
+ *
  * The values live in the wasm module, which belongs to the worker, so they are
  * pushed there on every change and once at start-up. localStorage keeps them
  * across visits -- they are a property of the person's console, not of the
@@ -28,7 +35,9 @@ const KEY = 'apollo.settings';
 
 /* The defaults are "say nothing", which is why both are empty strings rather
  * than the values they stand in for. */
-const EMPTY = { pspFuseId: '', ps3ConsoleId: '', ps3UserId: 1, byteOrder: 'auto' };
+const EMPTY = {
+    pspFuseId: '', ps3ConsoleId: '', ps3AccountId: '', ps3UserId: 1, byteOrder: 'auto',
+};
 
 /*
  * Byte order for save DATA, the CLI's -b/--big-endian flag.
@@ -82,6 +91,7 @@ function save() {
  * action only when a console has been named. */
 export const settings = () => ({ ...current });
 export const hasConsoleId = () => /^[0-9A-F]{32}$/i.test(current.ps3ConsoleId);
+export const hasAccountId = () => /^[0-9A-F]{16}$/i.test(current.ps3AccountId);
 
 /* Push to the worker and report what it says is actually in effect -- which is
  * not always what was asked for, since it rejects a malformed value. */
@@ -106,10 +116,14 @@ function setStatus(text, tone) {
 function validate() {
     const fuse = $('set-fuse').value.trim().toUpperCase();
     const cid  = $('set-cid').value.trim().toUpperCase();
+    const acct = $('set-acct').value.trim();
     const bad  = [];
 
     if (fuse && !/^[0-9A-F]{16}$/.test(fuse)) bad.push('the Fuse ID needs 16 hex digits');
     if (cid && !/^[0-9A-F]{32}$/.test(cid)) bad.push('the console ID needs 32 hex digits');
+    // All-or-nothing like the others: a short account ID is not a shorter
+    // account, it is a different one.
+    if (acct && !/^[0-9A-Fa-f]{16}$/.test(acct)) bad.push('the account ID needs 16 hex digits');
 
     $('settings-save').disabled = bad.length > 0;
     setStatus(bad.join('; '), bad.length ? 'bad' : '');
@@ -120,6 +134,7 @@ function render() {
     $('set-order').value = current.byteOrder;
     $('set-fuse').value = current.pspFuseId;
     $('set-cid').value = current.ps3ConsoleId;
+    $('set-acct').value = current.ps3AccountId;
     $('set-user').value = String(current.ps3UserId || 1);
     renderOrderWarning();
     validate();
@@ -168,7 +183,7 @@ export function initSettings(worker, changed) {
         $('settings').showModal();
     });
 
-    for (const id of ['set-fuse', 'set-cid', 'set-user'])
+    for (const id of ['set-fuse', 'set-cid', 'set-acct', 'set-user'])
         $(id).addEventListener('input', validate);
 
     /* The byte order takes effect the moment it is picked: it cannot be
@@ -192,6 +207,7 @@ export function initSettings(worker, changed) {
             ...current,
             pspFuseId: $('set-fuse').value.trim().toUpperCase(),
             ps3ConsoleId: $('set-cid').value.trim().toUpperCase(),
+            ps3AccountId: $('set-acct').value.trim().toLowerCase(),
             ps3UserId: Math.max(1, parseInt($('set-user').value, 10) || 1),
         };
         save();

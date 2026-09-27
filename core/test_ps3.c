@@ -41,6 +41,7 @@
 #endif
 
 #include "ps3/pfd_savedata.h"
+#include "sfo.h"
 
 /* ------------------------------------------------------------------ *
  * REGENERATING the known-answer vectors
@@ -449,6 +450,146 @@ static void check_conf(void)
 }
 
 /* ---- the round trip ----------------------------------------------------- */
+
+/*
+ * The account ID: the other way to re-sign a save, and the one that travels
+ * between machines rather than binding to one.
+ *
+ * A synthetic PARAM.SFO here rather than a real one, because what has to be
+ * right is narrow and exact -- 16 ASCII characters into two fields at two
+ * offsets -- and a fixture states the expected bytes where a real save only
+ * implies them. The offsets themselves came from 172 real saves.
+ */
+static size_t build_account_sfo(uint8_t *out, size_t cap,
+                                int with_field, int with_params)
+{
+    /* Laid out by hand: header, index, keys, data. Small enough to be obvious
+     * and it keeps the test independent of the SFO writer. */
+    static const char *K1 = "ACCOUNT_ID";
+    static const char *K2 = "PARAMS";
+    const uint32_t n = (uint32_t)(!!with_field + !!with_params);
+    uint32_t keys_at, data_at, key_off = 0, data_off = 0, i = 0;
+    uint8_t *p;
+
+    if (cap < 0x400 || !n)
+        return 0;
+    memset(out, 0, 0x400);
+
+    keys_at = 0x14 + 0x10 * n;
+    data_at = (keys_at + 32 + 3) & ~3u;
+
+    memcpy(out, "\0PSF", 4);
+    out[4] = 0x01; out[5] = 0x01;                 /* version 1.1, LE */
+    out[8]  = (uint8_t)keys_at;  out[9]  = (uint8_t)(keys_at >> 8);
+    out[12] = (uint8_t)data_at;  out[13] = (uint8_t)(data_at >> 8);
+    out[16] = (uint8_t)n;
+
+    if (with_field) {
+        p = out + 0x14 + 0x10 * i++;
+        p[0] = (uint8_t)key_off; p[2] = 0x04; p[3] = 0x02;   /* UTF-8 */
+        p[4] = APFD_ACCT_ID_LEN; p[8] = APFD_ACCT_ID_LEN;
+        p[12] = (uint8_t)data_off;
+        strcpy((char *)out + keys_at + key_off, K1);
+        memset(out + data_at + data_off, 'Z', APFD_ACCT_ID_LEN);
+        key_off += (uint32_t)strlen(K1) + 1;
+        data_off += APFD_ACCT_ID_LEN;
+    }
+    if (with_params) {
+        const uint32_t plen = 0x400 - data_at - data_off > 0x80 ? 0x80 : 0;
+        p = out + 0x14 + 0x10 * i++;
+        p[0] = (uint8_t)key_off; p[2] = 0x04; p[3] = 0x00;   /* binary */
+        p[4] = (uint8_t)plen; p[8] = (uint8_t)plen;
+        p[12] = (uint8_t)data_off;
+        strcpy((char *)out + keys_at + key_off, K2);
+        memset(out + data_at + data_off, 'Y', plen);
+        data_off += plen;
+    }
+    return data_at + data_off;
+}
+
+static void check_account_id(void)
+{
+    static const char *ACCT = "780304033110f24f";
+    uint8_t sfo[0x400];
+    char    got[APFD_ACCT_ID_LEN + 1];
+    size_t  len;
+
+    puts("\nthe account a save is signed to");
+
+    len = build_account_sfo(sfo, sizeof sfo, 1, 1);
+    CHECK("a PARAM.SFO with both fields was built", len > 0);
+
+    CHECK_RC("an account ID writes", apfd_sfo_set_account_id(sfo, len, ACCT));
+    CHECK_RC("...and reads back", apfd_sfo_account_id(sfo, len, got, sizeof got));
+    CHECK("...as what went in", strcmp(got, ACCT) == 0);
+
+    /* Both copies, because a console may read either and a save that
+     * disagrees with itself is the bug this guards. */
+    {
+        size_t   off;
+        uint32_t used;
+        int      both = 0;
+
+        if (asfo_find(sfo, len, "ACCOUNT_ID", &off, &used, NULL, NULL) == ASFO_OK
+            && memcmp(sfo + off, ACCT, APFD_ACCT_ID_LEN) == 0) both++;
+        if (asfo_find(sfo, len, "PARAMS", &off, &used, NULL, NULL) == ASFO_OK
+            && memcmp(sfo + off + 0x30, ACCT, APFD_ACCT_ID_LEN) == 0) both++;
+        CHECK("...into the field AND the PARAMS blob", both == 2);
+    }
+
+    /* Either alone still works: a save missing one is odd, not unusable. */
+    len = build_account_sfo(sfo, sizeof sfo, 1, 0);
+    CHECK_RC("with only the ACCOUNT_ID field", apfd_sfo_set_account_id(sfo, len, ACCT));
+    len = build_account_sfo(sfo, sizeof sfo, 0, 1);
+    CHECK_RC("with only the PARAMS blob", apfd_sfo_set_account_id(sfo, len, ACCT));
+
+    /* What must be refused. A short value written into a fixed field is a
+     * DIFFERENT account, not a shorter one, so it is not padded. */
+    len = build_account_sfo(sfo, sizeof sfo, 1, 1);
+    CHECK("a short ID is refused",
+          apfd_sfo_set_account_id(sfo, len, "780304") == APFD_ERR_ARG);
+    CHECK("a long ID is refused",
+          apfd_sfo_set_account_id(sfo, len, "780304033110f24f0") == APFD_ERR_ARG);
+    CHECK("a non-hex ID is refused",
+          apfd_sfo_set_account_id(sfo, len, "780304033110f24g") == APFD_ERR_ARG);
+    CHECK("an empty ID is refused",
+          apfd_sfo_set_account_id(sfo, len, "") == APFD_ERR_ARG);
+    CHECK("a NULL ID is refused",
+          apfd_sfo_set_account_id(sfo, len, NULL) == APFD_ERR_ARG);
+    CHECK("a NULL SFO is refused",
+          apfd_sfo_set_account_id(NULL, len, ACCT) == APFD_ERR_ARG);
+    CHECK("...and none of that changed the save",
+          apfd_sfo_account_id(sfo, len, got, sizeof got) == APFD_OK
+          && strcmp(got, "ZZZZZZZZZZZZZZZZ") == 0);
+
+    /* An SFO that is not a save's carries neither field. */
+    {
+        uint8_t bare[0x40];
+        memset(bare, 0, sizeof bare);
+        memcpy(bare, "\0PSF", 4);
+        bare[4] = 0x01; bare[5] = 0x01;
+        bare[8] = 0x14; bare[12] = 0x14;
+        CHECK("an SFO with neither field says so",
+              apfd_sfo_set_account_id(bare, sizeof bare, ACCT) == APFD_ERR_NO_ENTRY);
+    }
+
+    /* Truncation, the usual argument: this arrives from a memory card. */
+    {
+        uint8_t copy[0x400];
+        size_t  at;
+        int     wrong = 0;
+
+        len = build_account_sfo(sfo, sizeof sfo, 1, 1);
+        for (at = 0; at < len; at++) {
+            memcpy(copy, sfo, at);
+            if (apfd_sfo_set_account_id(copy, at, ACCT) == APFD_OK
+                && apfd_sfo_account_id(copy, at, got, sizeof got) == APFD_OK
+                && strcmp(got, ACCT) != 0)
+                wrong++;
+        }
+        CHECK("no truncation writes a half account ID", wrong == 0);
+    }
+}
 
 static void check_round_trip(void)
 {
@@ -1063,6 +1204,7 @@ int main(int argc, char **argv)
     check_conf();
     check_dhk();
     check_console();
+    check_account_id();
     check_round_trip();
     check_args();
     check_known_answers();

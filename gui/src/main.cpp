@@ -643,6 +643,7 @@ enum ByteOrder { BYTE_ORDER_AUTO = 0, BYTE_ORDER_BIG = 1, BYTE_ORDER_LITTLE = 2 
 struct Settings {
     char fuse_hex[17]    = "";     // 16 hex digits, or empty for the default
     char console_hex[33] = "";     // 32 hex digits, or empty for "leave alone"
+    char account_hex[17] = "";     // 16 hex digits, the PSN account ID
     int  user_id         = 1;
     int  byte_order      = BYTE_ORDER_AUTO;
     // Where the saves are. Not a property of a console like the two above,
@@ -737,6 +738,7 @@ static void settings_load() {
 
         if (key == "psp_fuse_id")    snprintf(g_settings.fuse_hex, sizeof g_settings.fuse_hex, "%s", val.c_str());
         else if (key == "ps3_console_id") snprintf(g_settings.console_hex, sizeof g_settings.console_hex, "%s", val.c_str());
+        else if (key == "ps3_account_id") snprintf(g_settings.account_hex, sizeof g_settings.account_hex, "%s", val.c_str());
         else if (key == "ps3_user_id")    g_settings.user_id = atoi(val.c_str());
         else if (key == "saves_root")     g_settings.saves_root = val;
         else if (key == "byte_order")
@@ -768,6 +770,7 @@ static bool settings_store() {
         << "# Both are optional; blank keeps whatever a save already says.\n"
         << "psp_fuse_id=" << g_saved.fuse_hex << "\n"
         << "ps3_console_id=" << g_saved.console_hex << "\n"
+        << "ps3_account_id=" << g_saved.account_hex << "\n"
         << "ps3_user_id=" << g_saved.user_id << "\n"
         << "saves_root=" << g_saved.saves_root << "\n"
         << "byte_order=" << (g_saved.byte_order == BYTE_ORDER_BIG    ? "big"
@@ -1190,6 +1193,91 @@ static bool ps3_resign() {
 //
 // PARAM.SFO is read, not written. Its own account fields are a separate
 // binding, and this does not touch them.
+//
+// Re-sign this save to the PSN account named in Settings.
+//
+// The other half of "make this save mine", and usually the better half:
+// re-binding writes the IDPS of ONE MACHINE into a PARAM.PFD hash, where an
+// account ID travels with the account and the save then loads on any PS3 that
+// account has signed in to.
+//
+// The order matters and is the whole reason this is one action rather than
+// two buttons. PARAM.SFO is rewritten first; the PFD's hash of it is taken
+// over those bytes, so apfd_update_file recomputes it and re-signs the
+// database around it. Stop after the first step and the save no longer loads
+// at all, which is worse than where it started.
+//
+static bool ps3_account_resign() {
+    std::vector<unsigned char> pfd, sfo;
+
+    if (strlen(g_saved.account_hex) != APFD_ACCT_ID_LEN) {
+        g_app.append_log("[!] PS3: no account ID in Settings, so there is nothing "
+                         "to sign to");
+        return false;
+    }
+    if (g_app.ps3.sfo_path.empty()) {
+        g_app.append_log("[!] PS3: no PARAM.SFO beside this save - the account "
+                         "fields live in it");
+        return false;
+    }
+    if (!read_all(g_app.ps3.pfd_path, pfd) || !read_all(g_app.ps3.sfo_path, sfo)) {
+        g_app.append_log("[!] PS3: could not read PARAM.PFD or PARAM.SFO");
+        return false;
+    }
+
+    char was[APFD_ACCT_ID_LEN + 1] = "";
+    apfd_sfo_account_id(sfo.data(), sfo.size(), was, sizeof was);
+
+    int rc = apfd_sfo_set_account_id(sfo.data(), sfo.size(), g_saved.account_hex);
+    if (rc != APFD_OK) {
+        g_app.append_log((std::string("[!] PS3 account re-sign failed: ")
+                          + apfd_strerror(rc)).c_str());
+        return false;
+    }
+
+    //
+    // The PFD's record of PARAM.SFO, over the bytes just written.
+    //
+    // The console is cleared across the call and put back afterwards, because
+    // apfd_update_file re-binds PARAM.SFO's other three hashes whenever one is
+    // named -- ambient state, not an argument. Leaving it set would make this
+    // button quietly do the console's job as well, which is a separate choice
+    // with a separate button.
+    //
+    apfd_console_t saved;
+    const bool had_console = apfd_get_console(&saved) != 0;
+    if (had_console) apfd_set_console(nullptr);
+
+    rc = apfd_update_file(pfd.data(), pfd.size(), "PARAM.SFO",
+                          sfo.data(), sfo.size(), nullptr);
+
+    if (had_console) apfd_set_console(&saved);
+    if (rc != APFD_OK) {
+        g_app.append_log((std::string("[!] PS3: PARAM.PFD would not record the new "
+                                      "PARAM.SFO: ") + apfd_strerror(rc)).c_str());
+        return false;
+    }
+
+    // PARAM.SFO first: if the PFD write fails after it, the save is one
+    // apfd_resign away from correct rather than silently mismatched.
+    if (!write_all(g_app.ps3.sfo_path, sfo.data(), sfo.size())) {
+        g_app.append_log("[!] PS3: could not write PARAM.SFO");
+        return false;
+    }
+    if (!write_all(g_app.ps3.pfd_path, pfd.data(), pfd.size())) {
+        g_app.append_log("[!] PS3: PARAM.SFO was written but PARAM.PFD was not - "
+                         "use \"Resign PARAM.PFD\" to finish, or the save will not load");
+        return false;
+    }
+
+    g_app.ps3.hash_checked = false;   // the file changed under the check
+    g_app.append_log((std::string("PARAM.SFO signed to account ")
+                      + g_saved.account_hex
+                      + (was[0] ? std::string(" (was ") + was + ")" : std::string())
+                      + ", and PARAM.PFD updated to match").c_str());
+    return true;
+}
+
 static bool ps3_rebind() {
     std::vector<unsigned char> pfd, sfo;
     apfd_console_t console, saved;
@@ -3348,6 +3436,23 @@ static void draw_ps3_section() {
         ImGui::SetTooltip("Recompute the PARAM.PFD signatures alone. Needs no key -\n"
                           "for a database whose entries something else edited.");
 
+    // Offered only once an account has been named in Settings. Listed before
+    // the console button because it is the one to reach for: an account ID
+    // travels between machines where an IDPS does not.
+    if (strlen(g_saved.account_hex) == APFD_ACCT_ID_LEN) {
+        ImGui::SameLine();
+        ImGui::BeginDisabled(g_app.ps3.sfo_path.empty());
+        if (ImGui::Button("Sign to your account"))
+            { if (!ps3_account_resign()) g_app.show_log = true; }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(g_app.ps3.sfo_path.empty()
+                ? "No PARAM.SFO beside this save - the account fields live in it."
+                : "Write account %s into this save's PARAM.SFO and update\n"
+                  "PARAM.PFD to match, so it loads on any PS3 signed in to\n"
+                  "that account.", g_saved.account_hex);
+    }
+
     // Offered only once a console has been named in Settings, because without
     // one there is nothing to bind TO.
     if (apfd_get_console(nullptr)) {
@@ -3422,21 +3527,33 @@ static void draw_settings_window() {
     changed |= ImGui::InputInt("User number", &g_settings.user_id);
     if (g_settings.user_id < 1) g_settings.user_id = 1;
 
-    ImGui::TextDisabled("32 hex digits. Inside PARAM.PFD, one of PARAM.SFO's four");
-    ImGui::TextDisabled("hashes is keyed by the IDPS of a single machine - that is");
-    ImGui::TextDisabled("what binds a save to a console. Name yours and the PS3");
-    ImGui::TextDisabled("section offers to re-bind a save to it. The user number");
-    ImGui::TextDisabled("reaches only a trophy folder's hashes.");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
+    changed |= ImGui::InputText("Account ID (PSN)", g_settings.account_hex,
+                                sizeof g_settings.account_hex,
+                                ImGuiInputTextFlags_CharsHexadecimal);
+
+    ImGui::TextDisabled("Two ways to re-sign a PS3 save, and the account is usually");
+    ImGui::TextDisabled("the one to reach for.");
     ImGui::Spacing();
-    ImGui::TextDisabled("Re-binding is the PARAM.PFD half of moving a save. A save");
-    ImGui::TextDisabled("also carries account fields in its own PARAM.SFO, and those");
-    ImGui::TextDisabled("are not touched here.");
+    ImGui::TextDisabled("Account ID: 16 hex digits, your PSN account. It is written");
+    ImGui::TextDisabled("into the save's own PARAM.SFO, so the save loads on ANY PS3");
+    ImGui::TextDisabled("that account has signed in to - not just one machine.");
+    ImGui::Spacing();
+    ImGui::TextDisabled("Console ID (IDPS): 32 hex digits, one machine. Inside");
+    ImGui::TextDisabled("PARAM.PFD, one of PARAM.SFO's four hashes is keyed by it,");
+    ImGui::TextDisabled("and that is what binds a save to that console. The user");
+    ImGui::TextDisabled("number reaches only a trophy folder's hashes.");
+    ImGui::Spacing();
+    ImGui::TextDisabled("Name either and the PS3 section offers the matching action.");
 
     // The fields are all-or-nothing: a half-typed value is not "no value", it
-    // is one that would bind a save to the wrong machine.
+    // is one that would bind a save to the wrong machine, or the wrong account.
     const size_t fuse_len = strlen(g_settings.fuse_hex);
     const size_t cid_len  = strlen(g_settings.console_hex);
-    const bool   ok = (fuse_len == 0 || fuse_len == 16) && (cid_len == 0 || cid_len == 32);
+    const size_t acct_len = strlen(g_settings.account_hex);
+    const bool   ok = (fuse_len == 0 || fuse_len == 16)
+                   && (cid_len  == 0 || cid_len  == 32)
+                   && (acct_len == 0 || acct_len == APFD_ACCT_ID_LEN);
 
     /* The order alone: apply just the byte order, not settings_apply(), which
      * would also push whatever half-typed hex is in the fields. */
@@ -3463,6 +3580,7 @@ static void draw_settings_window() {
     ImGui::SameLine();
     if (ImGui::Button("Clear all")) {
         g_settings.fuse_hex[0] = g_settings.console_hex[0] = '\0';
+        g_settings.account_hex[0] = '\0';
         g_settings.user_id = 1;
         g_settings.byte_order = BYTE_ORDER_AUTO;
         settings_apply();
@@ -3475,7 +3593,8 @@ static void draw_settings_window() {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f), "%s",
                            fuse_len && fuse_len != 16 ? "the Fuse ID needs 16 hex digits"
-                                                      : "the console ID needs 32 hex digits");
+                           : cid_len && cid_len != 32  ? "the console ID needs 32 hex digits"
+                                                       : "the account ID needs 16 hex digits");
     } else if (!g_settings.status.empty()) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.55f, 1.0f), "%s", g_settings.status.c_str());

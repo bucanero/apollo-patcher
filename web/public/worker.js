@@ -586,6 +586,37 @@ const handlers = {
      * Only PARAM.PFD comes back. PARAM.SFO is read, not written -- its own
      * account fields are a separate binding this does not touch.
      */
+    /*
+     * Sign a save to a PSN account: write the ID into PARAM.SFO and bring
+     * PARAM.PFD's record of it back into agreement.
+     *
+     * BOTH files come back, and both have to be kept. A PARAM.SFO carrying a
+     * new account beside a PARAM.PFD that still hashes the old one is a save
+     * that does not load -- which is why this is one call and not two.
+     */
+    async ps3AccountResign({ pfd, sfo, account }) {
+        await ready();
+        const p = new Uint8Array(pfd);
+        const f = new Uint8Array(sfo);
+        const pp = alloc(p), fp = alloc(f);
+        const ap = M.stringToNewUTF8(account || '');
+        try {
+            const rc = M._apw_ps3_account_resign(pp, p.length, fp, f.length, ap);
+            if (rc !== 0) return { ok: false, error: ps3Error(rc) };
+            const sfoBytes = heapCopy(fp, f.length);
+            const pfdBytes = heapCopy(pp, p.length);
+            return {
+                ok: true,
+                files: [
+                    { name: 'PARAM.SFO', bytes: sfoBytes, changed: !sameBytes(sfoBytes, f) },
+                    { name: 'PARAM.PFD', bytes: pfdBytes, changed: !sameBytes(pfdBytes, p) },
+                ],
+            };
+        } finally {
+            M._free(pp); M._free(fp); M._free(ap);
+        }
+    },
+
     async ps3Rebind({ pfd, sfo, dhk }) {
         await ready();
         const p = new Uint8Array(pfd);

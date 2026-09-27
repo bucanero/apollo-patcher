@@ -982,6 +982,65 @@ const char *apw_ps3_dhk_from_db(const char *text, int len, const char *directory
  *
  * The PARAM.PFD at `pfd` is rewritten IN PLACE; the caller keeps it.
  */
+/*
+ * The account a PARAM.SFO is signed to, as 16 hex digits. "" when the file
+ * carries neither of the two fields that hold it, which means it is not a
+ * savedata PARAM.SFO.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *apw_ps3_account_id(const char *sfo, int sfo_len)
+{
+    static char id[APFD_ACCT_ID_LEN + 1];
+
+    id[0] = '\0';
+    if (sfo && sfo_len > 0)
+        apfd_sfo_account_id((const unsigned char *)sfo, (size_t)sfo_len,
+                            id, sizeof id);
+    return id;
+}
+
+/*
+ * Sign a save to a PSN account.
+ *
+ * The other way to re-sign, and usually the better one: re-binding writes the
+ * IDPS of one machine into a PARAM.PFD hash, where an account ID travels with
+ * the account and the save then loads on any PS3 signed in to it.
+ *
+ * BOTH buffers are rewritten in place and BOTH must be kept. A PARAM.SFO
+ * carrying a new account beside a PARAM.PFD that still hashes the old one is
+ * a save that does not load at all -- worse than where it started.
+ *
+ * The console is cleared across the update and put back afterwards, because
+ * apfd_update_file re-binds PARAM.SFO's console-keyed hashes whenever one is
+ * named. That is ambient state rather than an argument, and this call has no
+ * business doing the console's job.
+ */
+EMSCRIPTEN_KEEPALIVE
+int apw_ps3_account_resign(char *pfd, int pfd_len, char *sfo, int sfo_len,
+                           const char *account)
+{
+    apfd_console_t saved;
+    int had, rc;
+
+    apctl_set_log_sink(log_sink, NULL);
+
+    if (!pfd || pfd_len <= 0 || !sfo || sfo_len <= 0)
+        return APFD_ERR_ARG;
+
+    rc = apfd_sfo_set_account_id((unsigned char *)sfo, (size_t)sfo_len, account);
+    if (rc != APFD_OK)
+        return rc;
+
+    had = apfd_get_console(&saved);
+    if (had) apfd_set_console(NULL);
+
+    rc = apfd_update_file((unsigned char *)pfd, (size_t)pfd_len, "PARAM.SFO",
+                          (const unsigned char *)sfo, (size_t)sfo_len, NULL);
+
+    if (had) apfd_set_console(&saved);
+    return rc;
+}
+
 EMSCRIPTEN_KEEPALIVE
 int apw_ps3_rebind(char *pfd, int pfd_len, const char *sfo, int sfo_len,
                    const char *dhk_hex)
