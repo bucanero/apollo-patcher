@@ -691,10 +691,14 @@ hover panel, and the patcher screen's save header. The column appears only once
 an account is named in Settings — which is exactly when the question has an
 answer worth a column.
 
-Its cells read `you` / `other` rather than yes/no, because **Codes** is a
-yes column immediately to the left and two of those side by side answer
-different questions with the same word. `other` is amber rather than red: a
-save somebody gave you is the ordinary reason to re-sign one.
+Its cells carry a **check mark** when the save is yours and nothing when it is
+not — the same tick the View menu puts beside *Saves* and *Patcher*, drawn by
+`draw_check_mark()` with `MenuItemEx()`'s own sizing copied so the two cannot
+drift apart. Marking only the matches keeps the column scannable: what the eye
+runs down it for is the saves that **are** yours, and a word in every row would
+bury those among the rest. Whose a save is instead — and whether it names an
+account at all — is in the hover panel, which reads *"Signed to account … —
+yours"* or *"— not yours, sign it below"*.
 
 It is read during the scan rather than when a save is opened because that is
 when the question gets asked: *which of these are mine?* Reading it at open

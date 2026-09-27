@@ -3027,6 +3027,18 @@ static int account_verdict(const std::string& save_account) {
     return lowered(save_account) == lowered(g_saved.account_hex) ? 1 : -1;
 }
 
+// The same tick the View menu puts beside Saves and Patcher. ImGui has no
+// widget for a check mark on its own, so this is the call MenuItemEx() makes,
+// with its sizing and offset copied verbatim so the two cannot drift apart.
+static void draw_check_mark() {
+    const float  sz = ImGui::GetFontSize();
+    const ImVec2 p  = ImGui::GetCursorScreenPos();
+    ImGui::RenderCheckMark(ImGui::GetWindowDrawList(),
+                           ImVec2(p.x, p.y + sz * 0.134f * 0.5f),
+                           ImGui::GetColorU32(ImGuiCol_Text), sz * 0.866f);
+    ImGui::Dummy(ImVec2(sz, sz));   // so the row is as tall as a line of text
+}
+
 //
 // Everything about one save, on hover.
 //
@@ -3368,17 +3380,14 @@ static void draw_saves_screen() {
                     ImGui::TextDisabled("-");
                 if (know_account) {
                     ImGui::TableSetColumnIndex(5);
-                    // "you"/"other" rather than yes/no: Codes is a yes
-                    // column directly to the left, and two of them side by
-                    // side answer different questions with the same word.
-                    switch (account_verdict(s.account)) {
-                        case 1:  ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.60f, 1.0f), "you"); break;
-                        // Not an error, just somebody else's -- a save you
-                        // were given, which is the ordinary reason to re-sign
-                        // one in the first place.
-                        case -1: ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.45f, 1.0f), "other"); break;
-                        default: ImGui::TextDisabled("-"); break;
-                    }
+                    // A tick when the save is yours and nothing when it is
+                    // not. Leaving the other cases blank rather than marking
+                    // them keeps the column scannable -- what the eye is
+                    // looking for down it is the saves that ARE yours, and a
+                    // word in every row would bury those among the rest.
+                    // Whose it is instead, and whether it says at all, is in
+                    // the hover panel.
+                    if (account_verdict(s.account) > 0) draw_check_mark();
                 }
                 ImGui::PopID();
             }
