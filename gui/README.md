@@ -686,10 +686,15 @@ fails, the save is one **Resign PARAM.PFD** away from correct rather than
 silently mismatched, and the log says so.
 
 **Which account a save is signed to** is read during the scan, for every PS3
-save, and shown in three places: a **Yours** column in the save list, the hover
-panel, and the patcher screen's save header. The column appears only once an
-account is named in Settings — which is exactly when the question has an answer
-worth a column.
+save, and shown in three places: an **Owner** column in the save list, the
+hover panel, and the patcher screen's save header. The column appears only once
+an account is named in Settings — which is exactly when the question has an
+answer worth a column.
+
+Its cells read `you` / `other` rather than yes/no, because **Codes** is a
+yes column immediately to the left and two of those side by side answer
+different questions with the same word. `other` is amber rather than red: a
+save somebody gave you is the ordinary reason to re-sign one.
 
 It is read during the scan rather than when a save is opened because that is
 when the question gets asked: *which of these are mine?* Reading it at open

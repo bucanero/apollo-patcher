@@ -3321,8 +3321,8 @@ static void draw_saves_screen() {
         // Shown only once an account is named in Settings, which is exactly
         // when "is this one mine?" has an answer worth a column.
         if (know_account)
-            ImGui::TableSetupColumn("Yours", ImGuiTableColumnFlags_WidthFixed,
-                                    ImGui::CalcTextSize("Yours ").x);
+            ImGui::TableSetupColumn("Owner", ImGuiTableColumnFlags_WidthFixed,
+                                    ImGui::CalcTextSize("Owner ").x);
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
@@ -3368,12 +3368,15 @@ static void draw_saves_screen() {
                     ImGui::TextDisabled("-");
                 if (know_account) {
                     ImGui::TableSetColumnIndex(5);
+                    // "you"/"other" rather than yes/no: Codes is a yes
+                    // column directly to the left, and two of them side by
+                    // side answer different questions with the same word.
                     switch (account_verdict(s.account)) {
-                        case 1:  ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.60f, 1.0f), "yes"); break;
+                        case 1:  ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.60f, 1.0f), "you"); break;
                         // Not an error, just somebody else's -- a save you
                         // were given, which is the ordinary reason to re-sign
                         // one in the first place.
-                        case -1: ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.45f, 1.0f), "no"); break;
+                        case -1: ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.45f, 1.0f), "other"); break;
                         default: ImGui::TextDisabled("-"); break;
                     }
                 }
