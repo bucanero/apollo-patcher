@@ -7,12 +7,24 @@
  * folders are named almost the same as.
  *
  * This exists rather than a vendored decoder because the job is small and the
- * input is narrow. Across 185 real icons -- the PS3, PSP, PS4 and Vita saves
- * this was checked against -- every single one is 8-bit, non-interlaced, and
- * either RGB or RGBA. The rest of the non-interlaced format is supported
- * anyway (palettes, greyscale, 1/2/4/16-bit, tRNS) because it is a few lines
- * each; Adam7 interlacing is refused, which is the one thing in the format
- * that would double the size of this file.
+ * input is narrow. Measured over every .png in the apollo-saves database --
+ * all 5,560 of them, entry art and everything inside the save archives,
+ * across all six consoles -- every real PNG is 8 bits per channel, not one
+ * 16-bit or sub-8-bit file among 5,505, and all but 12 are non-interlaced RGB,
+ * RGBA or palette. So the whole non-interlaced format is supported (palettes,
+ * greyscale, 1/2/4/16-bit, tRNS), each a few lines.
+ *
+ * Adam7 interlacing is refused: it is the one thing in the format that would
+ * double the size of this file, for 12 files in 5,560.
+ *
+ * 5,492 of the 5,560 decode. Of the 68 refused, 55 are not PNG data at all
+ * (Vita thumbnails archived without decrypting, macOS AppleDouble stubs, one
+ * zero-byte file), 12 are the interlaced ones, and exactly ONE is a damaged
+ * image -- an IDAT that fails its own CRC and will not inflate. An
+ * independent decoder refuses the same set.
+ *
+ * The caller is expected to cope either way: the desktop app says
+ * "(the icon is ...)" and shows the row regardless.
  *
  * Output is always RGBA8, top row first, which is what a texture wants.
  *

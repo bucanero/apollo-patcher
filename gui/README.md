@@ -264,6 +264,25 @@ along with the file, and that is what the database is asked about.
 - **A game's own `PARAM.SFO` is not a save.** Discs and homebrew EBOOTs carry
   one and they are all over a memory card; requiring `SAVEDATA_DIRECTORY` is
   what keeps them out of the list.
+- **Neither is DLC.** `CATEGORY` says what an SFO *describes*, and exactly one
+  value per console means savedata — `MS` on a PSP, `SD` on a PS3, `sd` on a
+  PS4 or Vita. Everything else is something else: `ac` is add-on content, `gd`
+  is game data.
+
+  This matters most for the Vita, whose DLC folders carry their own
+  `sce_sys/param.sfo` **with a `TITLE_ID` in it** — and a `TITLE_ID` beside a
+  Vita-shaped SFO is the single thing that otherwise distinguishes a PS4 save
+  from a Vita one. Run over the
+  [apollo-saves](https://github.com/bucanero/apollo-saves) database, 80 DLC
+  folders across 7 archives were being listed as PS4 saves. All 2,566 real
+  saves in it carry one of the three savedata categories and nothing else
+  does.
+
+  The comparison ignores case, since the same two letters are upper on a PS3
+  and lower on a PS4. A file with **no** `CATEGORY` falls through to the
+  key-set tests rather than being refused — every real save measured has one,
+  but refusing a save over a key it merely omits would be a worse failure than
+  the one this fixes.
 - **It runs on its own thread.** A memory stick scans in well under a second,
   but nothing stops somebody choosing their home directory, and a window that
   freezes for a minute looks broken rather than busy. There is a Stop button,
@@ -330,11 +349,47 @@ list that shows one at a time; re-decoding a 320x176 image on each click costs
 a fraction of a millisecond.
 
 `core/png.c` does the decoding rather than a vendored library, because the job
-is small and the input is narrow: of 185 real icons across all four consoles,
-every single one is 8-bit, non-interlaced, and either RGB or RGBA. The rest of
-the non-interlaced format is handled anyway — palettes, greyscale, 1/2/4/16-bit,
-`tRNS` — since it is a few lines each. Adam7 interlacing is refused outright,
-being the one thing in the format that would double the size of that file. zlib
+is small and the input is narrow. Measured over **every `.png` in the
+[apollo-saves](https://github.com/bucanero/apollo-saves) database** — all
+5,560 of them, entry art and everything inside the archives, across all six
+consoles:
+
+| | files | |
+|---|---|---|
+| 8-bit RGB | 4,316 | |
+| 8-bit RGBA | 940 | |
+| 8-bit palette | 237 | |
+| 8-bit RGB, **interlaced** | 12 | refused |
+| not a PNG at all | 55 | |
+
+Every real PNG among them is **8 bits per channel** — not one 16-bit, 1-, 2-
+or 4-bit file in 5,505 — so the whole non-interlaced format is handled anyway
+(palettes, greyscale, 1/2/4/16-bit, `tRNS`), each a few lines. Adam7
+interlacing is refused outright, being the one thing in the format that would
+double the size of that file.
+
+**5,492 of the 5,560 decode.** The 68 refused break down as:
+
+| | files | |
+|---|---|---|
+| not PNG data | 41 | Vita thumbnails archived without decrypting — entropy 8.00 |
+| macOS AppleDouble stubs | 13 | `__MACOSX/._ICON0.PNG`, not icons at all |
+| interlaced | 12 | valid; see above |
+| `IDAT` fails its CRC and will not inflate | 1 | `PS3/NPUB30720/00000001.zip`'s copy |
+| zero-byte | 1 | |
+
+So **three are genuinely lost images** and the rest are either not pictures or
+not supported. An independent decoder refuses the same ones. Six are an
+`ICON0.PNG` the app would actually show — which is why a failed icon is a
+caption and not an error: the row still lists, and says *"(the icon is …)"*.
+
+Two near-misses worth recording, because both looked worse than they were.
+Five files have a complete, CRC-clean `IDAT` and a mangled 12-byte tail
+reading `HEND` rather than `IEND`; they decode everywhere, since `IEND` carries
+no pixels. And 544 have bytes appended *after* `IEND`, which is what a
+conformant decoder is supposed to ignore. Neither is damage, and an audit that
+checks the chunk walk before the image data will report both as truncation.
+zlib
 was already linked for the engine's own use.
 
 The texture is **padded to a power of two** and drawn with UVs that cut the
@@ -440,16 +495,24 @@ The crypto is `../core/psp/` and `../core/ps3/`; see the
 
 ## The font
 
-Game names are whatever the game wrote, and they are not ASCII. Across the
-patch database, the title catalogue and a corpus of real saves — 16,055 names —
-there are **592 characters outside ASCII**, and the distribution is lopsided:
+Game names are whatever the game wrote, and they are not ASCII. Measured over
+every name and slot label in the [apollo-saves](https://github.com/bucanero/apollo-saves)
+database — **6,243 strings** out of 2,648 `PARAM.SFO` files — **1,616 of them
+(26%) contain a character outside ASCII**: 877 distinct codepoints, 14,768
+occurrences. The distribution is not what a Latin-1 font would suggest:
 
-| | |
+| | occurrences |
 |---|---|
-| `™` U+2122 | **357** — 60% of the total, on its own |
-| `®` U+00AE | 171 |
-| `’ Σ • ©` and accented Latin | 24 |
-| Japanese | 40, in 2 of 176 saves |
+| Kana | **7,627** |
+| CJK ideographs | 3,066 |
+| Fullwidth forms | 1,615 |
+| Ideographic space and CJK punctuation | 1,246 |
+| Latin-1 supplement (`®`, accented Latin) | 429 |
+| `™` and other letterlike | 284 |
+| Cyrillic, Greek, symbols (`★ ♪ ♂ ⚙ ↑`), Arabic | ~500 |
+
+Japanese is not a footnote here, it is the bulk of it — a quarter of every
+name in the database needs more than Latin-1.
 
 ImGui's built-in ProggyClean covers U+0020–00FF and nothing else, so `®` drew
 fine and `™` drew as `?`. The app therefore **ships a font**:
@@ -470,13 +533,24 @@ its proportions would move. It would also hide a broken build behind something
 that looked almost right. One vendored font is one appearance and one tested
 path.
 
-Measured against those 31 distinct characters, with the ranges the app bakes:
+Asked of the built atlas, one codepoint at a time, Noto Sans JP with the ranges
+the app bakes has a glyph for **827 of the 877** — and weighted by how often
+each actually turns up, **14,596 of 14,768 characters, or 98.84%**.
 
-| Font | draws | atlas | bake |
+The 50 it misses are worth naming, because each is a deliberate limit rather
+than an oversight:
+
+| missing | codepoints | occurrences | why |
 |---|---|---|---|
-| ImGui built-in | 8/31 | 512×64, 32KB | 1ms |
-| any system font | 12/31 | 512×512, 256KB | 3ms |
-| **Noto Sans JP** | **31/31** | 1024×2048, 2MB | 35ms |
+| rare CJK ideographs | 28 | 109 | outside ImGui's common-use Japanese set; the full range would balloon the atlas |
+| Arabic | 11 | 12 | see below |
+| enclosed alphanumerics (`ⓒ ⑴`), geometric shapes (`■`) | 4 | 21 | ranges not baked — two lines would close it |
+| an emoji, a variation selector, four others | 7 | 30 | not UI-font material |
+
+**Arabic is left out on purpose.** ImGui does no bidirectional layout and no
+contextual shaping, so baking the glyphs would draw Arabic left-to-right in
+isolated letterforms — confidently wrong rather than visibly missing. Twelve
+characters in the whole database is not worth a wrong answer.
 
 The Japanese range is requested whichever font is found, because asking costs
 nothing when the font has no such glyphs — Arial comes out at the same 1015
@@ -675,9 +749,29 @@ half of moving a save; signing to an account is the `PARAM.SFO` half.
 
 **Signing to an account** writes the ID into *both* places `PARAM.SFO` keeps
 it — the `ACCOUNT_ID` field and the copy at offset `0x30` inside the binary
-`PARAMS` blob. Across 172 real saves those two always agree, and a console may
-read either, so writing one and not the other would leave the save disagreeing
-with itself. The PFD's hash of `PARAM.SFO` is taken over those bytes, so it is
+`PARAMS` blob. Writing one and not the other would leave the save disagreeing
+with itself, and saves in that state are not hypothetical: across the **632
+PS3 saves** in apollo-saves the two fields agree 587 times and **disagree 42**.
+
+| | |
+|---|---|
+| `ACCOUNT_ID` zeroed, `PARAMS` still names one | 28 |
+| `PARAMS` zeroed, `ACCOUNT_ID` still names one | 13 |
+| two genuinely different accounts | 1 |
+
+Forty-one of the 42 are half-unsigned — a tool cleared one field and left the
+other. Which is exactly what writing both prevents.
+
+**Reading** them is the other way round, and deliberately asymmetric:
+`apfd_sfo_account_id()` takes `ACCOUNT_ID` whenever the key is present, and
+falls back to the `PARAMS` copy only when it is missing or too short — *not*
+when it is present and zeroed. So a save whose `ACCOUNT_ID` has been cleared
+reports no owner even though `PARAMS` still holds the old one. That is the
+right answer: `ACCOUNT_ID` is the documented field, `PARAMS+0x30` is a blob
+offset recovered by reverse engineering, and on a save somebody unsigned for
+sharing the leftover in `PARAMS` is a remnant rather than a claim of
+ownership. Reporting it as the owner would put a stranger's name against 28 of
+these saves. The PFD's hash of `PARAM.SFO` is taken over those bytes, so it is
 recomputed and the database re-signed in the same action — stopping half way
 leaves a save that will not load at all.
 
@@ -737,12 +831,50 @@ save gives `ASFO_ERR_FORMAT`, not a plausible-looking 64 bits of ASCII. Both
 directions are covered in `test_save.c`.
 
 An `ACCOUNT_ID` of **zero** is left as "no account" rather than reported as an
-owner. It is what a decrypted or shared save usually carries — 28 of the 49
-real PS4 and Vita saves to hand — and treating it as an owner would mark every
-one of them as somebody else's.
+owner. It is what a decrypted or shared save usually carries, and treating it
+as an owner would mark every one of those as somebody else's.
 
-Measured against an independent reader over 230 real `PARAM.SFO` files: every
-value agrees.
+#### Measured against the save database
+
+The whole of [apollo-saves](https://github.com/bucanero/apollo-saves) —
+**4,834 archives** across PS1, PS2, PS3, PS4, PSP and Vita — with every
+`PARAM.SFO` read straight out of its zip, giving **2,648** of them. Each was
+classified by this reader and by an independent one written from the format
+spec. The two agree on **all 2,648**:
+
+| | files | |
+|---|---|---|
+| 16-byte ASCII (PS3) | **632** | 321 name an account, 311 are all-zero |
+| 8-byte binary (PS4, Vita) | **672** | 624 name an account across 155 distinct ones, 48 are zero |
+| no `ACCOUNT_ID` | 1,342 | PSP saves, and application/DLC SFOs |
+| rejected as malformed | 2 | |
+
+Reading the archives needs one thing beyond Python's `zipfile`: two use
+**Deflate64**, which it does not implement, so the sweep falls back to `unzip`
+for those. With that in place nothing in the database failed to open.
+
+Three rows are worth drawing out, none of which was in the synthetic tests:
+
+**Ten of the 16-byte ones were PS3 saves living inside a Vita archive** — a
+PS1 Classic (`NPEB01899`) filed under `PSV/PCSB00560`, carrying a PS3-format
+`PARAM.SFO` at its root. Precisely the collision the length check exists for,
+sitting in the real corpus rather than only in a test. (They have since been
+moved to `PS3/NPEB01899`, but the case they proved stands: nothing about a
+directory's name can be trusted to say which console wrote what is in it.)
+
+**Zero is common and means nobody** — 311 PS3 and 48 PS4/Vita saves carry it.
+A save decrypted or unsigned for sharing usually does. Treating it as an owner
+would mark every one of them as somebody else's, so it reads as "no account",
+and the writer refuses to store it.
+
+**The two rejected files are not PARAM.SFOs at all**: a zero-byte one
+(`PSV/PCSE00638`), and a 14-byte file beginning `LOCA` rather than `\0PSF`
+(`PSP/UCUS98640`). Both are refused on the magic and the length before any
+offset in them is followed.
+
+Run through the app itself rather than the reader alone, the same tree gives
+2,566 saves — 1,262 PSP, 632 PS3, 339 PS4, 333 Vita — and the accounts
+reconcile exactly with the table above.
 
 #### Assigning one
 

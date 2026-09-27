@@ -103,6 +103,43 @@ one in place wants.
 Re-binding is the `PARAM.PFD` half of moving a save between consoles. A save
 also carries account fields in its own `PARAM.SFO`, and those are not touched.
 
+### The corpus
+
+Most of the numbers in this repo's docs — how many saves carry an account, what
+a `CATEGORY` may be, which PNG shapes a decoder has to handle — come from one
+place: the
+**[apollo-saves](https://github.com/bucanero/apollo-saves) database**, checked
+out beside this repo. At the time of measuring that is **4,834 archives**
+across PS1, PS2, PS3, PS4, PSP and Vita, holding **2,648 `PARAM.SFO` files**,
+**2,566 identified saves** and **5,047 PNGs**.
+
+Two things make it usable as a test corpus rather than a pile of zips:
+
+- The saves are **real**, written by real consoles for real games, so they
+  carry the cases nobody thinks to write a fixture for — a zero-byte
+  `param.sfo`, a 14-byte file beginning `LOCA`, an icon whose `IDAT` fails its
+  own CRC, 41 `.png` files that are encrypted Vita thumbnails, macOS
+  `__MACOSX/._ICON0.PNG` stubs, PS3 saves filed under a Vita title, 80 DLC
+  folders shaped exactly like PS4 saves.
+- It is **big enough for a claim to fail**. Several claims in these docs did:
+  "all real icons are non-interlaced" (12 are not), "the two PS3 account fields
+  always agree" (42 do not). Both had been measured honestly against a corpus
+  of a couple of hundred and were simply wrong at scale.
+
+Reading it needs one thing beyond Python's `zipfile`: two archives use
+**Deflate64**, which it does not implement, so any sweep should fall back to
+`unzip` for those. With that in place nothing in the database fails to open.
+
+A corpus this size also punishes a sloppy audit. Checking a PNG's chunk walk
+before its image data reports five files as truncated when their pixels are
+perfectly good and only the `IEND` marker is mangled; and 544 files carry bytes
+after `IEND`, which a conformant decoder ignores. Measure the thing that
+matters — can the image be recovered — before the thing that does not.
+
+Nothing here is checked in, and nothing in the build depends on it — it is a
+measuring stick, not a dependency. `apollo_save_test --scan`, `--accounts` and
+`--icon`, and `apollo_patcher_gui --scan`, are the tools for pointing at it.
+
 ### Where this belongs
 
 The better long-term home for both is apollo-lib, shared with apollo-psp,
@@ -126,8 +163,9 @@ core/     apollo_ctrl.[ch] — stdio-free engine facade, shared by both front-en
                              title-ID catalogue that names a Vita save (which
                              carries no name of its own)
           png.[ch]         — a save's ICON0.PNG, decoded to RGBA. Small enough
-                             to write rather than vendor: all 185 real icons
-                             checked are 8-bit and non-interlaced
+                             to write rather than vendor: of 5,560 real files
+                             checked, every PNG is 8-bit and all but 12 are
+                             non-interlaced
           psp/             — the PSP's own savedata encryption, the layer below
                              any patch; vendored from apollo-psp, see above
           ps3/             — the PS3's, the same layer one console up; derived
@@ -253,7 +291,10 @@ Targets:
 - `apollo_save_test` — the `PARAM.SFO` parser every front-end shares, and the
   identification over it: which console wrote a save and for which game.
   `--sfo root|sce FILE` reports on a real one, `--scan DIR` on a whole folder,
-  `--icon FILE` decodes one save icon and prints its size and checksum
+  `--accounts DIR` prints the PS4/Vita account each save names instead of its
+  title, and `--icon FILE` decodes one save icon and prints its size and
+  checksum. The last two exist so a whole tree of real saves can be diffed
+  against an independent reader — see [the corpus](#the-corpus)
 - `-DAPOLLO_FONT_FILE=...` ship a different font from the one vendored at
   `gui/assets/fonts/`. See [gui/README.md](gui/README.md#the-font)
 - `-DAPOLLO_BUILD_GUI=OFF` builds only the engine + headless tests (no GL needed)

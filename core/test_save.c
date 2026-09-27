@@ -450,6 +450,103 @@ static void check_account_id(void)
           asfo_account_id((const uint8_t *)"not an sfo", 10, NULL) == ASFO_ERR_FORMAT);
 }
 
+/*
+ * A Vita add-on-content folder. Real one, from apollo-saves: it sits at
+ * addcont/<titleid>/<something>/sce_sys/param.sfo and carries a TITLE_ID,
+ * which is the one thing that tells a PS4 save from a Vita one -- so without
+ * the CATEGORY test it identifies as a PS4 save.
+ */
+static size_t vita_dlc_sfo(uint8_t *out, size_t cap)
+{
+    const kv_t kv[] = {
+        { "ATTRIBUTE", ASFO_FMT_U32, "\0\0\0\0", 4, 4 },
+        { "CATEGORY",  ASFO_FMT_STR, "ac", 0, 4 },
+        { "TITLE_ID",  ASFO_FMT_STR, "PCSA00147", 0, 12 },
+    };
+
+    return build_sfo(out, cap, kv, (int)(sizeof kv / sizeof *kv));
+}
+
+/* A PS4 save with CATEGORY replaced, for testing that field on its own. */
+static size_t ps4_sfo_category(uint8_t *out, size_t cap, const char *cat, uint32_t used)
+{
+    static uint8_t params[1024];
+    const kv_t kv[] = {
+        { "ACCOUNT_ID",         ASFO_FMT_BIN, params, 8, 8 },
+        { "CATEGORY",           ASFO_FMT_STR, cat, used, 16 },
+        { "MAINTITLE",          ASFO_FMT_STR, "JoJo's Bizarre Adventure", 0, 128 },
+        { "SAVEDATA_DIRECTORY", ASFO_FMT_STR, "JOJOASB.S", 0, 32 },
+        { "TITLE_ID",           ASFO_FMT_STR, "CUSA28770", 0, 12 },
+    };
+
+    return build_sfo(out, cap, kv, (int)(sizeof kv / sizeof *kv));
+}
+
+/*
+ * CATEGORY: what the SFO describes, as opposed to who wrote it.
+ *
+ * Only MS (PSP), SD (PS3) and sd (PS4, Vita) are savedata. This is what keeps
+ * Vita DLC out of the save list -- an addcont folder's param.sfo carries a
+ * TITLE_ID and is otherwise indistinguishable from a PS4 save's, and 80 of
+ * them in apollo-saves were being listed as saves before this.
+ */
+static void check_category(void)
+{
+    uint8_t      buf[4096];
+    asave_info_t info;
+    size_t       len;
+
+    printf("\nCATEGORY (what the file describes, not who wrote it)\n");
+
+    len = vita_dlc_sfo(buf, sizeof buf);
+    CHECK("Vita add-on content is not a save",
+          asave_identify(buf, len, ASAVE_AT_SCE, 0, &info) == ASAVE_ERR_WHICH);
+
+    len = ps4_sfo_category(buf, sizeof buf, "gd", 0);
+    CHECK("...nor is game data",
+          asave_identify(buf, len, ASAVE_AT_SCE, 0, &info) == ASAVE_ERR_WHICH);
+
+    /* The three that are. */
+    len = ps4_sfo_category(buf, sizeof buf, "sd", 0);
+    CHECK("CATEGORY sd is a save (PS4, Vita)",
+          asave_identify(buf, len, ASAVE_AT_SCE, 0, &info) == ASAVE_OK);
+    len = ps3_sfo(buf, sizeof buf);
+    CHECK("CATEGORY SD is a save (PS3)",
+          asave_identify(buf, len, ASAVE_AT_ROOT, 1, &info) == ASAVE_OK);
+    len = psv_sfo(buf, sizeof buf, 1);
+    CHECK("a Vita save still identifies",
+          asave_identify(buf, len, ASAVE_AT_SCE, 0, &info) == ASAVE_OK &&
+          info.platform == ASAVE_PSV);
+
+    /* Case is ignored: the same two letters are upper on a PS3 and lower on a
+       PS4, and a tool that rewrote one either way still means savedata. */
+    len = ps4_sfo_category(buf, sizeof buf, "SD", 0);
+    CHECK("CATEGORY case is ignored",
+          asave_identify(buf, len, ASAVE_AT_SCE, 0, &info) == ASAVE_OK);
+    len = ps4_sfo_category(buf, sizeof buf, "Sd", 0);
+    CHECK("...either way round",
+          asave_identify(buf, len, ASAVE_AT_SCE, 0, &info) == ASAVE_OK);
+
+    /* Length is not: a prefix or an extension of one of them is not one. */
+    len = ps4_sfo_category(buf, sizeof buf, "s", 0);
+    CHECK("a one-letter CATEGORY is not one of them",
+          asave_identify(buf, len, ASAVE_AT_SCE, 0, &info) == ASAVE_ERR_WHICH);
+    len = ps4_sfo_category(buf, sizeof buf, "sdx", 0);
+    CHECK("nor is a longer one starting the same way",
+          asave_identify(buf, len, ASAVE_AT_SCE, 0, &info) == ASAVE_ERR_WHICH);
+
+    /* Absent, or empty, means no opinion -- the key-set tests still decide.
+       A save is not refused for a key it merely omits. */
+    len = psp_sfo(buf, sizeof buf);
+    CHECK("a save with no CATEGORY at all still identifies",
+          asfo_find(buf, len, "CATEGORY", NULL, NULL, NULL, NULL) == ASFO_ERR_MISSING &&
+          asave_identify(buf, len, ASAVE_AT_ROOT, 0, &info) == ASAVE_OK &&
+          info.platform == ASAVE_PSP);
+    len = ps4_sfo_category(buf, sizeof buf, "", 1);
+    CHECK("an empty CATEGORY is not held against it",
+          asave_identify(buf, len, ASAVE_AT_SCE, 0, &info) == ASAVE_OK);
+}
+
 static void check_identify(void)
 {
     uint8_t      sfo[8192];
@@ -748,7 +845,8 @@ static void check_icons(void)
 
     printf("\nsave icons\n");
 
-    /* 8-bit RGB and 8-bit RGBA: between them, all 185 real icons. */
+    /* 8-bit RGB and 8-bit RGBA: between them 4,809 of the 5,047 real icons in
+       apollo-saves. Palette is the next 223 and is covered below. */
     {
         const uint8_t rows[2 * 6] = { 255,0,0,  0,255,0,
                                       0,0,255,  255,255,255 };
@@ -1040,6 +1138,7 @@ int main(int argc, char **argv)
     check_reader();
     check_bounds();
     check_account_id();
+    check_category();
     check_identify();
     check_title_ids();
     check_title_db();

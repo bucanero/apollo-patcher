@@ -1982,9 +1982,8 @@ static bool examine(const fs::path& dir, SaveEntry& out) {
     } else if (info.platform == ASAVE_PS4 || info.platform == ASAVE_PSV) {
         uint64_t id = 0;
         // Zero is left as "no account". It is what a decrypted or shared save
-        // usually carries -- 28 of the 49 real PS4/Vita saves to hand -- and
-        // calling that an owner would mark every one of them as somebody
-        // else's.
+        // usually carries -- 48 of the 672 in apollo-saves -- and calling that
+        // an owner would mark every one of them as somebody else's.
         if (asfo_account_id(sfo.data(), sfo.size(), &id) == ASFO_OK && id) {
             char hex[17];
             snprintf(hex, sizeof hex, "%016llx", (unsigned long long)id);

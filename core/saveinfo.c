@@ -4,6 +4,45 @@
 #include "saveinfo.h"
 #include "sfo.h"
 
+/*
+ * CATEGORY says what an SFO DESCRIBES, and exactly one value per console
+ * means "savedata":
+ *
+ *   MS   PSP -- a Memory Stick save
+ *   SD   PS3
+ *   sd   PS4 and Vita
+ *
+ * Measured over every PARAM.SFO in the apollo-saves database: all 2,566 real
+ * saves carry one of those three and nothing else does.
+ *
+ * Anything else describes something that is not a save and must not be listed
+ * as one. `ac` is add-on content and `gd` is game data -- and a Vita DLC
+ * folder has its own sce_sys/param.sfo with a TITLE_ID in it, which is
+ * otherwise indistinguishable from a PS4 save's, so 80 of them in that
+ * database were being identified as PS4 saves.
+ *
+ * Two deliberate looseness's. The comparison ignores case, because the same
+ * two letters are upper on a PS3 and lower on a PS4 and a tool that rewrote
+ * one either way is still describing a save. And a file with NO CATEGORY at
+ * all is passed through to the key-set tests rather than refused: every real
+ * save measured has one, but refusing a save over a key it merely omits would
+ * be a worse failure than the one this fixes.
+ */
+static int category_is_savedata(const uint8_t *sfo, size_t sfo_len)
+{
+    char cat[16];
+    char a, b;
+
+    if (asfo_string(sfo, sfo_len, "CATEGORY", cat, sizeof cat) != ASFO_OK || !cat[0])
+        return 1;   /* absent, or too long to be one of these: no opinion */
+    if (cat[1] == '\0' || cat[2] != '\0')
+        return 0;
+
+    a = (cat[0] >= 'A' && cat[0] <= 'Z') ? (char)(cat[0] + 32) : cat[0];
+    b = (cat[1] >= 'A' && cat[1] <= 'Z') ? (char)(cat[1] + 32) : cat[1];
+    return (a == 's' && b == 'd') || (a == 'm' && b == 's');
+}
+
 /* Nine characters of upper-case letters and digits, and nothing else: every
  * title ID in the patch database is exactly that. Checked rather than assumed
  * because the string it comes from is a directory name off a memory card, and
@@ -104,6 +143,11 @@ int asave_identify(const uint8_t *sfo, size_t sfo_len,
     if (asfo_valid(sfo, sfo_len) != ASFO_OK)
         return ASAVE_ERR_SFO;
 
+    /* Before anything else, because it applies to every console and the tests
+     * below cannot tell a Vita save from Vita DLC on their own. */
+    if (!category_is_savedata(sfo, sfo_len))
+        return ASAVE_ERR_WHICH;
+
     if (where == ASAVE_AT_SCE) {
         /* PS4 says its title ID outright; the Vita has no such key. That one
          * difference is the whole test -- more reliable than the ID's own
@@ -160,8 +204,9 @@ int asave_identify(const uint8_t *sfo, size_t sfo_len,
     /*
      * A PS4 save's SFO that is not in sce_sys/.
      *
-     * TITLE_ID is a key no PSP or PS3 SAVEDATA carries -- 0 of the 172 real
-     * PS3 saves this was checked against has one -- so when it turns up beside
+     * TITLE_ID is a key no PSP, PS3 or Vita SAVEDATA carries -- across the
+     * apollo-saves database, 0 of 632 PS3, 0 of 1,262 PSP and 0 of 333 Vita
+     * saves has one, while all 339 PS4 saves do -- so when it turns up beside
      * a SAVEDATA_DIRECTORY the file is a PS4 save's, wherever it is sitting.
      * Believing the keys over the location matters because a PS3 title ID
      * comes from the directory name, and a PS4 save's directory is named after

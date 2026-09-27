@@ -458,7 +458,12 @@ static void check_conf(void)
  * A synthetic PARAM.SFO here rather than a real one, because what has to be
  * right is narrow and exact -- 16 ASCII characters into two fields at two
  * offsets -- and a fixture states the expected bytes where a real save only
- * implies them. The offsets themselves came from 172 real saves.
+ * implies them. The offsets themselves came from real saves.
+ *
+ * Writing BOTH fields is the point, and real saves show why: across the 632
+ * PS3 saves in apollo-saves the two agree 587 times and disagree 42, and 41
+ * of those 42 are half-unsigned -- one field cleared by some tool and the
+ * other left behind.
  */
 static size_t build_account_sfo(uint8_t *out, size_t cap,
                                 int with_field, int with_params)

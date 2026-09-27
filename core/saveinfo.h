@@ -85,9 +85,15 @@ typedef struct {
  * PS3 either way, because a PS3 save whose PFD was stripped is still a PS3
  * save and still has patches.
  *
- * ASAVE_ERR_WHICH for an SFO that parses but is not a save's -- a game's own
- * PARAM.SFO from a disc or a homebrew EBOOT, which carry BOOTABLE and
- * PSP_SYSTEM_VER and turn up all over a memory card.
+ * ASAVE_ERR_WHICH for an SFO that parses but is not a save's. Two kinds:
+ *
+ *   - a game's own PARAM.SFO, from a disc or a homebrew EBOOT, which carries
+ *     BOOTABLE and PSP_SYSTEM_VER and turns up all over a memory card. Kept
+ *     out by requiring SAVEDATA_DIRECTORY.
+ *   - anything whose CATEGORY names something other than savedata -- add-on
+ *     content (`ac`), game data (`gd`). Vita DLC in particular has its own
+ *     sce_sys/param.sfo carrying a TITLE_ID, which is otherwise exactly what
+ *     tells a PS4 save from a Vita one.
  */
 int asave_identify(const uint8_t *sfo, size_t sfo_len,
                    asave_where_t where, int has_pfd, asave_info_t *out);
