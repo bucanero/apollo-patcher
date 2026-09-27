@@ -132,7 +132,10 @@ and a save folder is named after it with an optional suffix — `ULUS10391`,
 the game**: the first nine characters of the folder are looked up in the
 database, and for a PSP save the `SAVEDATA_DIRECTORY` out of `PARAM.SFO` is
 preferred over the folder on disk, since that is what the console recorded and
-it survives a rename.
+it survives a rename. A PS4 or Vita save's folder is named after the *slot*
+and carries no title ID at all, so the saves screen passes the one it read
+from `sce_sys/param.sfo` along with the file — see
+[Browsing saves](#browsing-saves).
 
 With no patch open it loads outright. With one already open it only *offers* —
 a line naming the game and a button — because loading closes the current
@@ -173,7 +176,7 @@ The app opens on **your saves**, not on a file picker.
 Picking a save goes to the patcher; **< Saves** comes back. Going back closes
 nothing — the patch stays open, so you can look at the list and return.
 
-There is no third screen for the old file-first flow, because everything after
+There is no third screen for driving files by hand, because everything after
 *"which file, and which patch"* is the same work: the code list, the option
 dropdowns, Apply, the log, the hex editor. **File ▸ Advanced** is a *door* into
 the patcher screen rather than a room of its own — it swaps the save header for
@@ -275,12 +278,11 @@ the one place work could go — it closes the patch that holds any edited code
 bodies. `apctl_code_is_edited()` makes that detectable, so it is asked rather
 than assumed.
 
-The browser is two panes, and a modal cannot be wider than the window around
-it — ImGui clips it rather than growing the window — so the app's own window
-decides how much room the file list gets. It opens at 1180x820 for that
-reason, clamped to the monitor's work area so the default cannot land partly
-off a smaller screen, and both modals shrink with the window rather than
-losing an edge.
+The window opens at 1180x820, clamped to the monitor's work area so the
+default cannot land partly off a smaller screen. The width matters because a
+modal cannot be wider than the window around it — ImGui clips it rather than
+growing the window — so the patch database browser and the rest size to what
+the window gives them, and shrink with it rather than losing an edge.
 
 ### Which file inside the save
 
@@ -316,10 +318,11 @@ have.
 ### The icon
 
 The picture the console's own save list shows — `ICON0.PNG` beside the data
-files on a PSP or PS3, `sce_sys/icon0.png` on a PS4 or Vita — appears next to
-the game's name in the detail pane. Both spellings of each are tried, because
-the case is per console and only some filesystems care: a save copied to a Mac
-and then opened on Linux is the one that would otherwise lose it.
+files on a PSP or PS3, `sce_sys/icon0.png` on a PS4 or Vita — appears beside
+the game's name on the patcher screen, and in the hover panel on the list.
+Both spellings of each are tried, because the case is per console and only
+some filesystems care: a save copied to a Mac and then opened on Linux is the
+one that would otherwise lose it.
 
 It is decoded when the selection changes, not during the scan. A folder of 176
 saves is 176 PNGs, and uploading all of them would be 40MB of texture for a
@@ -435,6 +438,72 @@ user with something the console cannot read and no obvious way back.
 The crypto is `../core/psp/` and `../core/ps3/`; see the
 [top-level README](../README.md#the-consoles-own-savedata-encryption).
 
+## The font
+
+Game names are whatever the game wrote, and they are not ASCII. Across the
+patch database, the title catalogue and a corpus of real saves — 16,055 names —
+there are **592 characters outside ASCII**, and the distribution is lopsided:
+
+| | |
+|---|---|
+| `™` U+2122 | **357** — 60% of the total, on its own |
+| `®` U+00AE | 171 |
+| `’ Σ • ©` and accented Latin | 24 |
+| Japanese | 40, in 2 of 176 saves |
+
+ImGui's built-in ProggyClean covers U+0020–00FF and nothing else, so `®` drew
+fine and `™` drew as `?`. The app therefore **ships a font**:
+
+1. **`$APOLLO_FONT`** — a `.ttf` or `.otf` named outright, for anyone who
+   wants a different face.
+2. **`NotoSansJP-Medium.otf` beside the app** — `Contents/Resources` for a
+   macOS `.app`, next to the executable elsewhere. The same two places the
+   patch database is looked for, and what happens in practice.
+3. **ImGui's own**, as a safety net that should never fire. Reaching it means
+   the copy beside the app is missing, so the log says so rather than quietly
+   looking wrong.
+
+There is deliberately **no system-font tier**. Falling back to a per-OS list
+(Arial, Segoe UI, DejaVu) would work, but the app would then look different on
+every machine — and since every column width comes from `CalcTextSize`, even
+its proportions would move. It would also hide a broken build behind something
+that looked almost right. One vendored font is one appearance and one tested
+path.
+
+Measured against those 31 distinct characters, with the ranges the app bakes:
+
+| Font | draws | atlas | bake |
+|---|---|---|---|
+| ImGui built-in | 8/31 | 512×64, 32KB | 1ms |
+| any system font | 12/31 | 512×512, 256KB | 3ms |
+| **Noto Sans JP** | **31/31** | 1024×2048, 2MB | 35ms |
+
+The Japanese range is requested whichever font is found, because asking costs
+nothing when the font has no such glyphs — Arial comes out at the same 1015
+glyphs and 0.2MB either way. So there is no need to ask a font what it
+contains before asking it for something.
+
+The font is **vendored** at `gui/assets/fonts/`, with its SIL Open Font
+License beside it (redistribution requires it). That is a deliberate exception
+to this repo's habit of finding siblings rather than copying them: `apollo-lib`
+and `apollo-patches` are code and data you want to update independently, where
+this is a frozen asset the app needs in order to render correctly. It is the
+same file `apollo-psp` ships.
+
+`-DAPOLLO_FONT_FILE=` ships a different face instead. A build with no font
+still succeeds — with a CMake warning, because the checkout is then incomplete
+— and CI treats a missing font in the artifact as an error.
+
+Text is drawn at **20px** rather than ProggyClean's 13: a bitmap font at its
+design size is crisp where an outline font at 13 is muddy, and this app is read
+more than it is clicked. Every column width comes from `CalcTextSize`, so the
+layout follows the size rather than having to be retuned for it.
+
+Size is what drives the atlas, not the glyph count, and it is a step rather
+than a slope: the same ~4000 glyphs fit 1024×1024 up to and including 16px and
+need 1024×2048 from 17 — 1MB against 2MB of alpha texture. Having paid that,
+20px costs no more than 18.
+
 ## Settings
 
 **File ▸ Settings…** holds how saves are read and written. Everything in it is
@@ -448,7 +517,7 @@ optional, and every default is the safe one.
   A forced order is remembered across runs and applies to every save, which is
   the point of it and also its only hazard — a forced big-endian left set will
   byte-reverse a PS4 or Vita save and hand back something that looks patched.
-  The main window therefore always says which order is in effect and why, in
+  The patcher screen therefore always says which order is in effect and why, in
   amber when a forced one disagrees with the patch you have open, and the log
   repeats it at Apply.
 
@@ -509,9 +578,9 @@ apollo_patcher_gui /Volumes/PSP/PSP/SAVEDATA/ULUS10391
 
 It goes through the same identification the save list uses, so it arrives
 **named, iconned, with its files listed** and Monster Hunter Freedom Unite's
-patch loaded — the same thing as picking it from the list, rather than the bare
-target it used to become. A folder that is not a save says so rather than
-becoming a target nothing can read, and neither does a path that is not there.
+patch loaded — the same thing as picking it from the list. A folder that is not
+a save says so rather than becoming a target nothing can read, and neither does
+a path that is not there.
 
 Files can also be **dropped on the window**, which takes the same route. Note
 that on macOS a `.app` launched from Finder is handed documents through Apple
@@ -590,8 +659,8 @@ a Windows/Linux file association, and the drop handler covers the window.
   the offending combo boxes and an "(required)" tag turn red, and the button is
   disabled until every selection is made.
 - **Byte order**, the equivalent of the `patcher` CLI's `-b`/`--big-endian`
-  flag. Detected per patch by default and overridable in Settings; the main
-  window shows which order is in effect and why. It calls
+  flag. Detected per patch by default and overridable in Settings; the patcher
+  screen shows which order is in effect and why. It calls
   `apollo_set_endianness()` before each code is applied, so a single build
   handles both byte orders — no separate big-endian binary. See
   [Settings](#settings).
@@ -609,7 +678,12 @@ a Windows/Linux file association, and the drop handler covers the window.
   bundled database and loads that game's patch, or offers it when one is
   already open.
 - **Files on the command line and dropped on the window**, including a save
-  folder. See [Opening things](#opening-things).
+  folder, which is identified exactly as one picked from the list. See
+  [Opening things](#opening-things).
+- **Save icons**, decoded by `core/png.c` and shown beside the game's name.
+  See [The icon](#the-icon).
+- **A vendored font** (Noto Sans JP), so game names keep their trade mark
+  signs, curly quotes and Japanese titles. See [The font](#the-font).
 
 ## Known caveats / TODO
 - **Linux dialogs:** portable-file-dialogs needs a dialog helper present at

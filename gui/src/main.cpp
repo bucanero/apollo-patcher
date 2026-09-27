@@ -128,7 +128,7 @@ struct AppState {
     // whether anything is open for it to have said it about. The value the
     // engine actually runs with is effective_big_endian(), which is this
     // unless Settings overrides it -- keeping the two apart is what lets the
-    // main window say "forced, and it disagrees with this patch".
+    // patcher screen say "forced, and it disagrees with this patch".
     bool                be_detected = false;
     std::string         be_platform;      // "PS3", "PS4", ... "" for a loose file
     bool                scroll_log = false;
@@ -422,7 +422,7 @@ static void adopt_session(apctl_session_t* session,
     // title ID.
     //
     // Recorded, not applied: Settings can force a mode, and keeping the
-    // detection separate is what lets the main window say a forced one
+    // detection separate is what lets the patcher screen say a forced one
     // disagrees with the patch in front of it.
     g_app.be_detected = apctl_is_big_endian_for(platform, label.c_str()) != 0;
     g_app.be_platform = platform ? platform : "";
@@ -1387,8 +1387,7 @@ static void load_patch_from_db(int index);
 // Defined below with the save browser. Reused here so that a save FOLDER
 // dropped on the window, or named on the command line, goes through exactly
 // the same identification as one picked from the list -- same icon, same file
-// list, same name. Before this, a dropped folder got a bare target and none
-// of it.
+// list, same name.
 static bool examine(const fs::path& dir, SaveEntry& out);
 static void resolve_patches(std::vector<SaveEntry>& saves);
 static void commit_open_save(const SaveEntry& save);
@@ -1881,9 +1880,9 @@ static void refilter_saves() {
 //
 // The one decoded icon on screen.
 //
-// One, not a cache of them: the detail pane shows the selected save and
-// nothing else, and a folder of 176 saves would otherwise be 176 PNGs decoded
-// and 40MB of texture uploaded for a list that displays them one at a time.
+// One, not a cache of them: only ever one save is on screen at a time, and a
+// folder of 176 saves would otherwise be 176 PNGs decoded and 40MB of texture
+// uploaded for a list that displays them one at a time.
 // Re-decoding on every selection change costs a fraction of a millisecond for
 // an image this size.
 //
@@ -2784,10 +2783,10 @@ static void render_db_browser() {
 //
 // Everything about one save, on hover.
 //
-// The list is a list now, so this is where the detail pane went: the icon the
-// console shows, the slot, whether there are codes, and which files are in
-// there with the one the patch will address starred. Enough to tell two saves
-// of the same game apart without opening either.
+// The icon the console shows, the slot, whether there are codes, and which
+// files are in there with the one the patch will address starred. Enough to
+// tell two saves of the same game apart without opening either, and it keeps
+// the list itself down to the columns worth scanning.
 //
 static void draw_save_tooltip(const SaveEntry& s) {
     // At most this many files listed. A save with 40 of them (DiRT 3 ships
@@ -3028,8 +3027,8 @@ static void draw_saves_screen() {
                           ImVec2(0, -footer))) {
         // Both stretch, and the weights are the point: the slot is what tells
         // two saves of the same game apart, so it earns real width rather
-        // than the "Memory Block 7" minimum it used to get. A game name that
-        // still will not fit is clipped, and the full one is in the tooltip.
+        // than just enough for its longest value. A game name that does not
+        // fit is clipped, and the full one is in the tooltip.
         ImGui::TableSetupColumn("Game", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         ImGui::TableSetupColumn("Slot", ImGuiTableColumnFlags_WidthStretch, 0.6f);
         ImGui::TableSetupColumn("Console", ImGuiTableColumnFlags_WidthFixed,
@@ -3058,10 +3057,9 @@ static void draw_saves_screen() {
                     g_sb.selected = index;
                     if (ImGui::IsMouseDoubleClicked(0)) open_now = true;
                 }
-                // Everything about the save, on hover. This is the detail
-                // pane the browser used to carry: it went to the patcher
-                // screen when the list went full-width, and putting it back
-                // here costs nothing and keeps the list scannable.
+                // Everything about the save, on hover -- without spending
+                // a pane's worth of width on it. The list stays scannable
+                // and the answers are a pointer-rest away.
                 //
                 // NoSharedDelay: the wait re-arms on every row. Without it
                 // ImGui carries the timer over to the next item, so once one
@@ -3367,7 +3365,7 @@ static void draw_settings_window() {
         ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f),
                            "A forced order is remembered across runs, and applies to");
         ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f),
-                           "every save. The main window says so when it disagrees with");
+                           "every save. The patcher screen says so when it disagrees with");
         ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f),
                            "the patch you have open.");
     }
@@ -3498,8 +3496,8 @@ static void draw_byte_order() {
 
 //
 // The save this screen is working on: what it is, and which of its files is
-// the target. This is the detail pane the browser used to carry -- it lives
-// here now, next to the thing it describes.
+// the target -- next to the controls that act on it, rather than back on the
+// list where nothing could be done about it.
 //
 static void draw_save_header() {
     const SaveEntry& s = g_app.save;
@@ -3804,6 +3802,123 @@ static void draw_main_window(bool* want_quit) {
     draw_hex_editor();
 }
 
+//
+// The font.
+//
+// ImGui's built-in ProggyClean covers U+0020-00FF and nothing else, so a game
+// called "Monster Hunter Freedom Unite(TM)" drew a '?' where the symbol
+// should be. That is not a rare corner: across the 16,055 names in the patch
+// database, the title catalogue and a corpus of real saves there are 592
+// characters outside ASCII, and 357 of them -- 60% -- are that one symbol.
+// The registered sign is another 171, and those DID draw, because they fall
+// inside Latin-1. Two of 176 saves are titled in kana and kanji.
+//
+// So the app ships a font rather than hunting for one on each platform. A
+// system-font search would work, but the app would then look different on
+// every machine -- and since every column width comes from CalcTextSize, even
+// its proportions would move. One vendored font is one appearance and one
+// tested path.
+//
+// $APOLLO_FONT overrides it, for somebody who wants another face.
+//
+
+//
+// The font that ships with the app.
+//
+// Noto Sans JP, the same one the console apps use, vendored at
+// gui/assets/fonts. It covers every character the databases and a corpus of
+// real saves contain -- 31 of 31, Japanese included -- which no system font
+// can be relied on for.
+//
+#define APP_FONT_NAME "NotoSansJP-Medium.otf"
+
+//
+// What to bake beyond Latin-1.
+//
+// Whole blocks rather than the exact characters the databases contain,
+// because the saves on somebody's memory card are not in those databases and
+// a name is only ever read at run time.
+//
+// The Japanese range is always requested, whichever font is found. That costs
+// nothing when the font has no such glyphs -- measured, Arial comes out at the
+// same 1015 glyphs and 0.2MB either way -- so there is no need to ask what a
+// font contains before asking it for something.
+//
+static const ImWchar FONT_EXTRA_RANGES[] = {
+    0x0100, 0x024F,   // Latin Extended-A and B
+    0x0370, 0x03FF,   // Greek -- "Sigma" turns up in a title
+    0x0400, 0x04FF,   // Cyrillic
+    0x2000, 0x206F,   // General punctuation: curly quotes, dashes, bullet
+    0x20A0, 0x20BF,   // Currency
+    0x2100, 0x214F,   // Letterlike: the trade mark sign lives here
+    0x2190, 0x21FF,   // Arrows
+    0x2600, 0x26FF,   // Miscellaneous symbols
+    0,
+};
+
+static void load_font(ImGuiIO& io) {
+    // Static: ImGui keeps the pointer until the atlas is built, which happens
+    // after this returns.
+    static ImVector<ImWchar> ranges;
+    ImFontGlyphRangesBuilder builder;
+
+    builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
+    builder.AddRanges(FONT_EXTRA_RANGES);
+    builder.AddRanges(io.Fonts->GetGlyphRangesJapanese());
+    builder.BuildRanges(&ranges);
+
+    // What the user asked for, then what shipped with the app. The same two
+    // places the patch database is looked for, for the same reason -- a macOS
+    // .app keeps its files in Contents/Resources, everything else keeps them
+    // beside the executable.
+    std::vector<std::string> tries;
+    const char* forced = getenv("APOLLO_FONT");
+    if (forced && *forced) tries.push_back(forced);
+
+    char dir[768];
+    if (patchdb_exe_dir(dir, sizeof dir)) {
+        tries.push_back(std::string(dir) + "/" APP_FONT_NAME);
+        tries.push_back(std::string(dir) + "/../Resources/" APP_FONT_NAME);
+    }
+    tries.push_back(APP_FONT_NAME);
+
+    char note[1024];
+    for (const std::string& path : tries) {
+        if (!std::ifstream(path)) continue;
+        // 20px, against ProggyClean's 13. A bitmap font drawn at its design
+        // size is crisp where an outline font at 13 is muddy, and this app is
+        // read more than it is clicked -- game names, slots, file names.
+        //
+        // The one cost is the atlas, and it is a step rather than a slope:
+        // the same ~4000 glyphs fit 1024x1024 up to and including 16px and
+        // need 1024x2048 from 17 (1MB to 2MB of alpha texture). Having paid
+        // that, 20 costs no more than 18.
+        //
+        // Every column width in the app comes from CalcTextSize, so the
+        // layout follows the size rather than having to be retuned.
+        if (io.Fonts->AddFontFromFileTTF(path.c_str(), 20.0f, nullptr, ranges.Data)) {
+            snprintf(note, sizeof note, "Font: %s", path.c_str());
+            g_app.append_log(note);
+            return;
+        }
+        // Found but unusable -- a truncated file, or a format stb_truetype
+        // will not read. Worth saying, because the next one along will look
+        // like a silent downgrade otherwise.
+        snprintf(note, sizeof note, "[!] Font %s could not be parsed; trying the next",
+                 path.c_str());
+        g_app.append_log(note);
+    }
+
+    // A safety net that should never fire: the font is vendored and the build
+    // copies it in. Reaching here means the copy beside the app is missing or
+    // unreadable, so it says so rather than quietly looking wrong.
+    io.Fonts->AddFontDefault();
+    g_app.append_log("[!] Font: " APP_FONT_NAME " was not found next to the application, "
+                     "so the built-in one is in use and anything outside Latin-1 (the "
+                     "trade mark sign, curly quotes, Japanese titles) draws as '?'. "
+                     "Set $APOLLO_FONT to a .ttf or .otf, or reinstall.");
+}
+
 static void apply_style() {
     // Cosmetic rounding only — no size scaling, so everything stays at
     // ImGui's default dimensions.
@@ -3887,10 +4002,10 @@ static void print_usage(const char* argv0) {
         "bundled database. Files can be dropped on the window instead.\n"
         "\n"
         "--scan prints the saves under DIR and exits, without opening a window:\n"
-        "the same walk \"Browse saves...\" does, for checking what a folder holds\n"
+        "the same walk the saves screen does, for checking what a folder holds\n"
         "from a terminal or a script. Add a save's number to have it opened as\n"
         "well, which reports the target, the patch and the encryption layer --\n"
-        "everything the main window would be showing had you clicked it.\n"
+        "everything the patcher screen would be showing had you clicked it.\n"
         "\n"
         "--open takes one path the way a dropped file does -- a save folder, a\n"
         "loose save file or a .savepatch -- and reports the same, also without a\n"
@@ -3904,9 +4019,9 @@ static void print_usage(const char* argv0) {
 
 //
 // The save scan on its own, with no window. This is the browser's whole brain
-// -- the same scan_start/scan_collect pair the modal drives -- so what it
-// prints is exactly what the list would show, which is the only way to check
-// the walk without a person looking at it.
+// -- the same scan_start/scan_collect pair the saves screen drives -- so what
+// it prints is exactly what the list would show, which is the only way to
+// check the walk without a person looking at it.
 //
 // A column-width string for --scan's table. Truncating at a byte boundary
 // would cut a multi-byte character in half and emit invalid UTF-8 -- these are
@@ -3993,7 +4108,7 @@ static int run_scan(const char* root, int pick) {
 
     // ...and what happens when one of them is chosen: the same call the
     // browser's "Open this save" makes, and then everything that followed
-    // from it. What this prints is what the main window would be showing.
+    // from it. What this prints is what the patcher screen would be showing.
     if (pick >= int(g_sb.saves.size())) {
         fprintf(stderr, "no save %d in that folder\n", pick);
         return 2;
@@ -4030,11 +4145,10 @@ static int run_open(const char *path) {
 //
 // The window's starting size.
 //
-// Wider than it used to be because the save browser is the way into the app
-// now, and a modal cannot be wider than the window around it (see
-// size_modal) -- so the window's width is what decides whether the file list
-// beside the save list is readable. At 860 the browser lost its right-hand
-// edge outright.
+// Wide because the save list is the way into the app, and because a modal
+// cannot be wider than the window around it (see size_modal) -- so the
+// window's width is what decides how much of a game's name and slot a row can
+// show.
 //
 // Clamped to the monitor, because a default that does not fit is worse than a
 // small one: a window taller than the screen hides its own buttons behind the
@@ -4127,7 +4241,7 @@ int main(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;   // don't litter the CWD with imgui.ini
 
-    io.Fonts->AddFontDefault();   // ImGui's default 13px font, no HiDPI upscaling
+    load_font(io);   // the vendored Noto Sans JP; see APP_FONT_NAME
 
     ImGui::StyleColorsDark();
     apply_style();
@@ -4140,8 +4254,8 @@ int main(int argc, char** argv) {
     settings_load();
 
     // The folder from last time, scanned in the background while the window
-    // comes up. Costs nothing when there is none, and means "Browse saves..."
-    // shows a list rather than an empty pane on every launch.
+    // comes up. Costs nothing when there is none, and means the saves screen
+    // shows a list rather than an empty one on every launch.
     if (!g_saved.saves_root.empty() && is_dir(g_saved.saves_root))
         scan_start(g_saved.saves_root);
 

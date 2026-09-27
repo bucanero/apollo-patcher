@@ -121,15 +121,33 @@ jobs:
         fi
         cp build/apollo-patches.zip dist/
 
-        # ...and that CMake's own copy into the app happened, so a dragged-out
-        # bundle is self-contained. This used to be done here; checking it is
-        # what keeps that guarantee now it is done in CMake.
+        # ...and that CMake's copy into the app happened, so a dragged-out
+        # bundle is self-contained. Checked rather than assumed: a regression
+        # in that copy rule would otherwise ship an app with no database.
         if [ "${{ matrix.os }}" = "macos-latest" ]; then
           app=dist/apollo_patcher_gui.app/Contents/Resources/apollo-patches.zip
           if [ ! -f "$app" ]; then
             echo "::error::the .app has no patch database in Contents/Resources"
             exit 1
           fi
+        fi
+
+        # The font, the same way. It is vendored in this repo, so unlike the
+        # patch database there is no configuration in which it is legitimately
+        # absent -- an artifact without it would draw '?' for every trade mark
+        # sign and every Japanese title.
+        if [ "${{ matrix.os }}" = "macos-latest" ]; then
+          font=dist/apollo_patcher_gui.app/Contents/Resources/NotoSansJP-Medium.otf
+          if [ ! -f "$font" ]; then
+            echo "::error::the .app has no font in Contents/Resources"
+            exit 1
+          fi
+        else
+          if [ ! -f build/gui/NotoSansJP-Medium.otf ]; then
+            echo "::error::the build produced no font beside the executable"
+            exit 1
+          fi
+          cp build/gui/NotoSansJP-Medium.otf build/gui/OFL.txt dist/
         fi
         ls -l dist/
 

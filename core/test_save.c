@@ -13,9 +13,9 @@
  * Why these two are worth a test of their own
  * -------------------------------------------
  * Every offset in an SFO is read out of the file itself, and this parser is
- * now the one every front-end uses -- the PSP encryption path included, which
- * used to carry its own copy. So the bounds checks below are load-bearing:
- * a save arrives from a stranger's memory card as readily as from your own.
+ * the one every front-end uses, the PSP encryption path included. So the
+ * bounds checks below are load-bearing: a save arrives from a stranger's
+ * memory card as readily as from your own.
  *
  * The identification is the other half. Four consoles write the same container
  * with four different sets of keys, and getting it wrong is not a crash but

@@ -252,6 +252,8 @@ Targets:
   identification over it: which console wrote a save and for which game.
   `--sfo root|sce FILE` reports on a real one, `--scan DIR` on a whole folder,
   `--icon FILE` decodes one save icon and prints its size and checksum
+- `-DAPOLLO_FONT_FILE=...` ship a different font from the one vendored at
+  `gui/assets/fonts/`. See [gui/README.md](gui/README.md#the-font)
 - `-DAPOLLO_BUILD_GUI=OFF` builds only the engine + headless tests (no GL needed)
 
 ### Web

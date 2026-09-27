@@ -119,6 +119,38 @@ if(APOLLO_BUNDLE)
     add_dependencies(apollo_patcher_gui_bundle apollo_patches_bundle)
 endif()
 
+# The font, put where load_font() looks for it -- the same two places as the
+# patch database, for the same reason. Copied per file rather than declared as
+# a bundle resource, so the non-Apple builds get it beside the executable too.
+if(APOLLO_FONT)
+    if(APPLE)
+        set(_font_dest "$<TARGET_BUNDLE_CONTENT_DIR:apollo_patcher_gui>/Resources")
+    else()
+        set(_font_dest "$<TARGET_FILE_DIR:apollo_patcher_gui>")
+    endif()
+
+    get_filename_component(_font_name "${APOLLO_FONT}" NAME)
+    set(_font_stamp "${CMAKE_CURRENT_BINARY_DIR}/font-installed.stamp")
+    set(_font_copy
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${APOLLO_FONT}" "${_font_dest}/${_font_name}")
+    if(APOLLO_FONT_LICENSE)
+        list(APPEND _font_copy
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${APOLLO_FONT_LICENSE}" "${_font_dest}/OFL.txt")
+    endif()
+
+    add_custom_command(
+        OUTPUT  "${_font_stamp}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_font_dest}"
+        ${_font_copy}
+        COMMAND ${CMAKE_COMMAND} -E touch "${_font_stamp}"
+        DEPENDS "${APOLLO_FONT}" apollo_patcher_gui
+        COMMENT "Installing the font into the app"
+        VERBATIM)
+    add_custom_target(apollo_patcher_gui_font ALL DEPENDS "${_font_stamp}")
+endif()
+
 if(APPLE)
     # Bundle the .icns so Finder/Dock/⌘-Tab show the app icon.
     set(APP_ICNS ${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.icns)
