@@ -4244,11 +4244,26 @@ int main(int argc, char** argv) {
     }
 
 #ifdef _WIN32
-    // The app ships a Mesa software opengl32.dll in a "softgl" subfolder. If the
-    // user copies it next to the .exe, GLFW loads it (the exe's own directory is
-    // searched first) and this forces its software renderer. Ignored when the
-    // system GPU driver is used.
-    _putenv_s("GALLIUM_DRIVER", "llvmpipe");
+    //
+    // The app ships a Mesa software opengl32.dll in a "softgl" subfolder. If
+    // the user copies it next to the .exe, GLFW loads it (the exe's own
+    // directory is searched first) and this picks its renderer. Ignored when
+    // the system GPU driver is used.
+    //
+    // llvmpipe is the fast one, and the default for that reason -- but it
+    // JITs with LLVM for whatever CPU it finds, and that is exactly what
+    // fails on some hosts: a JIT that enables AVX on a Windows 7 install
+    // whose OS support for it is missing produces STATUS_ILLEGAL_INSTRUCTION
+    // (0xC000001D) the moment the first generated code runs, which looks like
+    // the app refusing to start. softpipe has no JIT at all and is the escape
+    // hatch; it is far slower, which for a static 2D interface matters less
+    // than starting.
+    //
+    // So this only ever SUGGESTS: an existing setting is left alone, because
+    // somebody setting it is somebody working around this.
+    //
+    if (!getenv("GALLIUM_DRIVER"))
+        _putenv_s("GALLIUM_DRIVER", "llvmpipe");
 #endif
 
 #ifdef __APPLE__

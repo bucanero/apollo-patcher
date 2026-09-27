@@ -728,10 +728,29 @@ Windows and Linux file associations go through `argv`, which already worked.
   you hit the OpenGL error, **copy `softgl\opengl32.dll` up into the same folder
   as `apollo_patcher_gui.exe`** and relaunch — GLFW loads `opengl32.dll` from the
   exe's own directory first, so it then renders in software (presented via GDI,
-  which works over RDP); `GALLIUM_DRIVER=llvmpipe` is set in `main` to force it.
+  which works over RDP); `main` sets `GALLIUM_DRIVER=llvmpipe` to select it,
+  unless you have set that variable yourself.
   The bundled DLL is Mesa **17.2.6** — old enough to be a single self-contained
-  file, and verified working on Windows 7, both x86 and x64. macOS/Linux never
-  need this.
+  file. macOS/Linux never need this.
+
+  **The 64-bit software renderer needs a CPU with AVX.** That is not by
+  design: every mesa-dist-win x64 build before Mesa 22.0 carries the `swr`
+  driver, which
+  [leaks AVX into common code](https://github.com/pal1000/mesa-dist-win#known-issues).
+  On an older CPU — a Pentium 4 has SSE3 and no more — the app dies at launch
+  with `0xC000001D`, `STATUS_ILLEGAL_INSTRUCTION`, before a window appears.
+
+  **Use the 32-bit build on such a machine.** The AVX leak is x64-only, so the
+  x86 artifact's `softgl` is unaffected, and a 32-bit app runs perfectly well
+  on 64-bit Windows. That is the supported answer, deliberately — and a tested
+  one: on a Windows 7 x64 host with a Pentium 4 (SSE3, no AVX), the x64
+  software renderer dies at launch with `0xC000001D` and the x86 one runs
+  normally. The same host runs the x64 build fine on its GPU driver, which is
+  what narrows it to the software renderer rather than the app.
+
+  `GALLIUM_DRIVER` is only ever *suggested* by the app, never overwritten, so
+  `set GALLIUM_DRIVER=softpipe` does take effect if you ever need it — it just
+  cannot help with this particular failure.
 
 ## Credits / third-party
 
