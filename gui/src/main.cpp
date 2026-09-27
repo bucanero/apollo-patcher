@@ -33,6 +33,7 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl2.h"
 #include "imgui_memory_editor.h"   // vendored from ocornut/imgui_club (MIT)
+#include "font10x20.h"             // the console raster font, for the hex editor
 #include <GLFW/glfw3.h>
 
 // Renderer: Dear ImGui's fixed-function OpenGL2 backend on a legacy (non-core)
@@ -69,6 +70,39 @@
 
 static GLFWwindow* g_window = nullptr;   // for native dialog parenting
 static float       g_ui_scale = 1.0f;    // HiDPI content scale (column widths)
+
+// The 10x20 console raster font, for the places where a proportional font
+// is the wrong tool: the hex editor and the hex ID fields. Built in
+// load_mono_font(); null if that failed, and every use guards for it.
+static ImFont*     g_mono = nullptr;
+
+// Whether a run of text is something that font could draw: it carries
+// printable ASCII and nothing else, so anything else has to stay on the main
+// font or it would come out as '?'.
+//
+// Deliberately a property of the TEXT and not of the font, with no reference
+// to g_mono -- a file named on the command line, dropped on the Dock or opened
+// from Finder is loaded before the window and its fonts exist, and asking
+// about the font here latched every such patch to the wrong answer for the
+// rest of the run. The callers check g_mono where they push it.
+//
+// This is what decides the code viewers case by case rather than wholesale.
+// Their hex columns drift in a proportional font exactly as the hex editor's
+// did, but 246 of the 2,247 files in the patch database are not even valid
+// UTF-8 and another 82 carry curly quotes, accented Latin, katakana or
+// fullwidth forms -- so a blanket switch would trade a cosmetic problem for
+// rows of '?'. Per body, the 96% that are plain ASCII line up and the rest
+// stay readable.
+//
+// Tab, newline and carriage return pass: they are layout, not glyphs.
+static bool is_plain_ascii(const char* s, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\t' || c == '\n' || c == '\r') continue;
+        if (c < FONT10X20_FIRST || c > FONT10X20_LAST) return false;
+    }
+    return true;
+}
 
 namespace fs = std::filesystem;
 
@@ -110,6 +144,7 @@ struct AppState {
     std::string         target_path;
     std::string         game_name;
     std::string         patch_raw;        // the .savepatch as text (CR stripped)
+    bool                patch_raw_ascii = false;  // ...and whether g_mono can draw it
     std::string         patch_bytes;      // ...and verbatim, for saving it back
     bool                show_patch_raw = false;
 
@@ -117,6 +152,7 @@ struct AppState {
     std::string         hex_path;          // which file hex_data came from
     bool                show_hex = false;
     bool                hex_dirty = false; // edits not yet written to disk
+    bool                hex_fit   = false; // refit the window to the grid once
     std::vector<char>   selected;         // per-row checkbox
     std::vector<char>   viewer_open;      // per-row code window open flag
     // Editable copy of a code body, one per row. `loaded` keeps unsaved typing
@@ -126,6 +162,14 @@ struct AppState {
         std::string text;
         bool        loaded = false;
         bool        raise  = false;   // bring the window forward next frame
+        // Whether the fixed-pitch font can draw this body. Cached rather than
+        // asked every frame: a single code body runs to tens of KB.
+        bool        ascii  = false;
+        void set(const char* t) {
+            text  = t ? t : "";
+            ascii = is_plain_ascii(text.data(), text.size());
+        }
+        void rescan() { ascii = is_plain_ascii(text.data(), text.size()); }
     };
     std::vector<CodeEdit> viewer_buf;
     std::string         log;
@@ -241,6 +285,7 @@ struct AppState {
         game_name.clear();
         patch_path.clear();
         patch_raw.clear();
+        patch_raw_ascii = false;
         patch_bytes.clear();
         show_patch_raw = false;
         // The detection belongs to the patch that is going away. Left set, a
@@ -528,6 +573,8 @@ static void draw_about() {
     ImGui::BulletText("portable-file-dialogs - native file pickers (WTFPL)");
     ImGui::BulletText("mbedTLS and zlib - crypto and compression");
     ImGui::BulletText("MicroPython - runs the Python patch scripts");
+    ImGui::BulletText("Noto Sans JP - the interface font (SIL OFL)");
+    ImGui::BulletText("idispatch/raster-fonts - the 10x20 fixed-pitch font");
     ImGui::Spacing();
 
     if (ImGui::Button("Close", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
@@ -563,6 +610,9 @@ static bool hex_load(const std::string& path) {
     if (!in) { g_app.append_log("[!] Could not read the target file"); return false; }
     g_app.hex_data.assign(std::istreambuf_iterator<char>(in),
                           std::istreambuf_iterator<char>());
+    // A different file wants the window refitted around it; a reload of the
+    // same one must not undo a size the user chose.
+    g_app.hex_fit  = (g_app.hex_path != path);
     g_app.hex_path = path;
     g_app.hex_dirty = false;
     char buf[512];
@@ -1351,6 +1401,8 @@ static void load_patch(const std::string& path) {
                         std::istreambuf_iterator<char>());
         g_app.patch_bytes = raw;              // verbatim: what a save writes back
         g_app.patch_raw = strip_cr(raw);      // CR-stripped: what ImGui draws
+        g_app.patch_raw_ascii =
+            is_plain_ascii(g_app.patch_raw.data(), g_app.patch_raw.size());
     }
     adopt_session(s, path, nullptr, nullptr);   // loose file: no platform tag
 }
@@ -2174,6 +2226,8 @@ static void load_patch_from_db(int index) {
     apctl_session_t* s = apctl_open_buffer(data, len, label.c_str());
     g_app.patch_bytes.assign(data, len);
     g_app.patch_raw = strip_cr(g_app.patch_bytes);
+    g_app.patch_raw_ascii =
+        is_plain_ascii(g_app.patch_raw.data(), g_app.patch_raw.size());
     free(data);
 
     if (!s) { g_app.append_log("[!] Could not parse that patch"); return; }
@@ -2551,7 +2605,7 @@ static void draw_code_list() {
                         // Only on the way in: reopening keeps whatever was
                         // typed and not saved.
                         if (!g_app.viewer_buf[i].loaded) {
-                            g_app.viewer_buf[i].text = body ? body : "";
+                            g_app.viewer_buf[i].set(body);
                             g_app.viewer_buf[i].loaded = true;
                         }
                     }
@@ -2603,8 +2657,12 @@ static void draw_code_list() {
 static void draw_patch_raw() {
     if (!g_app.show_patch_raw) return;
 
+    // ### rather than ##: ImGui hashes a window's whole name, so with ## the
+    // file name would be part of the identity and every patch would open at
+    // the default position instead of where the last one was left. There is
+    // only ever one of these windows.
     char title[256];
-    snprintf(title, sizeof title, "Patch file: %s##rawpatch",
+    snprintf(title, sizeof title, "Patch file: %s###rawpatch",
              g_app.patch_path.empty() ? "(none)" : base_name(g_app.patch_path));
 
     bool open = true;
@@ -2617,7 +2675,10 @@ static void draw_patch_raw() {
         ImGui::BeginChild("raw", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
         // TextUnformatted skips lines outside the clip rect, so even the
         // largest patches in the database (~430KB) stay cheap to draw.
+        const bool mono = g_mono && g_app.patch_raw_ascii;
+        if (mono) ImGui::PushFont(g_mono);
         ImGui::TextUnformatted(g_app.patch_raw.c_str());
+        if (mono) ImGui::PopFont();
         ImGui::EndChild();
     }
     ImGui::End();
@@ -2640,12 +2701,41 @@ static void draw_hex_editor() {
         wired = true;
     }
 
+    // ### so that neither the file name nor the " *" is part of the window's
+    // identity -- with ## it was, and the window jumped back to its default
+    // place and size the moment a byte was edited.
     char title[512];
-    snprintf(title, sizeof title, "Save data: %s%s##hexedit",
+    snprintf(title, sizeof title, "Save data: %s%s###hexedit",
              base_name(g_app.hex_path), g_app.hex_dirty ? " *" : "");
 
+    // Fit the window to the grid instead of guessing at it. The ASCII pane is
+    // the rightmost column, so a window even slightly too narrow hides part of
+    // it -- which 700px did: 16 columns of 10px glyphs want 760. The editor
+    // will size itself from CalcTextSize("F"), so this has to be measured
+    // with the same font pushed, and before Begin, because SetNextWindowSize
+    // applies to the next window rather than the current one.
+    if (g_mono) ImGui::PushFont(g_mono);
+    MemoryEditor::Sizes sz;
+    ed.CalcSizes(sz, g_app.hex_data.size(), 0);
+    const float line_h = ImGui::GetTextLineHeight();
+    if (g_mono) ImGui::PopFont();
+
+    // Tall enough for the file, within reason: a 64-byte PARAM.SFO does not
+    // want the same window as a 4MB save.
+    const ImGuiStyle& st = ImGui::GetStyle();
+    int rows = (int)((g_app.hex_data.size() + ed.Cols - 1) / (size_t)ed.Cols);
+    rows = rows < 8 ? 8 : (rows > 24 ? 24 : rows);
+    const float want_h = ImGui::GetFrameHeight()                  // title bar
+                       + st.WindowPadding.y * 2
+                       + ImGui::GetTextLineHeightWithSpacing() * 2  // path, byte count
+                       + st.ItemSpacing.y * 2                       // the separator
+                       + rows * line_h
+                       + st.ItemSpacing.y + ImGui::GetFrameHeightWithSpacing();  // editor footer
+
     bool open = true;
-    ImGui::SetNextWindowSize(ImVec2(700, 520), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(sz.WindowWidth, want_h),
+                             g_app.hex_fit ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
+    g_app.hex_fit = false;
     if (ImGui::Begin(title, &open)) {
         ImGui::TextWrapped("%s", g_app.hex_path.c_str());
         ImGui::Text("%zu bytes", g_app.hex_data.size());
@@ -2660,10 +2750,15 @@ static void draw_hex_editor() {
             ImGui::TextDisabled("no unsaved edits");
         }
         ImGui::Separator();
-        if (!g_app.hex_data.empty())
+        if (!g_app.hex_data.empty()) {
+            // Only the grid: the lines above carry a file path and a name,
+            // which can hold anything, and this font is ASCII.
+            if (g_mono) ImGui::PushFont(g_mono);
             ed.DrawContents(g_app.hex_data.data(), g_app.hex_data.size());
-        else
+            if (g_mono) ImGui::PopFont();
+        } else {
             ImGui::TextDisabled("(empty file)");
+        }
     }
     ImGui::End();
     if (!open) g_app.show_hex = false;
@@ -2687,8 +2782,10 @@ static void draw_code_viewers() {
         const bool  unsaved = (buf.text != live);
         const bool  edited  = apctl_code_is_edited(c) != 0;
 
+        // ### so the code's name and the " *" stay out of the identity; with
+        // ## the window moved back to its default place on the first edit.
         char title[192];
-        snprintf(title, sizeof title, "Code: %s%s##viewer%d",
+        snprintf(title, sizeof title, "Code: %s%s###viewer%d",
                  (c->name && c->name[0]) ? c->name : "(unnamed)",
                  unsaved ? " *" : "", i);
 
@@ -2734,7 +2831,7 @@ static void draw_code_viewers() {
                 }
                 // set_code_text drops an edit that matches the original, so
                 // read the body back rather than assume it took the text.
-                buf.text = apctl_code_text(c);
+                buf.set(apctl_code_text(c));
             }
             if (!unsaved) ImGui::EndDisabled();
 
@@ -2742,7 +2839,7 @@ static void draw_code_viewers() {
             if (!edited && !unsaved) ImGui::BeginDisabled();
             if (ImGui::SmallButton("Revert to file")) {
                 apctl_revert_code(c);
-                buf.text = apctl_code_text(c);
+                buf.set(apctl_code_text(c));
             }
             if (!edited && !unsaved) ImGui::EndDisabled();
 
@@ -2773,8 +2870,18 @@ static void draw_code_viewers() {
             ImGui::Separator();
             // AllowTabInput: patch bodies (Python especially) are indented, and
             // the default would move focus out of the box instead.
-            ImGui::InputTextMultiline("##body", &buf.text, ImVec2(-FLT_MIN, -FLT_MIN),
-                                      ImGuiInputTextFlags_AllowTabInput);
+            // One local for both the push and the pop, so the stack stays
+            // balanced even when the edit below flips the answer.
+            const bool mono = g_mono && buf.ascii;
+            if (mono) ImGui::PushFont(g_mono);
+            const bool typed =
+                ImGui::InputTextMultiline("##body", &buf.text, ImVec2(-FLT_MIN, -FLT_MIN),
+                                          ImGuiInputTextFlags_AllowTabInput);
+            if (mono) ImGui::PopFont();
+            // An edit can bring in a character this font has no glyph for --
+            // pasted text especially -- so the answer is re-asked on a change
+            // rather than kept from load.
+            if (typed) buf.rescan();
         }
         ImGui::End();
         if (!open) g_app.viewer_open[i] = 0;
@@ -4202,6 +4309,91 @@ static void load_font(ImGuiIO& io) {
                      "Set $APOLLO_FONT to a .ttf or .otf, or reinstall.");
 }
 
+//
+// The second font: 10x20, fixed pitch, one bit per pixel.
+//
+// Noto is the right font for names and prose and the wrong one for a hex
+// dump. The memory editor sizes its whole grid from CalcTextSize("F").x and
+// then draws every other character in that cell, which only works if the
+// advances match; in Noto they run from 3.96px for 'i' to 12.35px for 'W', so
+// the columns drift and the ASCII pane does not line up with the bytes.
+//
+// The fix is a fixed-pitch font, and the one already in the family is the
+// 10x20 console font apollo-ps3, apollo-ps4 and apollo-vita draw with. At an
+// exact 10 x 20 cell it matches the 20px body line height, so the hex window
+// keeps the same rhythm as the rest of the app, and being a bitmap it is
+// drawn rather than rasterised -- crisp at the small sizes where
+// antialiasing does the most damage.
+//
+// ImGui has no notion of a bitmap font, so this goes in the long way round:
+// a font whose own glyph range is a single character nobody draws, with the
+// 95 printable ASCII glyphs added as custom atlas rectangles and their pixels
+// written in by hand after the atlas is packed. A custom-rect glyph is placed
+// at GlyphOffset, which defaults to (0,0) -- the top-left of the text line --
+// so a full-height 20px cell lands exactly on a 20px line with no nudging.
+//
+// ASCII only, deliberately: see font10x20.h. That is why this font is used
+// for the hex editor and the hex ID fields and nothing else -- those are hex
+// digits and ASCII bytes by construction, whereas a file path, a game name or
+// a savepatch comment can hold anything, and a missing glyph would draw as
+// '?' all over again.
+//
+static void load_mono_font(ImGuiIO& io) {
+    enum { GLYPHS = FONT10X20_LAST - FONT10X20_FIRST + 1 };
+
+    // ImFontAtlas::AddFont insists on a real font source, so ProggyClean
+    // supplies one -- asked for a single glyph, U+0020, which a custom rect
+    // then overrides. Custom rects are registered last and the lookup table
+    // takes the last glyph for a codepoint, so nothing of ProggyClean shows.
+    ImFontConfig cfg;
+    cfg.SizePixels = (float)FONT10X20_H;
+    static const ImWchar seed[] = { 0x0020, 0x0020, 0 };
+    cfg.GlyphRanges = seed;
+    ImFont* font = io.Fonts->AddFontDefault(&cfg);
+    if (!font) {
+        g_app.append_log("[!] Font: the fixed-pitch font could not be created; "
+                         "the hex editor will use the main font and its columns "
+                         "will not line up.");
+        return;
+    }
+
+    static int rects[GLYPHS];
+    for (int i = 0; i < GLYPHS; ++i)
+        rects[i] = io.Fonts->AddCustomRectFontGlyph(
+            font, (ImWchar)(FONT10X20_FIRST + i),
+            FONT10X20_W, FONT10X20_H, (float)FONT10X20_W);
+
+    // Pack now rather than letting the backend trigger it, because the pixels
+    // have to be written before anything reads the texture. The GL backend
+    // asks for RGBA32, which converts from this same alpha buffer and only
+    // rebuilds if it is absent, so the blit below is what ends up on the GPU.
+    io.Fonts->Build();
+
+    unsigned char* pixels = nullptr;
+    int tex_w = 0, tex_h = 0;
+    io.Fonts->GetTexDataAsAlpha8(&pixels, &tex_w, &tex_h);
+    if (!pixels) return;
+
+    for (int i = 0; i < GLYPHS; ++i) {
+        const ImFontAtlasCustomRect* r = io.Fonts->GetCustomRectByIndex(rects[i]);
+        if (!r->IsPacked()) continue;
+        const unsigned char* src = kFont10x20 + (size_t)i * FONT10X20_H * 2;
+        for (int y = 0; y < FONT10X20_H; ++y) {
+            // 10 bits of the 16, most significant first.
+            unsigned row  = ((unsigned)src[y * 2] << 8) | src[y * 2 + 1];
+            unsigned char* dst = pixels + (size_t)(r->Y + y) * tex_w + r->X;
+            for (int x = 0; x < FONT10X20_W; ++x)
+                dst[x] = (row >> (15 - x)) & 1 ? 255 : 0;
+        }
+    }
+
+    g_mono = font;
+    char note[128];
+    snprintf(note, sizeof note, "Font: %dx%d console raster, %d glyphs (fixed pitch)",
+             FONT10X20_W, FONT10X20_H, GLYPHS);
+    g_app.append_log(note);
+}
+
 static void apply_style() {
     // Cosmetic rounding only — no size scaling, so everything stays at
     // ImGui's default dimensions.
@@ -4585,7 +4777,8 @@ int main(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;   // don't litter the CWD with imgui.ini
 
-    load_font(io);   // the vendored Noto Sans JP; see APP_FONT_NAME
+    load_font(io);        // the vendored Noto Sans JP; see APP_FONT_NAME
+    load_mono_font(io);   // the 10x20 console raster font, for the hex editor
 
     ImGui::StyleColorsDark();
     apply_style();
@@ -4609,7 +4802,6 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL2_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
-
         // keyboard shortcuts
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_O, false)) do_open_patch();
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_S, false) &&

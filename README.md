@@ -142,6 +142,7 @@ tools/    build-index.py   — patch index, for both front-ends; also the
                              tool catalog (--format=tools), see below
           verify-tools.mjs — proves each catalogued tool against a real save
           make-bundle.py   — apollo-patches.zip, for the desktop app
+          make-font.py     — the hex editor's fixed-pitch font, as a header
 ```
 
 Both front-ends let you search the ~2250 patches in

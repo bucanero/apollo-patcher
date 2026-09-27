@@ -504,6 +504,132 @@ than a slope: the same ~4000 glyphs fit 1024×1024 up to and including 16px and
 need 1024×2048 from 17 — 1MB against 2MB of alpha texture. Having paid that,
 20px costs no more than 18.
 
+### The second font, for the hex editor
+
+Noto is the right font for names and the wrong one for a hex dump. The memory
+editor sizes its entire grid from `CalcTextSize("F").x` and then draws every
+other character in that one cell, which only holds if the advances match. In
+Noto at 20px they do not:
+
+| | advance |
+|---|---|
+| `0`–`9` | 7.87 — tabular, so decimal lines up |
+| `A`–`F` | 7.82 (`F`) to 9.65 (`D`) |
+| `i` / `W` | 3.96 / 12.35 |
+
+So hex columns drift and the ASCII pane stops lining up with the bytes above
+it. The fix is a fixed-pitch font, and the one already in the family is the
+**10×20 console raster font** that `apollo-ps3`, `apollo-ps4` and
+`apollo-vita` draw with, from
+[idispatch/raster-fonts](https://github.com/idispatch/raster-fonts).
+
+It was picked over a monospace outline face (Cousine, which ImGui ships, comes
+out at 10.59×20 — near enough the same box) for three reasons. A bitmap is
+drawn rather than rasterised, so it is crisp at exactly the small dense sizes
+where antialiasing does the most damage. Its advance is an integer 10, so 16
+columns of hex land on integer pixels instead of accumulating a fraction. And
+the app already renders at a 20px line height, so a 20px cell sits in the same
+rhythm as everything around it.
+
+`tools/make-font.py` converts the upstream file — 180KB of commented C
+for 10KB of bitmap — into `gui/src/font10x20.h`, keeping only the 95 printable
+ASCII glyphs at 3,800 bytes. The parser matches each byte pair together with
+the bit-pattern comment beside it and fails if the two disagree, so a parse
+that drifted would have to drift in both at once. The codes above `0x7E` are
+**deliberately dropped**: they are CP437 box drawing, which is not what
+Unicode U+0080–00FF means, so registering them would draw the wrong character
+rather than none.
+
+ImGui has no notion of a bitmap font, so `load_mono_font()` goes the long way
+round: a font whose own glyph range is a single character nobody draws
+(U+0020, from ProggyClean), with the 95 glyphs added as **custom atlas
+rectangles** and their pixels written in by hand after packing. Custom rects
+are registered last and the lookup table takes the last glyph for a codepoint,
+so nothing of ProggyClean shows. A custom-rect glyph sits at its
+`GlyphOffset`, which defaults to `(0,0)` — the top-left of the text line — so
+a full-height 20px cell lands on a 20px line with no nudging. `Build()` is
+called explicitly rather than left to the backend, because the pixels have to
+be written before anything reads the texture; the GL backend then asks for
+RGBA32, which converts from that same alpha buffer and only rebuilds if it is
+absent.
+
+The whole thing costs 95 glyphs, 19,000 atlas pixels and no change to the
+atlas size, which stays 1024×2048.
+
+### Where it is used, and where it isn't
+
+Being ASCII-only, the font cannot simply replace Noto everywhere a fixed pitch
+would help. The savepatch code viewers and the raw patch view have the same
+column drift as the hex editor, but of the 2,247 files in the patch database
+**246 are not valid UTF-8 at all** (CP1252 quotes and dashes, which ImGui
+already draws as `?` whatever the font) and another 82 carry curly quotes,
+accented Latin, `™`, katakana, CJK or fullwidth forms. A blanket switch would
+trade a cosmetic problem for rows of `?`.
+
+So the choice is made per piece of text, by `is_plain_ascii()` — every byte
+printable ASCII, with tab, newline and carriage return allowed through as
+layout. Measured over the database:
+
+| | fixed pitch | falls back to Noto |
+|---|---|---|
+| code bodies | **80,092 of 80,094** (100.0%) | 2 |
+| whole patch files | 1,919 of 2,247 (85.4%) | 328 |
+
+The split is not a coincidence: non-ASCII in a `.savepatch` lives almost
+entirely in **names and author comments**, which the code viewer does not
+show. So in practice every code body gets the fixed-pitch font, the raw view
+gets it for six files in seven, and nothing anywhere degrades to `?`.
+
+The answer is **cached**, not asked per frame — a patch file runs to 430KB and
+a single body to tens of KB. `AppState::CodeEdit::set()` recomputes it on
+every assignment, and an edit re-asks, because pasted text can bring in a
+character the font has no glyph for. The push and the pop read one local so
+the font stack stays balanced even when an edit flips the answer mid-widget.
+
+`is_plain_ascii()` deliberately asks about the **text and not the font**, and
+never looks at `g_mono`. An earlier version checked the font there and got it
+wrong in a way worth recording: a patch named on the command line, dropped on
+the Dock or opened from Finder is loaded by the argument loop, which runs
+*before* the window and its fonts exist — so `g_mono` was still null, every
+such patch latched to "cannot draw", and the raw view stayed proportional for
+the rest of the run. The font is checked where it is pushed instead.
+
+The hex editor's own window is the one place the font is pushed around part of
+a window rather than all of it: the path and file name above the grid can hold
+anything, so only the grid gets it. All three of these windows also had their
+identities fixed while this was going in — see
+[One window, one identity](#one-window-one-identity).
+
+### Fitting the hex window
+
+The hex window used to open at a hard-coded 700×520 and cut off the right-hand
+ASCII pane. Under Noto the editor was laying its grid out on
+`CalcTextSize("F").x + 1` = 8.82px cells while a `W` drew 12.35px wide, so the
+text spilled past the width the editor thought it needed — 700 looked like
+plenty and wasn't.
+
+With a fixed pitch the arithmetic is exact, so the window is now sized from
+`MemoryEditor::CalcSizes()` rather than guessed at. Measured, with the address
+column growing as the file does:
+
+| file | address digits | width |
+|---|---|---|
+| 64 B | 2 | 716 |
+| 2 KB | 3 | 727 |
+| 64 KB | 4 | 738 |
+| 4 MB | 6 | 760 |
+
+The width has to be measured **with the fixed-pitch font pushed and before
+`Begin()`**, since `SetNextWindowSize` applies to the next window rather than
+the current one. Height follows the file, clamped to 8–24 rows so a 64-byte
+`PARAM.SFO` does not get the same window as a 4MB save, and both dimensions
+are clamped to the viewport.
+
+Refitting happens on `ImGuiCond_FirstUseEver`, plus once more whenever a
+**different** file is loaded — `hex_load()` compares the path and sets
+`hex_fit`. Reloading the same file from disk deliberately does not refit, so a
+size the user chose survives.
+
 ## Settings
 
 **File ▸ Settings…** holds how saves are read and written. Everything in it is
@@ -706,6 +832,16 @@ Windows and Linux file associations go through `argv`, which already worked.
   against the file name and then the patch's own first lines. Still a checkbox,
   so it can be overridden.
 
+### One window, one identity
+
+ImGui hashes a window's whole name, so `"Save data: foo *##hexedit"` and
+`"Save data: foo##hexedit"` were two different windows: the hex editor jumped
+back to its default position and size the moment a byte was edited, and the
+code viewers did the same on their first edit. `###` restarts the hash, so the
+varying part — file name, code name, the `*` dirty marker — stays out of the
+identity. The three windows this affects are the hex editor, the raw patch
+view and the per-code viewers (`###viewer%d`, one identity each).
+
 ## Features
 
 - Native file pickers via header-only
@@ -797,6 +933,13 @@ Windows and Linux file associations go through `argv`, which already worked.
   `__stdcall ENUMRESNAMEPROC` on x86 — re-apply if you refresh the header.
 - [Dear ImGui](https://github.com/ocornut/imgui) and
   [GLFW](https://github.com/glfw/glfw) — fetched at configure time via CMake.
+- [Noto Sans JP](https://fonts.google.com/noto) — the UI font, vendored at
+  `assets/fonts/` under the SIL Open Font License. See [The font](#the-font).
+- [raster-fonts](https://github.com/idispatch/raster-fonts) by idispatch — the
+  10×20 console font the hex editor and code viewers draw with, the same one
+  `apollo-ps3`, `apollo-ps4` and `apollo-vita` use. Converted to
+  `src/font10x20.h` by `tools/make-font.py`; regenerate from upstream's
+  `font-10x20.c` rather than editing the header.
 
 ## App icon
 
