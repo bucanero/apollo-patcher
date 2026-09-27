@@ -237,6 +237,11 @@ struct AppState {
         patch_raw.clear();
         patch_bytes.clear();
         show_patch_raw = false;
+        // The detection belongs to the patch that is going away. Left set, a
+        // save opened afterwards with no patch of its own would report the
+        // previous game's byte order as if it were its own.
+        be_detected = false;
+        be_platform.clear();
     }
 };
 static AppState g_app;
@@ -2879,6 +2884,8 @@ static int count_edited() {
 }
 
 static void commit_open_save(const SaveEntry& save) {
+    const bool same = g_app.has_save && g_app.save.path == save.path;
+
     // Copied, not referenced: a rescan rebuilds and re-sorts the browser's
     // list, and the patcher screen has to go on describing the save it was
     // given rather than whatever lands at that index afterwards.
@@ -2891,9 +2898,28 @@ static void commit_open_save(const SaveEntry& save) {
         // A save holding nothing but its own metadata. Carrying the previous
         // target over would show this save's name above another save's file.
         g_app.target_path.clear();
+        g_app.title_hint.clear();
         g_app.psp.clear();
         g_app.ps3.clear();
+        // ...and the match belongs to that other file. Re-running the
+        // detection against an empty target is what clears it.
+        detect_patch_for_target();
     }
+
+    //
+    // A different save with no patch of its own starts with NO codes.
+    //
+    // open_save_file loads a patch when the database has one, but nothing
+    // closed the last one when it does not -- so the previous game's codes
+    // stayed on screen underneath the new save's name and icon, looking for
+    // all the world like they belonged to it.
+    //
+    // Guarded on the save actually changing, so that re-opening the one
+    // already in front of you does not throw away a patch loaded by hand.
+    //
+    if (!same && g_app.match_index < 0)
+        g_app.close();
+
     g_screen = SCREEN_PATCH;
 }
 
@@ -3999,7 +4025,7 @@ static void print_usage(const char* argv0) {
         "Apollo Save Patcher\n"
         "\n"
         "  %s [FILE...]\n"
-        "  %s --scan DIR [N]\n"
+        "  %s --scan DIR [N...]\n"
         "  %s --open PATH\n"
         "\n"
         "A .savepatch is opened as the patch; anything else is opened as the\n"
@@ -4008,8 +4034,8 @@ static void print_usage(const char* argv0) {
         "\n"
         "--scan prints the saves under DIR and exits, without opening a window:\n"
         "the same walk the saves screen does, for checking what a folder holds\n"
-        "from a terminal or a script. Add a save's number to have it opened as\n"
-        "well, which reports the target, the patch and the encryption layer --\n"
+        "from a terminal or a script. Add save numbers to have them opened in\n"
+        "turn, each reporting the target, the patch and the encryption layer --\n"
         "everything the patcher screen would be showing had you clicked it.\n"
         "\n"
         "--open takes one path the way a dropped file does -- a save folder, a\n"
@@ -4078,7 +4104,7 @@ static void print_open_state() {
         printf("  no console encryption layer\n");
 }
 
-static int run_scan(const char* root, int pick) {
+static int run_scan(const char* root, const std::vector<int>& picks) {
     if (!is_dir(root)) {
         fprintf(stderr, "%s is not a folder\n", root);
         return 2;
@@ -4108,22 +4134,28 @@ static int run_scan(const char* root, int pick) {
     }
     printf("\n%s\n", g_sb.note.c_str());
 
-    if (pick < 0)
+    if (picks.empty())
         return g_sb.saves.empty() ? 1 : 0;
 
-    // ...and what happens when one of them is chosen: the same call the
-    // browser's "Open this save" makes, and then everything that followed
-    // from it. What this prints is what the patcher screen would be showing.
-    if (pick >= int(g_sb.saves.size())) {
-        fprintf(stderr, "no save %d in that folder\n", pick);
-        return 2;
-    }
-    // commit_open_save, not open_save_file: the same call the list makes, so
-    // what this prints is what the patcher screen would be showing.
-    commit_open_save(g_sb.saves[size_t(pick)]);
+    //
+    // ...and what happens when they are chosen, IN ORDER. Several rather than
+    // one because opening saves in sequence is where state leaks between
+    // them: a save with no codes of its own inheriting the previous save's,
+    // or its byte order, or a patch its own title ID never matched.
+    //
+    for (int pick : picks) {
+        if (pick < 0 || pick >= int(g_sb.saves.size())) {
+            fprintf(stderr, "no save %d in that folder\n", pick);
+            return 2;
+        }
+        // commit_open_save, not open_save_file: the same call the list makes,
+        // so what this prints is what the patcher screen would be showing.
+        commit_open_save(g_sb.saves[size_t(pick)]);
 
-    print_open_state();
-    return g_app.session ? 0 : 1;
+        printf("\nopening save %d\n", pick);
+        print_open_state();
+    }
+    return 0;
 }
 
 //
@@ -4200,7 +4232,9 @@ int main(int argc, char** argv) {
         if (strncmp(argv[i], "-psn_", 5) == 0) continue;
         if (strcmp(argv[i], "--scan") == 0) {
             if (i + 1 >= argc) { print_usage(argv[0]); return 2; }
-            return run_scan(argv[i + 1], i + 2 < argc ? atoi(argv[i + 2]) : -1);
+            std::vector<int> picks;
+            for (int j = i + 2; j < argc; j++) picks.push_back(atoi(argv[j]));
+            return run_scan(argv[i + 1], picks);
         }
         if (strcmp(argv[i], "--open") == 0) {
             if (i + 1 >= argc) { print_usage(argv[0]); return 2; }
