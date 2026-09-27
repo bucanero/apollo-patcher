@@ -132,7 +132,11 @@ struct AppState {
     bool                be_detected = false;
     std::string         be_platform;      // "PS3", "PS4", ... "" for a loose file
     bool                scroll_log = false;
-    bool                show_log = false; // log pane collapsed by default
+    // Closed, and it stays closed: the log is where the low-level detail
+    // goes, and an action that worked has nothing to say that the section
+    // above it does not already show. Only a FAILURE opens it, and only
+    // alongside a message that says to look there.
+    bool                show_log = false;
     bool                open_apply_popup = false;
     std::string         apply_msg;
 
@@ -2166,7 +2170,7 @@ static void apply_selected() {
                  "DECRYPTED.\nCheck the log, then use \"Re-encrypt\" below once the "
                  "cause is fixed.", console);
     } else {
-        g_app.show_log = true;   // reveal the log so the user can inspect
+        g_app.show_log = true;   // a failure: the message says to look there
         snprintf(msg, sizeof msg, "%d of %d code(s) failed to apply.\nCheck the log for details.",
                  errors, applied);
     }
@@ -3204,20 +3208,16 @@ static void draw_psp_section() {
 
     ImGui::BeginDisabled(!g_app.psp.have_key);
     if (ImGui::Button("Decrypt only")) {
-        if (psp_unwrap_target()) {
-            g_app.psp.wrap = false;   // it is plaintext now; do not unwrap twice
-            g_app.show_log = true;
-        }
+        if (psp_unwrap_target()) g_app.psp.wrap = false;  // plaintext now; do not unwrap twice
+        else                     g_app.show_log = true;
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Take the console's layer off and leave it off, for editing\n"
                           "the file by hand. Turns the checkbox above off.");
     ImGui::SameLine();
     if (ImGui::Button("Re-encrypt")) {
-        if (psp_wrap_target()) {
-            g_app.psp.wrap = true;
-            g_app.show_log = true;
-        }
+        if (psp_wrap_target()) g_app.psp.wrap = true;
+        else                   g_app.show_log = true;
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Put the console's layer back on, and rewrite PARAM.SFO\n"
@@ -3225,7 +3225,7 @@ static void draw_psp_section() {
     ImGui::EndDisabled();
 
     ImGui::SameLine();
-    if (ImGui::Button("Resign PARAM.SFO")) { psp_resign(); g_app.show_log = true; }
+    if (ImGui::Button("Resign PARAM.SFO")) { if (!psp_resign()) g_app.show_log = true; }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Recompute the PARAM.SFO hashes alone. Needs no game key -\n"
                           "for a save that was never encrypted.");
@@ -3292,6 +3292,7 @@ static void draw_ps3_section() {
         if (ps3_unwrap_target()) {
             g_app.ps3.wrap = false;   // it is plaintext now; do not unwrap twice
             g_app.ps3.hash_checked = false;
+        } else {
             g_app.show_log = true;
         }
     }
@@ -3303,6 +3304,7 @@ static void draw_ps3_section() {
         if (ps3_wrap_target()) {
             g_app.ps3.wrap = true;
             g_app.ps3.hash_checked = false;
+        } else {
             g_app.show_log = true;
         }
     }
@@ -3312,7 +3314,7 @@ static void draw_ps3_section() {
     ImGui::EndDisabled();
 
     ImGui::SameLine();
-    if (ImGui::Button("Resign PARAM.PFD")) { ps3_resign(); g_app.show_log = true; }
+    if (ImGui::Button("Resign PARAM.PFD")) { if (!ps3_resign()) g_app.show_log = true; }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Recompute the PARAM.PFD signatures alone. Needs no key -\n"
                           "for a database whose entries something else edited.");
@@ -3322,7 +3324,7 @@ static void draw_ps3_section() {
     if (apfd_get_console(nullptr)) {
         ImGui::SameLine();
         ImGui::BeginDisabled(g_app.ps3.sfo_path.empty());
-        if (ImGui::Button("Re-bind to your console")) { ps3_rebind(); g_app.show_log = true; }
+        if (ImGui::Button("Re-bind to your console")) { if (!ps3_rebind()) g_app.show_log = true; }
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(g_app.ps3.sfo_path.empty()
