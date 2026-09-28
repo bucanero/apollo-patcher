@@ -47,6 +47,26 @@ static unsigned fold_fullwidth(unsigned cp)
 {
     if (cp >= 0xFF01 && cp <= 0xFF5E) return cp - 0xFEE0;
     if (cp == 0x3000)                 return ' ';
+
+    /*
+     * U+2212 MINUS SIGN, which Shift-JIS 0x817C decodes to and which 118 of
+     * the 2,641 real save titles use as an ordinary hyphen: "I-Ninja",
+     * "FFX-2", "Xenosaga EPISODE1-06".
+     *
+     * Folded for the same reason the full-width letters are -- it is ASCII
+     * punctuation wearing a wide glyph -- and apollo-ps4's own conversion
+     * table maps that byte to '-' too, so this agrees with the console apps
+     * rather than departing from them.
+     *
+     * It is also the ONLY character in all 2,647 container titles that the
+     * app's font atlas does not cover: U+2212 sits in Mathematical Operators,
+     * which neither the extra ranges nor ImGui's Japanese set includes, so
+     * before this it drew as a fallback '?'. Folding fixes that without
+     * carrying 256 more glyphs for one character. Every other non-ASCII
+     * character these titles use -- curly quotes, katakana, a black star,
+     * tortoise-shell brackets -- is already in the atlas and is left alone.
+     */
+    if (cp == 0x2212)                 return '-';
     return cp;
 }
 

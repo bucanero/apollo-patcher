@@ -471,6 +471,25 @@ static void check_shiftjis(void)
         CHECK_STR("single and double byte characters may be mixed", out, "Dati di");
     }
 
+    /*
+     * The full-width minus, Shift-JIS 0x817C. 118 real titles use it as an
+     * ordinary hyphen, and it is the one character in the whole corpus the
+     * font atlas does not carry -- it used to draw as '?'.
+     */
+    {
+        static const unsigned char minus[] = { 'I', 0x81, 0x7C, 'N', 0x00 };
+        asjis_to_utf8(minus, sizeof minus, out, sizeof out);
+        CHECK_STR("the full-width minus folds to a hyphen", out, "I-N");
+    }
+
+    /* ...but a curly quote does not: the atlas has it and it looks right. */
+    {
+        static const unsigned char quote[] = { 0x81, 0x66, 0x00 };
+        asjis_to_utf8(quote, sizeof quote, out, sizeof out);
+        CHECK("a curly quote is left as it is",
+              (unsigned char)out[0] == 0xE2 && out[1] && out[2]);
+    }
+
     /* Real kana, which is the whole reason the table is here. */
     {
         static const unsigned char kana[] = { 0x83,0x47, 0x81,0x5B, 0x83,0x58, 0x00 };
