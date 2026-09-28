@@ -121,6 +121,33 @@ typedef struct Frame_Key_t {
 	float value;								///< ???
 } Frame_Key;
 
+/*
+ * These structures are memcpy'd straight out of a .ico, so their layout IS the
+ * file format. Asserted rather than assumed: every member above is naturally
+ * aligned and no padding should ever appear, but an ABI that disagreed would
+ * not fail loudly -- it would shift every field and produce an icon made of
+ * noise, on whichever platform happened to differ.
+ *
+ * ps2_IconSys_t's 964 is the same number every real icon.sys in the save
+ * database reports as its own size, which is a second opinion on the layout.
+ *
+ * Written to compile as both C and C++: the desktop app includes this header
+ * from main.cpp.
+ */
+#ifdef __cplusplus
+#define APOLLO_ICON_SASSERT(c, m) static_assert(c, m)
+#else
+#define APOLLO_ICON_SASSERT(c, m) _Static_assert(c, m)
+#endif
+
+APOLLO_ICON_SASSERT(sizeof(Icon_Header)      == 20,  "Icon_Header is padded");
+APOLLO_ICON_SASSERT(sizeof(Vertex_Coord)     ==  8,  "Vertex_Coord is padded");
+APOLLO_ICON_SASSERT(sizeof(Texture_Data)     ==  8,  "Texture_Data is padded");
+APOLLO_ICON_SASSERT(sizeof(Animation_Header) == 20,  "Animation_Header is padded");
+APOLLO_ICON_SASSERT(sizeof(Frame_Data)       ==  8,  "Frame_Data is padded");
+APOLLO_ICON_SASSERT(sizeof(Frame_Key)        ==  8,  "Frame_Key is padded");
+APOLLO_ICON_SASSERT(sizeof(ps2_IconSys_t)    == 964, "ps2_IconSys_t is padded");
+
 /** A parsed icon: the morph targets, the per-vertex attributes they share,
  *  and the 128x128 texture.
  *
