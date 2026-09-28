@@ -121,7 +121,16 @@ Two things that follow from the format and cost more than they look:
   save's icon is sixteen colours packed into its own first block, and a PS2
   save's is a textured **3D model** lit by parameters in `icon.sys`.
   `core/ps2/` is apollo-ps4's parser and software rasteriser, ported — no GL
-  context, so it works in the wasm build too.
+  context, so it works in the wasm build too. It also **animates**: up to eight
+  morph targets, interpolated on the loop the file states, matching
+  [ps2vmc-tool](https://github.com/bucanero/ps2vmc-tool)'s WebGL renderer so
+  the two agree about what a save looks like moving.
+- **A damaged icon is reported, not patched over.** An icon is drawn whole —
+  the model, or its texture flat — or not at all. Fifteen containers hold an
+  icon claiming 1,770 vertices in a file with room for 1,159, and drawing the
+  part that survives renders a clean silhouette that says nothing is wrong.
+  Something truncated that file and had no reason to stop at the icon, so the
+  front-end says so.
 
 `core/test_psv.c` walks a tree of real containers. Over the 2,647 in
 apollo-saves every one parses, every signature verifies, every one **rebuilds

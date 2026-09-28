@@ -501,6 +501,108 @@ static void check_shiftjis(void)
           asjis_to_utf8((const unsigned char *)"A", 1, out, 0) == 0);
 }
 
+/* ---- icons -------------------------------------------------------------- */
+
+/*
+ * A .ico built to order.
+ *
+ * `verts` is what the header CLAIMS; `pad` is how much vertex data actually
+ * follows. Making the two disagree is the whole point: it is what the damaged
+ * icon in the save database does, and the only way to reach the paths below
+ * without one.
+ */
+static uint8_t *make_ico(uint32_t verts, uint32_t pad, int texture_type,
+                         int with_texture, size_t *out_len)
+{
+    size_t len = 20 + pad + (with_texture ? (size_t)128 * 128 * 2 : 0);
+    uint8_t *b = calloc(1, len);
+    size_t at;
+    int i;
+
+    if (!b) return NULL;
+
+    put32(b,      0x00010000);        /* file_id          */
+    put32(b + 4,  1);                 /* animation_shapes */
+    put32(b + 8,  (uint32_t)texture_type);
+    put32(b + 12, 0x3F800000);        /* reserved         */
+    put32(b + 16, verts);
+
+    /* A recognisable texture: full red everywhere, with a green ramp over it.
+     * Red is held at maximum so that EVERY pixel is plainly non-black -- the
+     * check below is "is there a picture here", and a ramp alone would start
+     * at black and prove nothing about its first pixel. */
+    if (with_texture) {
+        at = 20 + pad;
+        for (i = 0; i < 128 * 128; i++, at += 2) {
+            uint16_t t = (uint16_t)(0x1F | ((i % 32) << 5));
+            b[at] = (uint8_t)t;
+            b[at + 1] = (uint8_t)(t >> 8);
+        }
+    }
+
+    *out_len = len;
+    return b;
+}
+
+static void check_icons(void)
+{
+    uint8_t *ico, *rgba = NULL;
+    size_t len;
+    amci_ps2_kind_t kind;
+
+    printf("\nreading a PS2 icon\n");
+
+    /*
+     * Geometry that does not fit, with a whole texture behind it. There is no
+     * model to draw, but the picture is all there, so it comes back flat.
+     */
+    ico = make_ico(9999, 64, 7 /* uncompressed */, 1, &len);
+    if (!ico) { printf("  out of memory\n"); g_fails++; return; }
+
+    CHECK("an icon whose geometry does not fit falls back to its texture",
+          amci_ps2_render_kind(ico, len, NULL, 0, 64, &rgba, &kind) == AMCI_OK);
+    CHECK("...and says it drew the texture, not a model", kind == AMCI_PS2_FLAT);
+    CHECK("...with the picture actually in it",
+          rgba && (rgba[0] || rgba[1] || rgba[2]));
+    amci_free(rgba); rgba = NULL;
+    free(ico);
+
+    /*
+     * The same, with no texture either -- which is the Action Replay MAX icon
+     * in the save database: truncated mid-geometry, so the animation block and
+     * the texture are both simply absent.
+     *
+     * This must be reported as DAMAGE. Drawing the two thirds of the model
+     * that survived produces a clean silhouette that looks entirely fine, and
+     * a save whose icon is truncated is a save worth being suspicious of.
+     */
+    ico = make_ico(9999, 64, 7, 0, &len);
+    if (!ico) { printf("  out of memory\n"); g_fails++; return; }
+    CHECK("...and with no texture either, it is reported as damaged",
+          amci_ps2_render_kind(ico, len, NULL, 0, 64, &rgba, &kind)
+              == AMCI_ERR_CORRUPT);
+    CHECK("...drawing nothing", rgba == NULL);
+    free(ico);
+
+    /*
+     * An RLE texture is not hunted for when the geometry is unusable: its
+     * position depends on where the geometry ended, which is exactly what is
+     * wrong. A search finds convincing-looking noise, and a wrong picture
+     * would stop the caller reporting the damage.
+     */
+    ico = make_ico(9999, 64, 0x0F /* RLE */, 1, &len);
+    if (!ico) { printf("  out of memory\n"); g_fails++; return; }
+    CHECK("an RLE texture is not guessed at, so the icon reads as damaged",
+          amci_ps2_render_kind(ico, len, NULL, 0, 64, &rgba, &kind)
+              == AMCI_ERR_CORRUPT);
+    free(ico);
+
+    CHECK("a zero-length icon is refused",
+          amci_ps2_render_kind((const uint8_t *)"", 0, NULL, 0, 64, &rgba, &kind) < 0);
+    CHECK("...as is a NULL one",
+          amci_ps2_render_kind(NULL, 100, NULL, 0, 64, &rgba, &kind) < 0);
+}
+
 /* ---- real files --------------------------------------------------------- */
 
 static int read_file(const char *path, uint8_t **buf, size_t *len)
@@ -577,6 +679,7 @@ static long g_total, g_sig_ok, g_sig_bad, g_sig_unsigned, g_sig_unknown;
 static long g_parse_bad, g_roundtrip_ok, g_roundtrip_bad, g_no_id, g_no_title;
 static long g_edit_ok, g_edit_bad;
 static long g_icon_ok, g_icon_none, g_icon_bad;
+static long g_icon_flat, g_icon_corrupt;
 
 static void corpus_one(const char *path)
 {
@@ -638,11 +741,19 @@ static void corpus_one(const char *path)
                 if (!dot || (strcasecmp(dot, ".ico") && strcasecmp(dot, ".icn")))
                     continue;
                 found = 1;
-                rc = amci_ps2_render(b + all[i].off, all[i].size,
-                                     info.sys_off ? b + info.sys_off : NULL,
-                                     info.sys_size, 64, &rgba);
-                if (rc == AMCI_OK) { g_icon_ok++; amci_free(rgba); }
-                else g_icon_bad++;   /* counted, not printed -- see below */
+                amci_ps2_kind_t kind = AMCI_PS2_MODEL;
+                rc = amci_ps2_render_kind(b + all[i].off, all[i].size,
+                                          info.sys_off ? b + info.sys_off : NULL,
+                                          info.sys_size, 64, &rgba, &kind);
+                if (rc == AMCI_OK) {
+                    if (kind == AMCI_PS2_FLAT) g_icon_flat++;
+                    else                       g_icon_ok++;
+                    amci_free(rgba);
+                } else if (rc == AMCI_ERR_CORRUPT) {
+                    g_icon_corrupt++;
+                } else {
+                    g_icon_bad++;
+                }
             }
             if (!found) g_icon_none++;
         }
@@ -753,14 +864,18 @@ static int run_corpus(const char *dir)
     printf("  edited WRONGLY        %ld\n", g_edit_bad);
     printf("  icon rendered         %ld\n", g_icon_ok);
     printf("  icon absent           %ld\n", g_icon_none);
+    printf("  icon flat (texture)   %ld\n", g_icon_flat);
     /*
-     * Not a failure, which is why it does not fail the run. An .ico that does
-     * not parse is a save with no usable icon -- the fifteen in apollo-saves
-     * are all the same Action Replay MAX file, which declares 1,770 vertices
-     * in a file with room for barely half that, so the bounds check refuses it
-     * exactly as it should. A front-end moves on to the next icon and, failing
-     * that, shows none.
+     * Neither of these fails the run: they are facts about the SAVES, not
+     * about this code.
+     *
+     * "damaged" is an icon whose header claims more than its file holds and
+     * from which not even a whole texture could be recovered. The fifteen in
+     * apollo-saves are all the same Action Replay MAX file, truncated
+     * mid-geometry. Reporting it is the point -- a front-end says so, rather
+     * than drawing the two thirds that survived and implying all is well.
      */
+    printf("  icon DAMAGED          %ld\n", g_icon_corrupt);
     printf("  icon unusable         %ld\n", g_icon_bad);
     printf("  no title ID           %ld\n", g_no_id);
     printf("  no title              %ld\n", g_no_title);
@@ -1112,6 +1227,7 @@ int main(int argc, char **argv)
     check_replace();
     check_title_id();
     check_shiftjis();
+    check_icons();
 
     printf("\n%s\n", g_fails ? "FAILED" : "PASS");
     return g_fails ? 1 : 0;

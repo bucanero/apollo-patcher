@@ -36,6 +36,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 //================================================================================================
 //   Typedefs and Defines
@@ -135,15 +139,48 @@ typedef struct {
 	uint32_t *texture;          ///< 128 * 128 RGBA, never NULL after a parse
 	int       has_texture;
 	int       still_shape;      ///< the shape a still frame should use
+
+	/* The animation, for a caller that wants to play it rather than take a
+	 * still. `order` is which shape each frame uses -- the file's own frame
+	 * list, or simply every shape in turn when it carries none -- and the
+	 * model morphs linearly from one to the next.
+	 *
+	 * Most icons do not animate at all: of 2,345 in the save database, 1,898
+	 * carry a single shape and there is nothing to move between. `frame_count`
+	 * is 1 for those. */
+	int      *order;            ///< frame_count entries, each a shape index
+	int       frame_count;
+	uint32_t  frame_length;     ///< loop length in 60Hz display frames
+	float     anim_speed;
 } ps2icon_t;
 
-/** Parse an .ico. Returns 0 when geometry was read, negative when the file is
- *  not a usable icon - `texture` is allocated either way, so a caller that
- *  only wants the texture can ignore the return value. Free with
- *  ps2icon_free(). */
+/** Parse an .ico.
+ *
+ *   0   a usable model: geometry, and a texture when the file carries one
+ *   1   NO usable geometry, but a whole texture was recovered. `vertex_count`
+ *       is 0 and `texture` is a complete 128x128 image -- draw that flat.
+ *  <0   nothing usable. The file is damaged, and a caller should say so
+ *       rather than quietly showing nothing: an icon that will not parse means
+ *       the savedata around it is suspect.
+ *
+ * `texture` is allocated in every case, so it is always safe to read; only a
+ * return of 0 or 1 says anything was put in it. Free with ps2icon_free(). */
 int ps2icon_parse(const uint8_t *data, size_t len, ps2icon_t *out);
 
 void ps2icon_free(ps2icon_t *icon);
 
+/** How long one loop of the animation lasts, in seconds. Clamped to something
+ *  watchable (0.3s to 10s), and 0 for an icon that does not animate. */
+float ps2icon_loop_seconds(const ps2icon_t *icon);
+
+/** Which two shapes the icon is between at time `t` seconds into the loop, and
+ *  how far (0..1). Both come back equal, with `morph` 0, for a still icon. */
+void ps2icon_morph_at(const ps2icon_t *icon, float t,
+                      int *shape_a, int *shape_b, float *morph);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

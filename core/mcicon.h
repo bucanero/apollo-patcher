@@ -37,10 +37,27 @@ extern "C" {
 
 enum {
     AMCI_OK        =  0,
-    AMCI_ERR_DATA  = -1,   /* not an icon, or one that does not fit its file */
+    AMCI_ERR_DATA  = -1,   /* not an icon this understands                  */
     AMCI_ERR_NONE  = -2,   /* the save carries no icon at all               */
-    AMCI_ERR_MEMORY = -3
+    AMCI_ERR_MEMORY = -3,
+    /*
+     * The icon is DAMAGED -- it names more data than the file holds, and not
+     * even a whole texture could be recovered from it.
+     *
+     * Distinct from AMCI_ERR_DATA on purpose. A format this does not
+     * understand is this code's problem; a file whose own header does not
+     * describe it is the SAVE's problem, and the person looking at it wants to
+     * know that, because whatever damaged the icon was under no obligation to
+     * stop there.
+     */
+    AMCI_ERR_CORRUPT = -4
 };
+
+/* What a PS2 icon turned out to be, for a caller that draws it. */
+typedef enum {
+    AMCI_PS2_MODEL = 0,   /* the 3D model, lit and posed                    */
+    AMCI_PS2_FLAT         /* no usable geometry: a whole texture, drawn flat */
+} amci_ps2_kind_t;
 
 #define AMCI_PS1_SIZE   16    /* a PS1 icon is always 16x16          */
 #define AMCI_PS1_FRAMES  3    /* ...and never more than three frames */
@@ -78,6 +95,21 @@ int amci_ps1_frame(const uint8_t *block, size_t len, int frame, uint8_t *out);
 int amci_ps2_render(const uint8_t *ico, size_t ico_len,
                     const uint8_t *sys, size_t sys_len,
                     int size, uint8_t **out);
+
+/*
+ * The same, saying which of the two it drew.
+ *
+ * An icon is either a whole model or, when its geometry does not fit its file,
+ * a whole texture drawn flat -- and nothing in between. A partial model is
+ * refused rather than drawn: the damaged icon in the save database renders
+ * two thirds of its geometry into a perfectly clean silhouette, which tells
+ * the person looking at it that everything is fine. It is not.
+ *
+ * `kind` may be NULL. AMCI_ERR_CORRUPT when neither could be had.
+ */
+int amci_ps2_render_kind(const uint8_t *ico, size_t ico_len,
+                         const uint8_t *sys, size_t sys_len,
+                         int size, uint8_t **out, amci_ps2_kind_t *kind);
 
 void amci_free(uint8_t *rgba);
 

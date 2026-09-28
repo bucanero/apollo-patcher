@@ -374,10 +374,42 @@ supplies the three directional lights and the ambient term. `core/ps2/` is
 apollo-ps4's parser and software rasteriser, ported, so this needs no GL context
 of its own.
 
-Measured over the 2,647 real containers: 2,563 icons render, 69 saves carry none
-at all, and 15 are unusable — all the same Action Replay MAX file, which
-declares 1,770 vertices in a file with room for barely half that, and is refused
-by the bounds check rather than followed.
+**A PS2 icon animates.** It is a model with up to eight morph targets, and the
+app plays them: the pose is re-rendered every frame, interpolating between
+shapes on the loop the file itself states. Most icons do not move — 1,898 of
+the 2,345 in the save database carry a single shape — so `animated` is checked
+first and the common case costs nothing.
+
+**Hovering the icon on the patcher screen shows it bigger**, still animating,
+at 256px against a transparent background. That is the closest this gets to
+what the save looked like on a television, and it is rendered only while the
+pointer is actually on it.
+
+All of it happens on the CPU and arrives as an ordinary texture, so it needs no
+depth buffer, no shaders and no second GL context — which matters, because the
+floor here is OpenGL 1.1 and one supported configuration is a software
+rasteriser over Remote Desktop. Both render sizes are powers of two for the
+same reason. It is affordable: 128px at 4x supersampling measures 1.4ms against
+a 16ms frame, and 256px 4.8ms.
+
+**An icon is drawn whole or not at all.** Either the 3D model reads, or — when
+its geometry does not fit its file but the texture survived intact — that
+texture is shown flat. There is no third option, and in particular no partial
+model.
+
+That was tried, and it was the wrong answer. The one damaged icon in the save
+database declares 1,770 vertices in a file with room for 1,159; drawing the
+two thirds that survive produces a clean, confident silhouette that tells the
+person looking at it that nothing is the matter. Something truncated that file,
+and it was under no obligation to stop at the icon. So the app says so instead,
+in colour, on the patcher screen and in the list's hover panel: *this save's
+icon is damaged, and the save data may be too*.
+
+Measured over the 2,647 real containers: **2,563 icons render** as models, 69
+saves carry none at all, and **15 are damaged** — all the same Action Replay
+MAX file. None fall back to a flat texture, because that file's texture is in
+the missing third; the fallback is covered by a built fixture in
+`core/test_psv.c` rather than by anything real, which is worth knowing.
 
 It is decoded when the selection changes, not during the scan. A folder of 176
 saves is 176 PNGs, and uploading all of them would be 40MB of texture for a
@@ -1140,8 +1172,9 @@ view and the per-code viewers (`###viewer%d`, one identity each).
   shrank the data would produce something a PS3 will not import. Such a code is
   refused with that reason rather than written back. PS2 saves have a real file
   table and may change size freely.
-- **Save icons do not animate.** A PS1 icon carries up to three frames and a PS2
-  save up to three models; the still is shown.
+- **PS1 icons do not animate**, though the format allows up to three frames:
+  not one of the six PS1 saves in the database uses more than one, so there is
+  nothing to play. PS2 icons do animate.
 - **PS1 and PS2 patch coverage is thin** — not a limitation of the app but of
   the database, which has two PS2 patches and no PS1 directory at all. Browsing,
   identifying, icons and re-signing work for every save regardless.

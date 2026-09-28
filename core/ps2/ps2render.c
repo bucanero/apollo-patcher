@@ -272,10 +272,20 @@ int ps2icon_render(const ps2icon_t *icon, const ps2_IconSys_t *sys,
 		   int size, int supersample, enum ps2render_bg bg,
 		   uint8_t **out)
 {
+	/* A still is the pose the icon rests in, and nothing to morph towards. */
+	return ps2icon_render_at(icon, sys, size, supersample, bg,
+				 icon ? icon->still_shape : 0,
+				 icon ? icon->still_shape : 0, 0.0f, out);
+}
+
+int ps2icon_render_at(const ps2icon_t *icon, const ps2_IconSys_t *sys,
+		      int size, int supersample, enum ps2render_bg bg,
+		      int shape_a, int shape_b, float morph, uint8_t **out)
+{
 	float model[16], view[16], proj[16], flip[16], sc[16], tr[16], tmp[16], mvp[16];
 	float mn[3], mx[3], center[3], radius = 1.0f;
 	lighting_t light;
-	const float *shape;
+	const float *shape, *shape_to;
 	vert_t *verts = NULL;
 	float *depth = NULL;
 	uint8_t *big = NULL, *dst = NULL;
@@ -291,7 +301,16 @@ int ps2icon_render(const ps2icon_t *icon, const ps2_IconSys_t *sys,
 		ss = MAX_SIZE / size;
 	w = size * ss;
 
-	shape = &icon->shapes[(size_t)icon->still_shape * icon->vertex_count * 3];
+	/* Both poses are indexed out of the file's own shape count, so a caller
+	 * that asked for one that is not there gets the still rather than a read
+	 * past the end of the array. */
+	if (shape_a < 0 || shape_a >= icon->shape_count) shape_a = icon->still_shape;
+	if (shape_b < 0 || shape_b >= icon->shape_count) shape_b = shape_a;
+	if (!(morph > 0.0f)) morph = 0.0f;   /* a NaN lands here too */
+	if (morph > 1.0f) morph = 1.0f;
+
+	shape    = &icon->shapes[(size_t)shape_a * icon->vertex_count * 3];
+	shape_to = &icon->shapes[(size_t)shape_b * icon->vertex_count * 3];
 
 	/* Bounds over every shape, not just the one drawn: the web renderer sizes
 	 * the model once so an animation cannot swim in and out of frame. */
@@ -346,14 +365,22 @@ int ps2icon_render(const ps2icon_t *icon, const ps2_IconSys_t *sys,
 	/* ---- vertex stage ---- */
 	for (i = 0; i < icon->vertex_count; i++) {
 		const float *p = &shape[(size_t)i * 3];
+		const float *q = &shape_to[(size_t)i * 3];
 		const float *n = &icon->normals[(size_t)i * 3];
 		const uint8_t *c = &icon->colors[(size_t)i * 4];
-		float clip[4], nx, ny, nz, len, lr, lg, lb;
+		float clip[4], pos[3], nx, ny, nz, len, lr, lg, lb;
 		int j;
 
+		/* mix(aPosA, aPosB, uMorph), as the vertex shader does. The NORMAL is
+		 * not morphed with it -- the reference renderer does not either, and
+		 * matching it matters more than being right, because the two are
+		 * compared against each other. */
+		for (k = 0; k < 3; k++)
+			pos[k] = p[k] + (q[k] - p[k]) * morph;
+
 		for (k = 0; k < 4; k++)
-			clip[k] = mvp[k] * p[0] + mvp[4 + k] * p[1] +
-				  mvp[8 + k] * p[2] + mvp[12 + k];
+			clip[k] = mvp[k] * pos[0] + mvp[4 + k] * pos[1] +
+				  mvp[8 + k] * pos[2] + mvp[12 + k];
 
 		/* mat3(model) * normal, then normalise, as the vertex shader does. */
 		nx = model[0] * n[0] + model[4] * n[1] + model[8] * n[2];

@@ -52,6 +52,8 @@
 #include "png.h"          // ...and the ICON0.PNG beside it
 #include "psvcard.h"     // ...and the .PSV holding a PS1 or PS2 save
 #include "mcicon.h"      // ...whose icon has to be rendered, not decoded
+#include "ps2icon.h"     // ...and, for a PS2 save, animated
+#include "ps2render.h"
 #include "kirk_engine.h"   // KIRK_HOST_FUSE_ID, the Fuse ID default
 #ifdef __APPLE__
 #include "macos_open_docs.h"   // files Finder asks the app to open
@@ -2619,11 +2621,50 @@ struct SaveIcon {
     int         w = 0, h = 0;      // the image
     float       u = 1.0f, v = 1.0f;  // ...as a fraction of the texture
     std::string error;       // why there is no picture, when there is a file
+
+    //
+    // A PS2 icon is a MODEL, so unlike every other console's it can move. The
+    // parse is kept alive for exactly that: each frame asks where in the loop
+    // it is and re-renders that pose.
+    //
+    // Only where there is something to move between -- 1,898 of the 2,345
+    // icons in the save database carry a single shape and are simply drawn
+    // once, which `animated` records so the common case costs nothing.
+    //
+    bool          model_valid = false;
+    ps2icon_t     model{};
+    ps2_IconSys_t sys{};
+    bool          have_sys = false;
+    bool          animated = false;
+    // The icon would not parse at all: worth saying, because an icon that
+    // claims more than its file holds is evidence about the SAVE, not just
+    // about the icon.
+    bool          corrupt = false;
+    // ...or it parsed only far enough for its texture, which is shown flat.
+    bool          flat_texture = false;
+    float         loop = 0.0f;   // seconds
+    double        began = 0.0;   // ImGui's clock when it started
+
+    // The bigger render, made only while the pointer is over the small one.
+    unsigned      big_tex = 0;
+    int           big_px = 0;
 };
 static SaveIcon g_icon;
 
+// How big the two renders are. The small one sits in a list row and a header;
+// the large one is a hover panel, where the model is finally worth looking at.
+//
+// Both are POWERS OF TWO on purpose. OpenGL 1.1 -- the floor this app targets,
+// and what Microsoft's software renderer offers over Remote Desktop -- accepts
+// no other texture size, and the failure is a silently invisible icon on
+// exactly the machines least able to say why. The PNG path pads to a power of
+// two for the same reason; this one simply renders at one.
+#define PSV_ICON_BIG_PX  256
+
 static void icon_drop() {
-    if (g_icon.tex) glDeleteTextures(1, (const GLuint*)&g_icon.tex);
+    if (g_icon.tex)     glDeleteTextures(1, (const GLuint*)&g_icon.tex);
+    if (g_icon.big_tex) glDeleteTextures(1, (const GLuint*)&g_icon.big_tex);
+    if (g_icon.model_valid) ps2icon_free(&g_icon.model);
     g_icon = SaveIcon();
 }
 
@@ -2631,6 +2672,16 @@ static void icon_drop() {
 // PS1 or PS2 icon never was a file: it is rendered from the save itself, and
 // arrives here as pixels rather than as a PNG to decode.
 static void icon_upload(const uint8_t* rgba, int w, int h) {
+    // The one on screen replaces the one before it. This used to run once per
+    // icon, straight after icon_drop(), so there was never anything to free;
+    // an ANIMATED icon calls it sixty times a second, and without this each
+    // frame would leave its texture behind -- 64KB a frame, which is 3.8MB a
+    // second for as long as the save is on screen.
+    if (g_icon.tex) {
+        glDeleteTextures(1, (const GLuint*)&g_icon.tex);
+        g_icon.tex = 0;
+    }
+
     //
     // Padded to a power of two, and drawn with UVs that cut the padding back
     // off.
@@ -2699,6 +2750,105 @@ static void icon_load(const std::string& path) {
 // wants this rather than one of the two below it.
 static void icon_load_for(const SaveEntry& save);
 
+//
+// What a container's icon turns out to be, in words. For the headless report
+// and for anything else that wants the answer without a GL context.
+//
+static const char* describe_container_icon(const SaveEntry& save) {
+    std::vector<unsigned char> buf;
+    apsvc_info_t info;
+
+    if (!read_all(save.path, buf)) return "the container could not be read";
+    if (apsvc_info(buf.data(), buf.size(), &info) != APSVC_OK)
+        return "the container could not be read";
+
+    if (info.type == APSVC_TYPE_PS1) {
+        apsvc_file_t f;
+        if (apsvc_files(buf.data(), buf.size(), &f, 1, nullptr) != APSVC_OK)
+            return "none";
+        return amci_ps1_frames(buf.data() + f.off, f.size) > 0
+             ? "rendered from the save" : "none";
+    }
+
+    std::vector<apsvc_file_t> all(size_t(info.file_count));
+    if (info.file_count <= 0 ||
+        apsvc_files(buf.data(), buf.size(), all.data(), info.file_count, nullptr) != APSVC_OK)
+        return "none";
+
+    const char* worst = "none";
+    for (const apsvc_file_t& f : all) {
+        if (!ends_with_ci(f.name, ".ico") && !ends_with_ci(f.name, ".icn")) continue;
+
+        uint8_t* rgba = nullptr;
+        amci_ps2_kind_t kind = AMCI_PS2_MODEL;
+        const int rc = amci_ps2_render_kind(buf.data() + f.off, f.size,
+                                            info.sys_off ? buf.data() + info.sys_off : nullptr,
+                                            info.sys_size, 32, &rgba, &kind);
+        if (rc == AMCI_OK) {
+            amci_free(rgba);
+            // The first readable icon is the one shown, so it settles it.
+            return kind == AMCI_PS2_FLAT
+                 ? "texture only - the 3D model would not read"
+                 : "rendered from the save";
+        }
+        // Remembered, but keep looking: icon.sys names up to three and a
+        // later one may be intact.
+        if (rc == AMCI_ERR_CORRUPT) worst = "DAMAGED - the icon claims more data than the file holds";
+    }
+    return worst;
+}
+
+//
+// Draw the model at wherever it is in its loop, into `tex`.
+//
+// The whole render happens on the CPU (core/ps2/ps2render.c) and the result is
+// uploaded as an ordinary texture, so this needs no depth buffer, no shaders
+// and no second GL context -- which matters, because the app's floor is
+// OpenGL 1.1 and one of the platforms it has to work on is a software
+// rasteriser over Remote Desktop.
+//
+// Affordable at this size: 128px at 4x supersampling measures 1.4ms on this
+// machine, against a 16ms frame. The hover panel is bigger and rendered only
+// while the pointer is on the icon.
+//
+static void icon_render_pose(int px, unsigned* tex) {
+    if (!g_icon.model_valid) return;
+
+    int a = g_icon.model.still_shape, b = a;
+    float morph = 0.0f;
+    if (g_icon.animated)
+        ps2icon_morph_at(&g_icon.model,
+                         float(ImGui::GetTime() - g_icon.began), &a, &b, &morph);
+
+    uint8_t* rgba = nullptr;
+    if (ps2icon_render_at(&g_icon.model, g_icon.have_sys ? &g_icon.sys : nullptr,
+                          px, 4, PS2RENDER_BG_TRANSPARENT, a, b, morph, &rgba) != 0
+        || !rgba)
+        return;
+
+    // icon_upload() owns the ONE icon on screen; the hover panel's texture is
+    // a second one, so it is uploaded here rather than through that.
+    if (tex == &g_icon.tex) {
+        icon_upload(rgba, px, px);
+    } else {
+        if (*tex) glDeleteTextures(1, (const GLuint*)tex);
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D, t);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        // A power of two already: both sizes are chosen that way, because
+        // OpenGL 1.1 takes nothing else.
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, px, px, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        *tex = t;
+    }
+    free(rgba);
+}
+
 static void icon_load_container(const SaveEntry& save) {
     if (save.path == g_icon.path) return;
     icon_drop();
@@ -2719,8 +2869,9 @@ static void icon_load_container(const SaveEntry& save) {
             g_icon.error = "the container lists no save";
             return;
         }
-        // Frame zero: these icons animate over two or three frames, and the
-        // list shows a still. Nothing here animates yet.
+        // Frame zero. A PS1 icon can carry two or three frames, but not one
+        // of the six in the save database does -- so the animation that would
+        // go here has no save to play it on, and a still is what these are.
         std::vector<uint8_t> rgba(AMCI_PS1_SIZE * AMCI_PS1_SIZE * 4);
         const int rc = amci_ps1_frame(buf.data() + f.off, f.size, 0, rgba.data());
         if (rc != AMCI_OK) { g_icon.error = amci_strerror(rc); return; }
@@ -2738,18 +2889,67 @@ static void icon_load_container(const SaveEntry& save) {
         return;
     }
 
+    if (info.sys_off && info.sys_size >= sizeof g_icon.sys) {
+        // Copied out of the container, which does not align it for this
+        // structure and is about to go out of scope besides.
+        memcpy(&g_icon.sys, buf.data() + info.sys_off, sizeof g_icon.sys);
+        g_icon.have_sys = true;
+    }
+
     for (const apsvc_file_t& f : all) {
         if (!ends_with_ci(f.name, ".ico") && !ends_with_ci(f.name, ".icn")) continue;
 
-        uint8_t* rgba = nullptr;
-        const int rc = amci_ps2_render(buf.data() + f.off, f.size,
-                                       info.sys_off ? buf.data() + info.sys_off : nullptr,
-                                       info.sys_size, PSV_ICON_PX, &rgba);
-        if (rc != AMCI_OK) { g_icon.error = amci_strerror(rc); continue; }
+        ps2icon_t model{};
+        const int rc = ps2icon_parse(buf.data() + f.off, f.size, &model);
 
-        icon_upload(rgba, PSV_ICON_PX, PSV_ICON_PX);
-        amci_free(rgba);
+        if (rc < 0) {
+            //
+            // Damaged: the file names more geometry than it holds, and no
+            // whole texture could be had either. Said out loud rather than
+            // shrugged off as an unsupported format.
+            //
+            // Drawing the part that parsed was tried and is WRONG. The one
+            // such icon in the save database has two thirds of its model
+            // present and renders into a clean silhouette -- a picture that
+            // states, convincingly, that nothing is the matter. Whatever
+            // truncated the icon was under no obligation to stop there, and
+            // the person looking at the save should hear about it.
+            //
+            ps2icon_free(&model);
+            g_icon.error = "damaged - it claims more data than the file holds";
+            g_icon.corrupt = true;
+            continue;   // icon.sys names up to three; another may be intact
+        }
+
+        if (rc == 1) {
+            // No usable geometry, but the whole texture survived. Shown flat,
+            // because there is no model to wrap it around.
+            std::vector<uint8_t> flat(size_t(PSV_ICON_PX) * PSV_ICON_PX * 4);
+            uint8_t* rgba = nullptr;
+            if (amci_ps2_render_kind(buf.data() + f.off, f.size, nullptr, 0,
+                                     PSV_ICON_PX, &rgba, nullptr) == AMCI_OK && rgba) {
+                icon_upload(rgba, PSV_ICON_PX, PSV_ICON_PX);
+                amci_free(rgba);
+                g_icon.flat_texture = true;
+                g_icon.error.clear();
+                ps2icon_free(&model);
+                return;
+            }
+            ps2icon_free(&model);
+            continue;
+        }
+
+        // Kept rather than rendered and thrown away: an animated icon is
+        // re-posed every frame from this, and the hover panel renders the same
+        // model larger.
+        g_icon.model       = model;
+        g_icon.model_valid = true;
+        g_icon.loop        = ps2icon_loop_seconds(&g_icon.model);
+        g_icon.animated    = g_icon.loop > 0.0f;
+        g_icon.began       = ImGui::GetTime();
         g_icon.error.clear();
+
+        icon_render_pose(PSV_ICON_PX, &g_icon.tex);
         return;
     }
     if (g_icon.error.empty()) g_icon.error = "the save carries no icon";
@@ -2758,6 +2958,44 @@ static void icon_load_container(const SaveEntry& save) {
 static void icon_load_for(const SaveEntry& save) {
     if (save.container) icon_load_container(save);
     else                icon_load(save.icon);
+
+    // A model that moves is re-posed every frame. A PNG cannot move and a
+    // one-shape model has nowhere to move to, so neither costs anything.
+    if (g_icon.animated)
+        icon_render_pose(PSV_ICON_PX, &g_icon.tex);
+}
+
+//
+// The icon, bigger, while the pointer is on it.
+//
+// A PS2 save's icon is a 3D model the console spun on its dashboard, and at
+// the size a header shows it that is mostly wasted. Hovering renders the same
+// model at PSV_ICON_BIG_PX, still animating -- which is the closest this gets
+// to what the save actually looked like on a television.
+//
+// Only for a model: a PNG has no more detail to give, so enlarging one would
+// just be a blurrier copy of what is already on screen.
+//
+static void icon_hover_panel() {
+    if (!g_icon.model_valid || !ImGui::IsItemHovered())
+        return;
+
+    // Rendered while hovered and dropped when the pointer leaves, so the cost
+    // is paid only while somebody is looking. A still is rendered once; an
+    // animated one is re-posed like the small copy.
+    if (!g_icon.big_tex || g_icon.animated)
+        icon_render_pose(PSV_ICON_BIG_PX, &g_icon.big_tex);
+    if (!g_icon.big_tex) return;
+
+    ImGui::BeginTooltip();
+    const float side = float(PSV_ICON_BIG_PX) * g_ui_scale;
+    ImGui::Image((ImTextureID)(intptr_t)g_icon.big_tex, ImVec2(side, side));
+    if (g_icon.animated)
+        ImGui::TextDisabled("%d shapes, %.1fs loop",
+                            g_icon.model.shape_count, g_icon.loop);
+    else
+        ImGui::TextDisabled("a still icon - this one does not animate");
+    ImGui::EndTooltip();
 }
 
 // Draw it at up to `box_w` x `box_h`, keeping its shape. A PS3 icon is
@@ -3778,6 +4016,10 @@ static void draw_save_tooltip(const SaveEntry& s) {
                 s.title_id.empty() ? "(no title ID)" : s.title_id.c_str());
     ImGui::EndGroup();
 
+    if (g_icon.corrupt)
+        ImGui::TextColored(ImVec4(1.00f, 0.70f, 0.25f, 1.0f),
+                           "This save's icon is damaged.");
+
     ImGui::Separator();
     ImGui::TextDisabled("%s", s.path.c_str());
 
@@ -4615,6 +4857,7 @@ static void draw_save_header() {
     icon_load_for(s);
     if (g_icon.tex) {
         icon_draw(128.0f * g_ui_scale, 88.0f * g_ui_scale);
+        icon_hover_panel();
         ImGui::SameLine();
     }
 
@@ -4628,10 +4871,28 @@ static void draw_save_header() {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", s.path.c_str());
     ImGui::EndGroup();
 
+    //
     // Only when there IS an icon and it would not read. A save with no
     // ICON0.PNG at all is ordinary and says nothing.
-    if (!g_icon.tex && !g_icon.error.empty())
+    //
+    // A DAMAGED one is not an aside. An icon whose header claims more than its
+    // file holds was truncated by something, and that something had no reason
+    // to stop at the icon -- so this is the one case that gets a colour and
+    // says what it implies about the rest of the save, rather than being
+    // greyed out next to the file list.
+    //
+    if (g_icon.corrupt) {
+        ImGui::TextColored(ImVec4(1.00f, 0.70f, 0.25f, 1.0f),
+                           "This save's icon is DAMAGED (%s).",
+                           g_icon.error.c_str());
+        ImGui::TextDisabled("Whatever truncated it may have damaged the save "
+                            "data too - check the file before trusting it.");
+    } else if (!g_icon.tex && !g_icon.error.empty()) {
         ImGui::TextDisabled("(the icon is %s)", g_icon.error.c_str());
+    } else if (g_icon.flat_texture) {
+        ImGui::TextDisabled("(the icon's 3D model would not read - showing its "
+                            "texture instead)");
+    }
 
     // Where signing happens differs by console: a PS3 save has a whole
     // section below for its encryption layer and the button belongs there
@@ -5279,12 +5540,22 @@ static void print_open_state() {
                                                                  : g_app.save.name.c_str())
                                       : "(none - target picked by hand)");
     printf("  files       %d\n", g_app.has_save ? int(g_app.save.files.size()) : 0);
+    //
     // A PS1 or PS2 save has no icon FILE -- there is one, but it has to be
     // built from the save itself, so "is there a path" is the wrong question.
-    printf("  icon        %s\n",
-           !g_app.has_save                 ? "none" :
-           g_app.save.container            ? "rendered from the save" :
-           !g_app.save.icon.empty()        ? "yes" : "none");
+    //
+    // Actually built here rather than assumed, because one of the answers is
+    // "this save is damaged" and a diagnostic that cannot report that is not
+    // worth printing. It costs one parse of one .ico, on a path that already
+    // re-reads the whole container.
+    //
+    if (!g_app.has_save) {
+        printf("  icon        none\n");
+    } else if (!g_app.save.container) {
+        printf("  icon        %s\n", g_app.save.icon.empty() ? "none" : "yes");
+    } else {
+        printf("  icon        %s\n", describe_container_icon(g_app.save));
+    }
     printf("  target      %s\n", g_app.target_path.empty() ? "(none)"
                                                             : g_app.target_path.c_str());
     printf("  title hint  %s\n", g_app.title_hint.empty() ? "(none)"

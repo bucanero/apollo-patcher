@@ -6,6 +6,9 @@
 #include "ps2icon.h"
 #include "ps2render.h"
 
+/* The texture every .ico carries, when it carries one. */
+#define ICON_TEX_SIDE  128
+
 /* ---- PS1 ----------------------------------------------------------------
  *
  * The icon lives in the save's own first block, at fixed offsets:
@@ -91,9 +94,38 @@ int amci_ps1_frame(const uint8_t *block, size_t len, int frame, uint8_t *out)
 
 /* ---- PS2 ---------------------------------------------------------------- */
 
+/*
+ * Scale the 128x128 texture up (or down) into `size` square, nearest-neighbour.
+ *
+ * Nearest rather than smoothed on purpose: this is the fallback shown when an
+ * icon's geometry is broken, and a crisp, obviously-flat image reads as "here
+ * is the picture out of a damaged file" where a softened one would read as a
+ * slightly-wrong render.
+ */
+static void blit_texture(const uint32_t *tex, int size, uint8_t *out)
+{
+    int x, y;
+
+    for (y = 0; y < size; y++) {
+        const int sy = y * ICON_TEX_SIDE / size;
+        for (x = 0; x < size; x++) {
+            const int sx = x * ICON_TEX_SIDE / size;
+            memcpy(out + ((size_t)y * size + x) * 4,
+                   &tex[(size_t)sy * ICON_TEX_SIDE + sx], 4);
+        }
+    }
+}
+
 int amci_ps2_render(const uint8_t *ico, size_t ico_len,
                     const uint8_t *sys, size_t sys_len,
                     int size, uint8_t **out)
+{
+    return amci_ps2_render_kind(ico, ico_len, sys, sys_len, size, out, NULL);
+}
+
+int amci_ps2_render_kind(const uint8_t *ico, size_t ico_len,
+                         const uint8_t *sys, size_t sys_len,
+                         int size, uint8_t **out, amci_ps2_kind_t *kind)
 {
     ps2icon_t icon;
     ps2_IconSys_t sys_copy;
@@ -101,14 +133,35 @@ int amci_ps2_render(const uint8_t *ico, size_t ico_len,
     uint8_t *rgba = NULL;
     int rc;
 
+    if (kind) *kind = AMCI_PS2_MODEL;
     if (!ico || !out || size <= 0)
         return AMCI_ERR_DATA;
     *out = NULL;
 
     memset(&icon, 0, sizeof icon);
-    if (ps2icon_parse(ico, ico_len, &icon) != 0) {
+    rc = ps2icon_parse(ico, ico_len, &icon);
+
+    if (rc < 0) {
+        /* Neither a model nor a whole picture. The file names more than it
+         * holds, which is worth reporting as damage rather than as an icon
+         * this happens not to support. */
         ps2icon_free(&icon);
-        return AMCI_ERR_DATA;
+        return AMCI_ERR_CORRUPT;
+    }
+
+    if (rc == 1) {
+        /* Geometry is unusable but the texture came through whole. Drawn flat:
+         * there is no model to wrap it around, and guessing one would be
+         * inventing the part that is missing. */
+        rgba = malloc((size_t)size * size * 4);
+        if (!rgba) { ps2icon_free(&icon); return AMCI_ERR_MEMORY; }
+
+        blit_texture(icon.texture, size, rgba);
+        ps2icon_free(&icon);
+
+        if (kind) *kind = AMCI_PS2_FLAT;
+        *out = rgba;
+        return AMCI_OK;
     }
 
     /*
@@ -149,6 +202,8 @@ const char *amci_strerror(int err)
     switch (err) {
     case AMCI_OK:         return "ok";
     case AMCI_ERR_DATA:   return "not an icon this understands";
+    case AMCI_ERR_CORRUPT:
+        return "the icon is damaged - it names more data than the file holds";
     case AMCI_ERR_NONE:   return "the save carries no icon";
     case AMCI_ERR_MEMORY: return "out of memory";
     default:              return "unknown error";

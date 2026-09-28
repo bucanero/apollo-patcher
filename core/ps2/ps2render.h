@@ -30,6 +30,10 @@
 
 #include "ps2icon.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* What goes behind the model. */
 enum ps2render_bg {
 	PS2RENDER_BG_TRANSPARENT = 0,   /* alpha 0, so the PNG composites anywhere */
@@ -51,5 +55,22 @@ enum ps2render_bg {
 int ps2icon_render(const ps2icon_t *icon, const ps2_IconSys_t *sys,
 		   int size, int supersample, enum ps2render_bg bg,
 		   uint8_t **out);
+
+/*
+ * The same, at one point in the animation: the model is drawn morphed `morph`
+ * of the way from shape_a to shape_b, which is what ps2icon_morph_at() works
+ * out for a given time. Positions are interpolated and nothing else, matching
+ * the reference renderer's vertex shader.
+ *
+ * The model is sized over EVERY shape rather than the pose being drawn, so an
+ * animation cannot swim in and out of frame as it plays.
+ */
+int ps2icon_render_at(const ps2icon_t *icon, const ps2_IconSys_t *sys,
+		      int size, int supersample, enum ps2render_bg bg,
+		      int shape_a, int shape_b, float morph, uint8_t **out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
