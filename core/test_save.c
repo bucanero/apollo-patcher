@@ -516,7 +516,7 @@ static void check_category(void)
     len = psv_sfo(buf, sizeof buf, 1);
     CHECK("a Vita save still identifies",
           asave_identify(buf, len, ASAVE_AT_SCE, 0, &info) == ASAVE_OK &&
-          info.platform == ASAVE_PSV);
+          info.platform == ASAVE_PSVITA);
 
     /* Case is ignored: the same two letters are upper on a PS3 and lower on a
        PS4, and a tool that rewrote one either way still means savedata. */
@@ -591,7 +591,7 @@ static void check_identify(void)
     len = psv_sfo(sfo, sizeof sfo, 1);
     CHECK("a Vita save identifies",
           asave_identify(sfo, len, ASAVE_AT_SCE, 0, &info) == ASAVE_OK);
-    CHECK("...as PSV", info.platform == ASAVE_PSV);
+    CHECK("...as PSV", info.platform == ASAVE_PSVITA);
     CHECK_STR("...with the title ID from inside PARAMS", info.title_id, "PCSE00608");
     CHECK_STR("...and no name, which is honest", info.name, "");
     CHECK("...and it needs no unwrapping", info.encrypted == 0);
@@ -600,7 +600,7 @@ static void check_identify(void)
     len = psv_sfo(sfo, sizeof sfo, 0);
     CHECK("a Vita save with no PARAMS falls back to PARENT_DIRECTORY",
           asave_identify(sfo, len, ASAVE_AT_SCE, 0, &info) == ASAVE_OK
-          && info.platform == ASAVE_PSV);
+          && info.platform == ASAVE_PSVITA);
     CHECK_STR("...to the same title ID", info.title_id, "PCSE00608");
 
     /*

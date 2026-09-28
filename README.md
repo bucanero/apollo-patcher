@@ -86,6 +86,72 @@ including the `PARAM.PFD`. Its `--corpus` mode then walks a tree of real saves:
 over 180 of them, every one parses, every one **re-signs to itself byte for
 byte**, and every protected file's ciphertext round-trips.
 
+### PS1 and PS2 — `core/psvcard.c`, `core/ps2/`
+
+Not encryption. The opposite problem: neither console encrypted a save, and
+neither produced a **file**. A PS1 or PS2 save lived in blocks on a memory card,
+so there was nothing to copy off — which is why a scanner looking for a folder
+with a `PARAM.SFO` in it has never seen one.
+
+A save becomes a file when a PS3 exports it as a signed `.PSV` carrying the
+save's whole memory-card directory. That container is what this reads and
+writes, derived from
+[apollo-ps4](https://github.com/bucanero/apollo-ps4)'s `psv_resign.c` and
+`psv_ps2.c` — themselves `ps3-psvresigner` by @dots_tb, with the CBPS group.
+
+The container is signed with HMAC-SHA1 under a key derived from the file's own
+salt by AES-128, on a different schedule per console. So patching one means
+extracting the file a code addresses, patching that, putting it back and
+**re-signing** — a PS3 checks the signature on import, and a save that fails it
+looks corrupt rather than merely unsigned.
+
+The rebuild moves what comes after the edited file rather than laying the
+container out afresh, which is not pedantry: of 2,641 real PS2 containers, two
+leave a gap between files and nine carry a `displaySize` that is not the sum of
+their contents. Recomputing both would quietly rewrite eleven saves it was only
+asked to patch.
+
+Two things that follow from the format and cost more than they look:
+
+- **The title ID comes out of the container, and the container is right.** It
+  can disagree with the folder a save was filed under: 2,646 of 2,647 agree, and
+  the one that does not is a Final Fantasy Chronicles save, a two-in-one disc
+  whose halves carry different IDs (`SLUS-01360` and `SLUS-01363`).
+- **The icon has to be drawn.** Every other console here ships a PNG; a PS1
+  save's icon is sixteen colours packed into its own first block, and a PS2
+  save's is a textured **3D model** lit by parameters in `icon.sys`.
+  `core/ps2/` is apollo-ps4's parser and software rasteriser, ported — no GL
+  context, so it works in the wasm build too. It also **animates**: up to eight
+  morph targets, interpolated on the loop the file states, matching
+  [ps2vmc-tool](https://github.com/bucanero/ps2vmc-tool)'s WebGL renderer so
+  the two agree about what a save looks like moving.
+- **A damaged icon is reported, not patched over.** An icon is drawn whole —
+  the model, or its texture flat — or not at all. Fifteen containers hold an
+  icon claiming 1,770 vertices in a file with room for 1,159, and drawing the
+  part that survives renders a clean silhouette that says nothing is wrong.
+  Something truncated that file and had no reason to stop at the icon, so the
+  front-end says so.
+
+`core/test_psv.c` walks a tree of real containers. Over the 2,647 in
+apollo-saves every one parses, every signature verifies, every one **rebuilds
+byte for byte**, and every one rebuilds correctly with a file actually changed.
+Its `--patch` mode runs the whole chain — extract, apply real codes from the
+database, put back, re-sign — and checks that every *other* file in the
+container came through untouched.
+
+Note that `.PSV` here is a **file format holding a PS1 or PS2 save**, and has
+nothing to do with `PSV` the platform tag, which is the PS Vita. The two share
+four letters and nothing else, and the ambiguity is the kind that compiles, so
+the code refuses to rely on context:
+
+- the console's enumerator is **`ASAVE_PSVITA`**, spelled out, never `ASAVE_PSV`
+- everything about the container is **`apsvc_`/`psvcard`**, never plain `psv`
+
+Two things keep the bare spelling because they name the file format itself
+rather than either concept: the `.psv` extension, and `asave_platform_name()`,
+which still answers `"PSV"` for the Vita — that string is the key the patch
+database is sorted by, so it lives on disk and cannot be renamed.
+
 ### Which console a save is written *for*
 
 Both front-ends have a **Settings** panel naming the console a save is written
@@ -96,6 +162,9 @@ one in place wants.
 - **PSP, Fuse ID.** Savedata modes 4 and 6 derive two `PARAM.SFO` hashes from
   the console's own fuse. A PSP loads a save whose values differ, so this only
   matters for reproducing one console's output byte for byte.
+
+PS1 and PS2 have no such setting, and no account fields either — neither
+console had the concept.
 - **PS3, console ID (IDPS).** Inside `PARAM.PFD`, one of `PARAM.SFO`'s four
   hashes is keyed by the IDPS of a single machine — that is what binds a save to
   a console. Name one and both front-ends offer to **re-bind** a save to it.
@@ -111,7 +180,7 @@ place: the
 **[apollo-saves](https://github.com/bucanero/apollo-saves) database**, checked
 out beside this repo. At the time of measuring that is **4,834 archives**
 across PS1, PS2, PS3, PS4, PSP and Vita, holding **2,648 `PARAM.SFO` files**,
-**2,566 identified saves** and **5,047 PNGs**.
+**2,566 identified saves**, **2,647 `.PSV` containers** and **5,047 PNGs**.
 
 Two things make it usable as a test corpus rather than a pile of zips:
 
@@ -123,8 +192,9 @@ Two things make it usable as a test corpus rather than a pile of zips:
   folders shaped exactly like PS4 saves.
 - It is **big enough for a claim to fail**. Several claims in these docs did:
   "all real icons are non-interlaced" (12 are not), "the two PS3 account fields
-  always agree" (42 do not). Both had been measured honestly against a corpus
-  of a couple of hundred and were simply wrong at scale.
+  always agree" (42 do not), "a `.PSV`'s files are contiguous" (two leave a
+  gap) and "its `displaySize` is the sum of them" (nine are not). All had been
+  measured honestly against a smaller sample and were simply wrong at scale.
 
 Reading it needs one thing beyond Python's `zipfile`: two archives use
 **Deflate64**, which it does not implement, so any sweep should fall back to
@@ -166,15 +236,25 @@ core/     apollo_ctrl.[ch] — stdio-free engine facade, shared by both front-en
                              to write rather than vendor: of 5,560 real files
                              checked, every PNG is 8-bit and all but 12 are
                              non-interlaced
+          psvcard.[ch]     — the .PSV container, which is the only way a PS1 or
+                             PS2 save reaches a computer at all: read, rebuilt
+                             around an edited file, and re-signed
+          shiftjis.[ch]    — ...and the Shift-JIS those saves name themselves in
+          mcicon.[ch]      — ...and their icons, which are not pictures until
+                             something makes one
           psp/             — the PSP's own savedata encryption, the layer below
                              any patch; vendored from apollo-psp, see above
           ps3/             — the PS3's, the same layer one console up; derived
                              from pfdtool, see above
+          ps2/             — the PS2's 3D save icon: a textured model and a
+                             software rasteriser for it, ported from apollo-ps4
           test_psp.c       — the PSP's known-answer vectors, from that upstream
           test_ps3.c       — the PS3's, cross-checked against pfdtool, plus a
                              --corpus mode for a folder of real saves
           test_save.c      — bounds on the SFO parser every front-end shares,
                              and the per-console identification over it
+          test_psv.c       — the .PSV container: bounds, and --corpus/--patch
+                             modes that re-sign, rebuild and patch real ones
 gui/      Dear ImGui desktop app
 web/      WebAssembly build + static site
 tools/    build-index.py   — patch index, for both front-ends; also the

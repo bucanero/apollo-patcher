@@ -16,6 +16,8 @@ engine and drives the same functions the CLI does
   ../core/patchdb.[ch]             reads apollo-patches.zip (the bundled database)
   ../core/psp/                     the PSP's own savedata encryption, below any patch
   ../core/ps3/                     the PS3's, the same layer one console up
+  ../core/psvcard.[ch]             the .PSV container holding a PS1 or PS2 save
+  ../core/mcicon.[ch], ../core/ps2/  ...and its icon, which has to be rendered
   ../../apollo-lib/source/*.c      libapollo engine (unchanged)
   ../../apollo-lib/mbedtls-2.16.12 crypto backend (libmbedcrypto), same as the CLI
 ```
@@ -197,9 +199,9 @@ Pick one and the target, the game key, the byte order and the codes all follow.
 *Find a game* starts from the patch database instead, which is what you want
 when the save is not on this machine yet.
 
-Finding them is the same question on all four consoles and has the same answer:
-**a save is a folder with a `PARAM.SFO` in it**. Where that SFO sits is itself
-the first half of the identification:
+Finding them is the same question on four of the six consoles and has the same
+answer: **a save is a folder with a `PARAM.SFO` in it**. Where that SFO sits is
+itself the first half of the identification:
 
 | Found at | Console | Encrypted by the console |
 |----------|---------|--------------------------|
@@ -208,7 +210,15 @@ the first half of the identification:
 | `<save>/sce_sys/param.sfo`, with `TITLE_ID` | PS4 | no |
 | `<save>/sce_sys/param.sfo`, without | Vita | no |
 
-The second half — which game — is where the four consoles stop agreeing, and is
+**PS1 and PS2 are neither a folder nor an SFO.** Those consoles kept saves in
+memory-card blocks and wrote no `PARAM.SFO` at all — the format postdates them —
+so a save only becomes a file when a PS3 exports it as a signed `.PSV`
+container. The walk therefore looks at files as well as folders, and a `.PSV` is
+identified from what is inside it: the save's own memory-card directory name,
+its file list, and the name the console's save list showed. See
+[the top-level README](../README.md) for the container itself.
+
+The second half — which game — is where the consoles stop agreeing, and is
 the reason `core/saveinfo.c` exists rather than the app reading three keys and
 guessing:
 
@@ -334,6 +344,19 @@ matched the patch's own target line, 3 were corrected by it, and 15 were left
 alone because the patch named several files or named one this save does not
 have.
 
+A PS1 or PS2 save's files are not on disk — they are inside the `.PSV`, and the
+dropdown lists them from the container with their sizes exactly as it lists a
+folder's. Choosing one **extracts** it to a scratch copy under the app's cache
+directory, which is what the hex editor, the code viewers and the patch engine
+then see; applying puts it back and re-signs the container. Nothing above that
+line knows a container is involved, which is the point.
+
+The starred suggestion skips a memory-card save's own presentation — `icon.sys`
+and the `.ico` files, which every one of the 2,641 real PS2 containers carries
+and which no code has ever addressed — and offers the largest of what is left.
+A PS1 container holds exactly one file, its whole memory-card block, so there is
+nothing to choose.
+
 ### The icon
 
 The picture the console's own save list shows — `ICON0.PNG` beside the data
@@ -342,6 +365,60 @@ the game's name on the patcher screen, and in the hover panel on the list.
 Both spellings of each are tried, because the case is per console and only
 some filesystems care: a save copied to a Mac and then opened on Linux is the
 one that would otherwise lose it.
+
+**PS1 and PS2 saves have no such file**, and their icons are drawn rather than
+decoded. A PS1 save's is sixteen colours packed four bits to a pixel inside its
+own first block, 16x16, with up to three animation frames; a PS2 save's is a
+textured **3D model** — one to three of them, named by `icon.sys`, which also
+supplies the three directional lights and the ambient term. `core/ps2/` is
+apollo-ps4's parser and software rasteriser, ported, so this needs no GL context
+of its own.
+
+**A PS2 icon animates.** It is a model with up to eight morph targets, and the
+app plays them: the pose is re-rendered every frame, interpolating between
+shapes on the loop the file itself states. Most icons do not move — 1,898 of
+the 2,345 in the save database carry a single shape — so `animated` is checked
+first and the common case costs nothing.
+
+**Hovering the icon on the patcher screen shows it bigger**, still animating,
+at 256px against a transparent background. That is the closest this gets to
+what the save looked like on a television, and it is rendered only while the
+pointer is actually on it.
+
+While the panel is up the SMALL copy holds its pose. Both are the same model,
+and animating both means rasterising it twice a frame -- which a Windows 7
+machine on an Athlon XP 2400+ notices. The one being pointed at gets the
+animation.
+
+All of it happens on the CPU and arrives as an ordinary texture, so it needs no
+depth buffer, no shaders and no second GL context — which matters, because the
+floor here is OpenGL 1.1 and one supported configuration is a software
+rasteriser over Remote Desktop. Both render sizes are powers of two for the
+same reason. It is affordable, and the two sizes are chosen to cost the same: 128px at 4x
+supersampling and 256px at 2x both rasterise 512x512, which measures about
+1.3ms against a 16ms frame. The renderer is fill-rate bound, so that internal
+size IS the cost -- vertex count barely registers, and a 1,194-vertex model can
+be cheaper than a 552-vertex one that covers more of the frame. 256px at 4x was
+tried and is 3.5x dearer for a difference visible only in a side-by-side.
+
+**An icon is drawn whole or not at all.** Either the 3D model reads, or — when
+its geometry does not fit its file but the texture survived intact — that
+texture is shown flat. There is no third option, and in particular no partial
+model.
+
+That was tried, and it was the wrong answer. The one damaged icon in the save
+database declares 1,770 vertices in a file with room for 1,159; drawing the
+two thirds that survive produces a clean, confident silhouette that tells the
+person looking at it that nothing is the matter. Something truncated that file,
+and it was under no obligation to stop at the icon. So the app says so instead,
+in colour, on the patcher screen and in the list's hover panel: *this save's
+icon is damaged, and the save data may be too*.
+
+Measured over the 2,647 real containers: **2,563 icons render** as models, 69
+saves carry none at all, and **15 are damaged** — all the same Action Replay
+MAX file. None fall back to a flat texture, because that file's texture is in
+the missing third; the fallback is covered by a built fixture in
+`core/test_psv.c` rather than by anything real, which is worth knowing.
 
 It is decoded when the selection changes, not during the scan. A folder of 176
 saves is 176 PNGs, and uploading all of them would be 40MB of texture for a
@@ -1075,6 +1152,11 @@ view and the per-code viewers (`###viewer%d`, one identity each).
   naming the console a save is written for. See
   [PSP and PS3 saves](#psp-and-ps3-saves)
   above.
+- **PS1 and PS2 savedata**: those consoles wrote no files at all, so their
+  saves arrive inside a signed `.PSV` container. Scanned, listed and patched
+  like any other — the file a code addresses is lifted out, patched, put back,
+  and the container **re-signed** — with the icon rendered from the save
+  itself. See [Browsing saves](#browsing-saves).
 - **Two screens**: the app opens on your saves, not on a file picker. Pick one
   and the patcher screen has its target, key, byte order and codes ready.
   **File ▸ Advanced** drives a loose file or your own `.savepatch` by hand.
@@ -1086,12 +1168,25 @@ view and the per-code viewers (`###viewer%d`, one identity each).
   (double-click, Dock icon, *Open With* — macOS), including a save folder,
   which is identified exactly as one picked from the list. See
   [Opening things](#opening-things).
-- **Save icons**, decoded by `core/png.c` and shown beside the game's name.
+- **Save icons**, decoded by `core/png.c` and shown beside the game's name —
+  or, for a PS1 or PS2 save, rendered by `core/mcicon.c` and `core/ps2/`, since
+  those carry no picture to decode.
   See [The icon](#the-icon).
 - **A vendored font** (Noto Sans JP), so game names keep their trade mark
   signs, curly quotes and Japanese titles. See [The font](#the-font).
 
 ## Known caveats / TODO
+- **PS1 saves cannot change size.** A PS1 memory-card save occupies whole
+  blocks, and the container stores it as one of them, so a code that grew or
+  shrank the data would produce something a PS3 will not import. Such a code is
+  refused with that reason rather than written back. PS2 saves have a real file
+  table and may change size freely.
+- **PS1 icons do not animate**, though the format allows up to three frames:
+  not one of the six PS1 saves in the database uses more than one, so there is
+  nothing to play. PS2 icons do animate.
+- **PS1 and PS2 patch coverage is thin** — not a limitation of the app but of
+  the database, which has two PS2 patches and no PS1 directory at all. Browsing,
+  identifying, icons and re-signing work for every save regardless.
 - **Linux dialogs:** portable-file-dialogs needs a dialog helper present at
   runtime (`zenity`, `kdialog`, `matedialog`, or `qarma`).
 - **OpenGL / GPU-less & RDP hosts:** the app uses Dear ImGui's fixed-function

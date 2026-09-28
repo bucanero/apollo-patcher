@@ -28,6 +28,12 @@
  *         database is asked about its title ID -- which the caller does, and
  *         is why the name here is allowed to come back empty.
  *
+ * PS1 and PS2 are the exception to all of the above, because they predate
+ * PARAM.SFO entirely: those consoles kept saves in memory-card blocks, and a
+ * save only becomes a file when a PS3 exports it as a .PSV. So they are
+ * identified from the container instead -- asave_identify_psvcard(), which reads
+ * what core/psvcard.c parsed rather than an SFO that was never written.
+ *
  * Nothing in here touches a filesystem: the caller reads the bytes and says
  * where they came from. That keeps the classification testable against a
  * handful of real SFOs, and usable from the web build, which has no
@@ -54,7 +60,13 @@ typedef enum {
     ASAVE_PSP,
     ASAVE_PS3,
     ASAVE_PS4,
-    ASAVE_PSV
+    /* Spelled out, not ASAVE_PSV: a .PSV FILE is an unrelated thing holding a
+     * PS1 or PS2 save (core/psvcard.h), and the two would otherwise be one
+     * typo apart with nothing to catch it. */
+    ASAVE_PSVITA,
+    /* The two that have no PARAM.SFO at all: see asave_identify_psvcard(). */
+    ASAVE_PS1,
+    ASAVE_PS2
 } asave_platform_t;
 
 /* Where the SFO was found, which is itself evidence: the two consoles that
@@ -98,9 +110,13 @@ typedef struct {
 int asave_identify(const uint8_t *sfo, size_t sfo_len,
                    asave_where_t where, int has_pfd, asave_info_t *out);
 
-/* "PSP", "PS3", "PS4", "PSV" -- the patch database's own platform tags, so a
- * caller can match one straight against patchdb_entry_t::platform. "?" for
- * ASAVE_UNKNOWN. */
+/* "PSP", "PS3", "PS4", "PSV", "PS1", "PS2" -- the patch database's own
+ * platform tags, so a caller can match one straight against
+ * patchdb_entry_t::platform. "?" for ASAVE_UNKNOWN.
+ *
+ * "PSV" here is the PS VITA: it is the tag the database is keyed by, so it is
+ * a string on disk and stays as it is even though the enumerator behind it is
+ * ASAVE_PSVITA. A save out of a .PSV FILE answers "PS1" or "PS2". */
 const char *asave_platform_name(asave_platform_t platform);
 
 /*
@@ -123,6 +139,31 @@ const char *asave_platform_name(asave_platform_t platform);
  *
  * ASAVE_ERR_WHICH when the catalogue has no such title; `out` is emptied.
  */
+/*
+ * Identify a PS1 or PS2 save from the .PSV container holding it.
+ *
+ * The container is the only evidence there is -- no PARAM.SFO was ever
+ * written for these -- so this takes what core/psvcard.c read out of it:
+ * `dir_name` is the save's own memory-card directory ("BASLUS-20216"), `type`
+ * is APSVC_TYPE_PS1 or APSVC_TYPE_PS2, and `title` is the name the console's
+ * save list showed, already converted out of Shift-JIS.
+ *
+ * The title ID comes from `dir_name` and is AUTHORITATIVE: it can disagree
+ * with the folder the save was filed under, and when it does the container is
+ * right (see apsvc_title_id).
+ *
+ * `title` becomes the DETAIL, not the name -- it is the slot ("Devil May Cry
+ * SaveData"), and the game's own name comes from the catalogue like a Vita's
+ * does. It may be NULL.
+ *
+ * `encrypted` is always 0: neither console encrypted its saves, and the
+ * container's signature is a signature, not a cipher.
+ *
+ * ASAVE_ERR_WHICH when `dir_name` names no title ID this recognises.
+ */
+int asave_identify_psvcard(const char *dir_name, int type, const char *title,
+                       asave_info_t *out);
+
 int asave_name_from_db(const char *text, size_t len,
                        const char *platform, const char *title_id,
                        char *out, size_t out_len);

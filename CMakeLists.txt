@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
-project(apollo_patcher C CXX)
+# The version this app reports: the single source for the About box and, on
+# macOS, the bundle's CFBundleShortVersionString. Bump it here and nowhere
+# else -- gui/src/main.cpp is HANDED this string rather than carrying its own
+# copy, so the two can never disagree about what a build is.
+project(apollo_patcher VERSION 2.5.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -74,6 +78,12 @@ set(MBEDTLS_DIR "${APOLLO_ROOT}/mbedtls-2.16.12")
 # and what game it belongs to. That is what lets a front-end be pointed at a
 # folder of saves and produce a list instead of asking for one file at a time.
 #
+# core/psvcard.c reads the .PSV container, which is the only way a PS1 or PS2
+# save ever reaches a computer: those consoles kept saves in memory-card blocks
+# with no file to copy off, and the PS3 exports one as a signed .PSV holding
+# the save's own directory. core/shiftjis.c turns the titles inside into UTF-8.
+# Note that a .PSV file has nothing to do with ASAVE_PSV, which is the Vita.
+#
 # core/psp/ and core/ps3/ are the consoles' own savedata encryption — the layer
 # BELOW anything a .savepatch does, and the reason a save taken straight off a
 # Memory Stick or a PS3 hard drive comes out of the patch engine as garbage.
@@ -100,16 +110,25 @@ set(PSP_SRCS
 set(PS3_SRCS
     core/ps3/pfd_savedata.c)
 
-add_library(apollo_engine STATIC ${ENGINE_SRCS} ${PSP_SRCS} ${PS3_SRCS}
+# The PS2's 3D save icon: a textured model and a software rasteriser for it,
+# ported from apollo-ps4. Unlike every other console here, a PS2 save ships no
+# picture at all, so its icon has to be DRAWN -- see core/mcicon.h.
+set(PS2_SRCS
+    core/ps2/ps2icon.c
+    core/ps2/ps2render.c)
+
+add_library(apollo_engine STATIC ${ENGINE_SRCS} ${PSP_SRCS} ${PS3_SRCS} ${PS2_SRCS}
                                  core/apollo_ctrl.c core/patchdb.c
-                                 core/sfo.c core/saveinfo.c core/png.c)
+                                 core/sfo.c core/saveinfo.c core/png.c
+                                 core/psvcard.c core/shiftjis.c core/mcicon.c)
 target_include_directories(apollo_engine PUBLIC
     ${APOLLO_ROOT}/include
     ${APOLLO_ROOT}/tools          # provides dbglogger.h prototype
     ${MBEDTLS_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/core
     ${CMAKE_CURRENT_SOURCE_DIR}/core/psp
-    ${CMAKE_CURRENT_SOURCE_DIR}/core/ps3)
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/ps3
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/ps2)
 target_compile_definitions(apollo_engine PRIVATE _GNU_SOURCE _USE_MBEDTLS)
 
 # mbedcrypto: prefer the prebuilt static lib (built by CI), else expect a
@@ -300,6 +319,15 @@ target_link_libraries(apollo_ps3_test PRIVATE apollo_engine)
 # `--scan DIR` walks a tree of real saves the way the desktop browser does.
 add_executable(apollo_save_test core/test_save.c)
 target_link_libraries(apollo_save_test PRIVATE apollo_engine)
+
+# The .PSV container, which is how a PS1 or PS2 save reaches a computer at all.
+# Bounds checks on a directory whose every count and position is read out of
+# the file, and -- the part that matters -- `--corpus DIR` walks a tree of real
+# containers, re-signs each one against the signature a PS3 wrote, and rebuilds
+# each one to prove the result is identical to the input. A rebuild that moved
+# a byte would otherwise surface as somebody's save failing to load.
+add_executable(apollo_psv_test core/test_psv.c)
+target_link_libraries(apollo_psv_test PRIVATE apollo_engine)
 
 # ---------------------------------------------------------------------------
 # Front-ends.
