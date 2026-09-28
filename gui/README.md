@@ -385,12 +385,21 @@ at 256px against a transparent background. That is the closest this gets to
 what the save looked like on a television, and it is rendered only while the
 pointer is actually on it.
 
+While the panel is up the SMALL copy holds its pose. Both are the same model,
+and animating both means rasterising it twice a frame -- which a Windows 7
+machine on an Athlon XP 2400+ notices. The one being pointed at gets the
+animation.
+
 All of it happens on the CPU and arrives as an ordinary texture, so it needs no
 depth buffer, no shaders and no second GL context — which matters, because the
 floor here is OpenGL 1.1 and one supported configuration is a software
 rasteriser over Remote Desktop. Both render sizes are powers of two for the
-same reason. It is affordable: 128px at 4x supersampling measures 1.4ms against
-a 16ms frame, and 256px 4.8ms.
+same reason. It is affordable, and the two sizes are chosen to cost the same: 128px at 4x
+supersampling and 256px at 2x both rasterise 512x512, which measures about
+1.3ms against a 16ms frame. The renderer is fill-rate bound, so that internal
+size IS the cost -- vertex count barely registers, and a 1,194-vertex model can
+be cheaper than a 552-vertex one that covers more of the frame. 256px at 4x was
+tried and is 3.5x dearer for a difference visible only in a side-by-side.
 
 **An icon is drawn whole or not at all.** Either the 3D model reads, or — when
 its geometry does not fit its file but the texture survived intact — that

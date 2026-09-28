@@ -544,6 +544,7 @@ static void adopt_session(apctl_session_t* session,
 // framed square, and 128 because that is what the pane shows it at -- there is
 // no source image to be faithful to, so this is simply the size worth drawing.
 #define PSV_ICON_PX   128
+#define PSV_ICON_SS     4
 
 #define APP_NAME      "Apollo Save Patcher"
 
@@ -2642,6 +2643,17 @@ struct SaveIcon {
     bool          corrupt = false;
     // ...or it parsed only far enough for its texture, which is shown flat.
     bool          flat_texture = false;
+    //
+    // The frame the hover panel was last drawn on. While it is up, only the
+    // big copy animates.
+    //
+    // A frame NUMBER rather than a flag, because the panel is only drawn on
+    // the patcher screen: a flag set there would still be set after switching
+    // to the saves list, and the icon in the list's own tooltip would sit
+    // frozen for as long as the app stayed open. A number goes stale on its
+    // own the moment the panel stops being drawn.
+    //
+    int           hover_frame = -1;
     float         loop = 0.0f;   // seconds
     double        began = 0.0;   // ImGui's clock when it started
 
@@ -2651,8 +2663,18 @@ struct SaveIcon {
 };
 static SaveIcon g_icon;
 
-// How big the two renders are. The small one sits in a list row and a header;
-// the large one is a hover panel, where the model is finally worth looking at.
+// How big the two renders are, and how hard each is antialiased.
+//
+// The small one sits in a list row and a header; the large one is a hover
+// panel, where the model is finally worth looking at.
+//
+// Both end up rasterising the same 512x512 internally -- 128 at 4x, 256 at 2x
+// -- which is deliberate. The renderer is fill-rate bound, so that number is
+// what the work costs, and matching them makes the hover panel cost what the
+// small icon already does. 256 at 4x would be 1024x1024: three and a half
+// times the work for a difference visible only side by side, and on an Athlon
+// XP 2400+ that is the difference between an animation that plays and one
+// that stutters.
 //
 // Both are POWERS OF TWO on purpose. OpenGL 1.1 -- the floor this app targets,
 // and what Microsoft's software renderer offers over Remote Desktop -- accepts
@@ -2660,6 +2682,7 @@ static SaveIcon g_icon;
 // exactly the machines least able to say why. The PNG path pads to a power of
 // two for the same reason; this one simply renders at one.
 #define PSV_ICON_BIG_PX  256
+#define PSV_ICON_BIG_SS    2
 
 static void icon_drop() {
     if (g_icon.tex)     glDeleteTextures(1, (const GLuint*)&g_icon.tex);
@@ -2811,7 +2834,7 @@ static const char* describe_container_icon(const SaveEntry& save) {
 // machine, against a 16ms frame. The hover panel is bigger and rendered only
 // while the pointer is on the icon.
 //
-static void icon_render_pose(int px, unsigned* tex) {
+static void icon_render_pose(int px, int ss, unsigned* tex) {
     if (!g_icon.model_valid) return;
 
     int a = g_icon.model.still_shape, b = a;
@@ -2822,7 +2845,7 @@ static void icon_render_pose(int px, unsigned* tex) {
 
     uint8_t* rgba = nullptr;
     if (ps2icon_render_at(&g_icon.model, g_icon.have_sys ? &g_icon.sys : nullptr,
-                          px, 4, PS2RENDER_BG_TRANSPARENT, a, b, morph, &rgba) != 0
+                          px, ss, PS2RENDER_BG_TRANSPARENT, a, b, morph, &rgba) != 0
         || !rgba)
         return;
 
@@ -2949,7 +2972,7 @@ static void icon_load_container(const SaveEntry& save) {
         g_icon.began       = ImGui::GetTime();
         g_icon.error.clear();
 
-        icon_render_pose(PSV_ICON_PX, &g_icon.tex);
+        icon_render_pose(PSV_ICON_PX, PSV_ICON_SS, &g_icon.tex);
         return;
     }
     if (g_icon.error.empty()) g_icon.error = "the save carries no icon";
@@ -2959,10 +2982,22 @@ static void icon_load_for(const SaveEntry& save) {
     if (save.container) icon_load_container(save);
     else                icon_load(save.icon);
 
+    //
     // A model that moves is re-posed every frame. A PNG cannot move and a
     // one-shape model has nowhere to move to, so neither costs anything.
-    if (g_icon.animated)
-        icon_render_pose(PSV_ICON_PX, &g_icon.tex);
+    //
+    // ...but NOT while the hover panel is up. Both copies are the same model
+    // and animating both means rasterising it twice a frame, which is real
+    // work on a slow machine -- an Athlon XP 2400+ shows it. The big one is
+    // what the pointer is pointed at, so it gets the animation and the small
+    // one holds its pose until the pointer leaves.
+    //
+    // Keyed on LAST frame's hover, because the panel is drawn after this
+    // runs. One frame of lag on an icon that loops over a second or more is
+    // not something an eye can find.
+    //
+    if (g_icon.animated && g_icon.hover_frame < ImGui::GetFrameCount() - 1)
+        icon_render_pose(PSV_ICON_PX, PSV_ICON_SS, &g_icon.tex);
 }
 
 //
@@ -2979,12 +3014,13 @@ static void icon_load_for(const SaveEntry& save) {
 static void icon_hover_panel() {
     if (!g_icon.model_valid || !ImGui::IsItemHovered())
         return;
+    g_icon.hover_frame = ImGui::GetFrameCount();
 
     // Rendered while hovered and dropped when the pointer leaves, so the cost
     // is paid only while somebody is looking. A still is rendered once; an
     // animated one is re-posed like the small copy.
     if (!g_icon.big_tex || g_icon.animated)
-        icon_render_pose(PSV_ICON_BIG_PX, &g_icon.big_tex);
+        icon_render_pose(PSV_ICON_BIG_PX, PSV_ICON_BIG_SS, &g_icon.big_tex);
     if (!g_icon.big_tex) return;
 
     ImGui::BeginTooltip();
