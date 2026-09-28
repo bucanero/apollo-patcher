@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
-project(apollo_patcher C CXX)
+# The version this app reports: the single source for the About box and, on
+# macOS, the bundle's CFBundleShortVersionString. Bump it here and nowhere
+# else -- gui/src/main.cpp is HANDED this string rather than carrying its own
+# copy, so the two can never disagree about what a build is.
+project(apollo_patcher VERSION 2.5.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)

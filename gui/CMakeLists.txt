@@ -70,6 +70,14 @@ find_package(OpenGL REQUIRED)
 add_executable(apollo_patcher_gui src/main.cpp)
 target_link_libraries(apollo_patcher_gui PRIVATE apollo_engine imgui OpenGL::GL)
 
+# The version the About box prints, from project(VERSION) in the root
+# CMakeLists. Passed in rather than written in main.cpp so there is one place
+# to bump. A source file compiled WITHOUT this -- by hand, or by a build that
+# forgot it -- falls back to a placeholder that is obviously not a release
+# rather than to a number that might be last release's; see main.cpp.
+target_compile_definitions(apollo_patcher_gui PRIVATE
+    APOLLO_PATCHER_VERSION="${PROJECT_VERSION}")
+
 if(MINGW)
     # -static: statically link the MinGW runtime (libgcc / libstdc++ /
     #   winpthread) so the .exe runs on stock Windows without shipping DLLs.
@@ -179,8 +187,8 @@ if(APPLE)
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_BUNDLE_NAME "Apollo Save Patcher"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.bucanero.apollo-patcher"
-        MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
-        MACOSX_BUNDLE_BUNDLE_VERSION "1.0"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_ICON_FILE icon.icns
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in")
 

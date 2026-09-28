@@ -505,6 +505,21 @@ static void adopt_session(apctl_session_t* session,
 // ---- about box -------------------------------------------------------------
 
 #define APP_NAME      "Apollo Save Patcher"
+
+// This app's own version, distinct from the engine's APOLLO_LIB_VERSION below
+// it in the About box -- they move independently, and "which Apollo is this"
+// has two honest answers.
+//
+// Normally handed in by the build from project(VERSION) in the root
+// CMakeLists, which is the one place to bump it. The fallback is deliberately
+// NOT the current number: a copy here would be a second source of truth, and
+// the way it fails is silent -- someone bumps CMake, forgets this, and every
+// hand-built binary from then on reports the PREVIOUS release while looking
+// perfectly plausible. A placeholder cannot be mistaken for a release.
+#ifndef APOLLO_PATCHER_VERSION
+#define APOLLO_PATCHER_VERSION "0.0.0-dev"
+#endif
+
 #define URL_PATCHER   "https://github.com/bucanero/apollo-patcher"
 #define URL_LIB       "https://github.com/bucanero/apollo-lib"
 #define URL_PATCHES   "https://github.com/bucanero/apollo-patches"
@@ -554,7 +569,7 @@ static void draw_about() {
     if (!ImGui::BeginPopupModal("About", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
 
-    ImGui::TextUnformatted(APP_NAME);
+    ImGui::Text(APP_NAME " %s", APOLLO_PATCHER_VERSION);
     ImGui::TextDisabled("Apollo engine %s", APOLLO_LIB_VERSION);
     ImGui::Spacing();
 
