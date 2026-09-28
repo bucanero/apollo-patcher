@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "saveinfo.h"
+#include "psvcard.h"
 #include "sfo.h"
 
 /*
@@ -82,6 +83,16 @@ static void title_id_from_dir(const char *dir, char out[ASAVE_TITLE_ID_LEN])
  * fault, so the display strings are trimmed. Only those -- SAVEDATA_DIRECTORY
  * is a lookup key and a filesystem name, and is left exactly as written.
  */
+/* Copy into a fixed field, always terminating. */
+static void copy_str(char *dst, size_t dst_len, const char *src)
+{
+    size_t n = strlen(src);
+
+    if (n > dst_len - 1) n = dst_len - 1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
 static void trim(char *s)
 {
     size_t n = strlen(s), at = 0;
@@ -118,7 +129,9 @@ const char *asave_platform_name(asave_platform_t platform)
         case ASAVE_PSP: return "PSP";
         case ASAVE_PS3: return "PS3";
         case ASAVE_PS4: return "PS4";
-        case ASAVE_PSV: return "PSV";
+        case ASAVE_PSVITA: return "PSV";
+        case ASAVE_PS1: return "PS1";
+        case ASAVE_PS2: return "PS2";
         default:        return "?";
     }
 }
@@ -132,7 +145,7 @@ int asave_identify(const uint8_t *sfo, size_t sfo_len,
     static const char *const det_ps3[]  = { "SUB_TITLE", "SUBTITLE", "DETAIL" };
     static const char *const name_ps4[] = { "MAINTITLE", "TITLE" };
     static const char *const det_ps4[]  = { "SUBTITLE", "DETAIL" };
-    static const char *const det_psv[]  = { "SAVEDATA_TITLE", "DETAIL" };
+    static const char *const det_psvita[]  = { "SAVEDATA_TITLE", "DETAIL" };
 
     (void)has_pfd;   /* see below */
 
@@ -163,7 +176,7 @@ int asave_identify(const uint8_t *sfo, size_t sfo_len,
         } else {
             char parent[ASAVE_DIR_LEN];
 
-            out->platform = ASAVE_PSV;
+            out->platform = ASAVE_PSVITA;
             /* 9 bytes at 0x28 inside PARAMS. asfo_blob rather than a string
              * read because the blob is not NUL-terminated at that point --
              * the ID runs straight into the fields after it. */
@@ -183,7 +196,7 @@ int asave_identify(const uint8_t *sfo, size_t sfo_len,
              * ID up in the patch database, which does know the name. */
             asfo_string(sfo, sfo_len, "TITLE", out->name, sizeof out->name);
             trim(out->name);
-            first_of(sfo, sfo_len, out->detail, sizeof out->detail, det_psv, 2);
+            first_of(sfo, sfo_len, out->detail, sizeof out->detail, det_psvita, 2);
         }
 
         if (!title_id_ok(out->title_id))
@@ -279,6 +292,39 @@ static int same_text(const char *a, size_t a_len, const char *b)
             return 0;
     }
     return b[a_len] == '\0';
+}
+
+int asave_identify_psvcard(const char *dir_name, int type, const char *title,
+                       asave_info_t *out)
+{
+    char id[ASAVE_TITLE_ID_LEN];
+
+    if (!out || !dir_name) return ASAVE_ERR_WHICH;
+    memset(out, 0, sizeof *out);
+
+    if (apsvc_title_id(dir_name, id, sizeof id) != APSVC_OK)
+        return ASAVE_ERR_WHICH;
+
+    out->platform = (type == APSVC_TYPE_PS1) ? ASAVE_PS1 : ASAVE_PS2;
+    copy_str(out->title_id, sizeof out->title_id, id);
+
+    /* The save's own directory, which is what a .savepatch's target files are
+     * named under and what the container will be written back as. */
+    copy_str(out->directory, sizeof out->directory, dir_name);
+
+    /*
+     * The console's save list showed this, and it names the SLOT. Left as the
+     * detail so the caller fills the name from the catalogue, exactly as it
+     * does for a Vita save -- the difference being that a PS2 save at least
+     * says something, where a Vita one says nothing at all.
+     */
+    if (title && title[0])
+        copy_str(out->detail, sizeof out->detail, title);
+
+    /* Neither console encrypted a save. The container is signed, which is a
+     * different thing: a signature says who exported it, not what it says. */
+    out->encrypted = 0;
+    return ASAVE_OK;
 }
 
 int asave_name_from_db(const char *text, size_t len,

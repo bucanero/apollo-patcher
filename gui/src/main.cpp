@@ -50,6 +50,8 @@
 #include "saveinfo.h"     // which console wrote a PARAM.SFO, and for which game
 #include "sfo.h"         // ...and reading/assigning the PS4/Vita account in one
 #include "png.h"          // ...and the ICON0.PNG beside it
+#include "psvcard.h"     // ...and the .PSV holding a PS1 or PS2 save
+#include "mcicon.h"      // ...whose icon has to be rendered, not decoded
 #include "kirk_engine.h"   // KIRK_HOST_FUSE_ID, the Fuse ID default
 #ifdef __APPLE__
 #include "macos_open_docs.h"   // files Finder asks the app to open
@@ -130,6 +132,13 @@ struct SaveEntry {
     std::vector<std::string> files;  // relative to path, metadata excluded
     int         suggest = -1;        // the one to open, or -1 for no data file
     bool        suggest_listed = false;  // ...and whether the console named it
+
+    // A PS1 or PS2 save, which is not a folder at all: `path` is a .PSV file
+    // and `files` are the names INSIDE it, which no filesystem call will find.
+    // Anything that would otherwise stat one has to ask the container instead,
+    // which is what `file_sizes` is for -- see entry_file_size().
+    bool        container = false;
+    std::vector<uint64_t> file_sizes;
     std::string icon;                // ICON0.PNG, if the save has one
     // The PSN account this save is signed to: PS3, PS4 and Vita, the three
     // that have the concept. 16 hex digits either way -- the same 64-bit
@@ -278,6 +287,31 @@ struct AppState {
         void clear() { *this = Ps3(); }
     };
     Ps3 ps3;
+
+    // ---- the .PSV container, which is not encryption at all ---------------
+    //
+    // The same unwrap/patch/re-wrap shape as the two above, for a different
+    // reason. A PS1 or PS2 save has no console cipher over it -- neither
+    // console encrypted one -- but it also has no files on disk: it arrives
+    // inside a signed container holding its whole memory-card directory.
+    //
+    // So the file a code addresses is extracted to a scratch copy, patched
+    // there like any other save, and put back; the container is rebuilt around
+    // it and re-signed. The signature is the part that must not be forgotten,
+    // because a PS3 checks it on import and a save that fails looks corrupt
+    // rather than unsigned.
+    struct PsvCard {
+        bool        found = false;      // the target came out of a container
+        bool        wrap  = true;       // put it back afterwards
+        std::string path;               // the .PSV itself
+        std::string inner;              // the file inside it being patched
+        int         index = -1;         // ...and which one, for a repeated name
+        int         type  = 0;          // APSVC_TYPE_PS1 or _PS2
+        int         sig   = 0;          // what its signature said when opened
+
+        void clear() { *this = PsvCard(); }
+    };
+    PsvCard psvcard;
 
     void append_log(const char* line) {
         std::lock_guard<std::mutex> lk(log_mtx);
@@ -503,6 +537,11 @@ static void adopt_session(apctl_session_t* session,
 }
 
 // ---- about box -------------------------------------------------------------
+
+// How large a PS2 save's 3D icon is rendered. Square, because the model is
+// framed square, and 128 because that is what the pane shows it at -- there is
+// no source image to be faithful to, so this is simply the size worth drawing.
+#define PSV_ICON_PX   128
 
 #define APP_NAME      "Apollo Save Patcher"
 
@@ -951,6 +990,173 @@ static void psp_detect() {
 // Take the console's layer off the target file, in place. Returns false and
 // logs on failure; the caller must not carry on patching a file that is still
 // encrypted.
+//
+// ---- the .PSV container ---------------------------------------------------
+//
+// Opening a PS1 or PS2 save means lifting one file out of the container it
+// arrived in; saving means putting it back and re-signing. Everything between
+// those two points is an ordinary file on disk, so the hex editor, the code
+// viewers and the patch engine need to know nothing about any of this.
+//
+
+// Where an extracted file lives while it is being patched. Beside the Python
+// modules the patch engine already unpacks, for the same reason: it is a
+// scratch copy of something the app can always produce again, and it must not
+// be written next to somebody's save.
+static std::string psvcard_scratch_path(const std::string& inner) {
+    const char* cache = patchdb_cache_dir();
+    if (!cache) return std::string();
+
+    std::error_code ec;
+    const fs::path dir = fs::path(cache) / "psv";
+    fs::create_directories(dir, ec);
+    if (ec) return std::string();
+
+    // The inner name is used as-is for recognisability -- it is what the code
+    // viewer's title bar will show -- but a memory card can hold a name with a
+    // separator in it, and that would write outside the scratch directory.
+    std::string leaf = inner;
+    for (char& c : leaf)
+        if (c == '/' || c == '\\' || c == ':') c = '_';
+    if (leaf.empty()) leaf = "savedata";
+
+    return (dir / leaf).string();
+}
+
+// Lift the chosen file out and point the app at it. The container itself is
+// left untouched until the save is written back.
+//
+// `st` is filled rather than g_app.psvcard being set directly, because the caller
+// has to call adopt_target() afterwards and that CLEARS the container state --
+// deliberately, so that choosing a loose file cannot leave the app pointed at
+// the last container it opened and write the wrong thing back into it.
+//
+static bool psvcard_extract(const SaveEntry& save, int index, std::string& out_path,
+                        AppState::PsvCard& st) {
+    std::vector<unsigned char> buf;
+
+    if (!read_all(save.path, buf)) {
+        g_app.append_log("[!] PSV: could not read the container");
+        return false;
+    }
+
+    apsvc_info_t info;
+    int rc = apsvc_info(buf.data(), buf.size(), &info);
+    if (rc != APSVC_OK) {
+        g_app.append_log((std::string("[!] PSV: ") + apsvc_strerror(rc)).c_str());
+        return false;
+    }
+
+    std::vector<apsvc_file_t> inner(size_t(info.file_count));
+    if (info.file_count <= 0 ||
+        apsvc_files(buf.data(), buf.size(), inner.data(), info.file_count, nullptr) != APSVC_OK) {
+        g_app.append_log("[!] PSV: the container lists no files");
+        return false;
+    }
+    if (index < 0 || index >= info.file_count) {
+        g_app.append_log("[!] PSV: no such file in the container");
+        return false;
+    }
+
+    const apsvc_file_t& f = inner[size_t(index)];
+    const std::string scratch = psvcard_scratch_path(f.name);
+    if (scratch.empty()) {
+        g_app.append_log("[!] PSV: nowhere to extract to");
+        return false;
+    }
+    if (!write_all(scratch, buf.data() + f.off, f.size)) {
+        g_app.append_log("[!] PSV: could not write the extracted file");
+        return false;
+    }
+
+    // Said out loud rather than silently repaired. Several tools wrote .PSV
+    // files before the signature was understood and those saves are otherwise
+    // perfectly good, so this is worth knowing and not worth refusing over --
+    // and re-signing on the way out fixes it either way.
+    const int sig = apsvc_verify(buf.data(), buf.size());
+    if (sig == APSVC_SIG_BAD)
+        g_app.append_log("[!] PSV: the container's signature does not match its "
+                         "contents - it will be re-signed when saved");
+    else if (sig == APSVC_SIG_UNSIGNED)
+        g_app.append_log("PSV: the container is unsigned - it will be signed when saved");
+
+    st.clear();
+    st.found = true;
+    st.path  = save.path;
+    st.inner = f.name;
+    st.index = index;
+    st.type  = info.type;
+    st.sig   = sig;
+
+    char msg[512];
+    snprintf(msg, sizeof msg, "PSV: extracted %s (%u bytes) from %s",
+             f.name, f.size, info.dir_name);
+    g_app.append_log(msg);
+
+    out_path = scratch;
+    return true;
+}
+
+// ...and put it back, rebuilding the container around it and signing the
+// result. Written to a temporary file and moved into place, because a partly
+// written container is not a save at all -- unlike a patched data file, which
+// is at worst wrong.
+static bool psvcard_wrap_target() {
+    std::vector<unsigned char> container, patched;
+
+    if (!read_all(g_app.psvcard.path, container) ||
+        !read_all(g_app.target_path, patched)) {
+        g_app.append_log("[!] PSV: could not read the container or the patched file");
+        return false;
+    }
+
+    uint8_t* out = nullptr;
+    size_t   out_len = 0;
+    const int rc = apsvc_replace_at(container.data(), container.size(),
+                                    g_app.psvcard.index,
+                                    patched.data(), uint32_t(patched.size()),
+                                    &out, &out_len);
+    if (rc != APSVC_OK) {
+        std::string why = apsvc_strerror(rc);
+        if (rc == APSVC_ERR_SPACE)
+            why += " - a PS1 save occupies whole memory-card blocks, so a code "
+                   "that changes its length cannot be written back";
+        g_app.append_log(("[!] PSV: " + why).c_str());
+        return false;
+    }
+
+    const std::string tmp = g_app.psvcard.path + ".tmp";
+    const bool wrote = write_all(tmp, out, out_len);
+    const size_t wrote_len = out_len;
+    apsvc_free(out);
+
+    if (!wrote) {
+        g_app.append_log("[!] PSV: could not write the rebuilt container");
+        std::error_code ec;
+        fs::remove(tmp, ec);
+        return false;
+    }
+
+    std::error_code ec;
+    fs::rename(tmp, g_app.psvcard.path, ec);
+    if (ec) {
+        // Across filesystems rename fails; copy and then drop the temporary.
+        fs::copy_file(tmp, g_app.psvcard.path, fs::copy_options::overwrite_existing, ec);
+        std::error_code rm;
+        fs::remove(tmp, rm);
+        if (ec) {
+            g_app.append_log("[!] PSV: could not replace the container");
+            return false;
+        }
+    }
+
+    char msg[512];
+    snprintf(msg, sizeof msg, "PSV: %s put back and the container re-signed "
+                              "(%zu bytes)", g_app.psvcard.inner.c_str(), wrote_len);
+    g_app.append_log(msg);
+    return true;
+}
+
 static bool psp_unwrap_target() {
     std::vector<unsigned char> sfo, enc;
     if (!read_all(g_app.psp.sfo_path, sfo) || !read_all(g_app.target_path, enc)) {
@@ -1392,7 +1598,7 @@ static bool sfo_account_resign() {
     std::vector<unsigned char> sfo;
 
     if (!g_app.has_save ||
-        (g_app.save.platform_id != ASAVE_PS4 && g_app.save.platform_id != ASAVE_PSV)) {
+        (g_app.save.platform_id != ASAVE_PS4 && g_app.save.platform_id != ASAVE_PSVITA)) {
         g_app.append_log("[!] Signing this way is for PS4 and Vita saves");
         return false;
     }
@@ -1514,6 +1720,14 @@ static std::string lowered(const std::string& in) {
     for (char& c : out)
         if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
     return out;
+}
+
+// Does this name end in that extension, whatever case it was written in? A
+// .PSV comes off a PS3 in capitals and off a repacking tool in lower case.
+static bool ends_with_ci(const std::string& name, const char* ext) {
+    const size_t k = strlen(ext);
+    if (name.size() < k) return false;
+    return lowered(name).compare(name.size() - k, k, ext) == 0;
 }
 
 // Opened once at startup. Also extracts the archive's Python modules to a cache
@@ -1658,6 +1872,7 @@ static void load_patch_from_db(int index);
 // the same identification as one picked from the list -- same icon, same file
 // list, same name.
 static bool examine(const fs::path& dir, SaveEntry& out);
+static bool examine_psvcard(const fs::path& file, SaveEntry& out);
 static void resolve_patches(std::vector<SaveEntry>& saves);
 static void commit_open_save(const SaveEntry& save);
 
@@ -1669,6 +1884,13 @@ static void commit_open_save(const SaveEntry& save);
 static void adopt_target(const std::string& path, const std::string& title_hint = "") {
     g_app.target_path = path;
     g_app.title_hint  = title_hint;
+
+    // Whatever .PSV was last opened is not this one. Cleared here rather than
+    // at each call site so that nothing can be pointed at a loose file and
+    // still be holding a container to write it back into -- which would put
+    // one save's data inside another save's file. open_file_path() re-arms it
+    // immediately afterwards for a target that really did come out of one.
+    g_app.psvcard.clear();
 
     // Look around the new target for the metadata that lists it, so a save the
     // console encrypted announces itself instead of having to be declared. Only
@@ -1746,6 +1968,30 @@ static void open_path(const std::string& path) {
         return;
     }
 
+    //
+    // A .PSV, which is a whole PS1 or PS2 save in one file -- the only console
+    // save here that is not a folder. Taken through the same identification a
+    // scanned one gets, so dropping it is the same as picking it from the
+    // list: named from the catalogue, its inner files listed, its icon
+    // rendered and its codes loaded.
+    //
+    // Sniffed rather than trusted to the extension: .PSV is also what a Vita
+    // save's folder is sometimes called, and a file that merely ends in those
+    // letters without the magic is not one of these.
+    //
+    if (ext == ".psv") {
+        SaveEntry found;
+        if (examine_psvcard(fs::path(path), found)) {
+            std::vector<SaveEntry> one{ found };
+            resolve_patches(one);
+            commit_open_save(one.front());
+            return;
+        }
+        g_app.append_log(("[!] " + path + " ends in .PSV but is not a PS1 or PS2 "
+                          "save container - opening it as a plain file "
+                          "instead.").c_str());
+    }
+
     // A loose file. There is no save behind it, so the patcher screen shows
     // the pickers rather than a save header describing the previous one.
     g_app.has_save = false;
@@ -1799,7 +2045,13 @@ struct SaveBrowser {
     std::vector<SaveEntry>   saves;
     std::vector<int>         hits;          // indices into saves, filtered
     char                     search[128] = "";
-    int                      platform = 0;  // 0 = all, else index into names
+    // The consoles these saves are actually FROM -- "All", then one per
+    // platform present, in the order they are listed here. Built from the scan
+    // rather than from the patch database, which is a different question: the
+    // database has no PS1 patches at all, so a PS1 save filtered against it
+    // could be seen under "All" and nowhere else.
+    std::vector<std::string> platforms;
+    int                      platform = 0;  // 0 = all, else index into platforms
     bool                     only_coded = false;
     bool                     refilter = true;
     int                      selected = -1; // index into saves
@@ -1831,6 +2083,41 @@ static void note_account_change(const std::string& save_path, const char *accoun
 {
     for (SaveEntry& e : g_sb.saves)
         if (e.path == save_path) { e.account = account; return; }
+}
+
+/*
+ * ...and the same for a container that was just rebuilt.
+ *
+ * A code may change the length of the file it patches, which moves everything
+ * after it and changes the container. The sizes shown in the File dropdown and
+ * the file list were read during the scan, so without this they go on
+ * reporting what the save used to be until the next rescan.
+ */
+static void note_container_rebuilt(const std::string& psvcard_path)
+{
+    std::vector<unsigned char> buf;
+    apsvc_info_t info;
+
+    if (!read_all(psvcard_path, buf)) return;
+    if (apsvc_info(buf.data(), buf.size(), &info) != APSVC_OK) return;
+    if (info.file_count <= 0) return;
+
+    std::vector<apsvc_file_t> inner(size_t(info.file_count));
+    if (apsvc_files(buf.data(), buf.size(), inner.data(), info.file_count, nullptr) != APSVC_OK)
+        return;
+
+    auto refresh = [&](SaveEntry& e) {
+        // Only the sizes: the file LIST is the container's own order and did
+        // not change, and rebuilding it here would renumber a target the user
+        // has already chosen.
+        if (e.file_sizes.size() != inner.size()) return;
+        for (size_t i = 0; i < inner.size(); i++)
+            e.file_sizes[i] = inner[i].size;
+    };
+
+    if (g_app.has_save && g_app.save.path == psvcard_path) refresh(g_app.save);
+    for (SaveEntry& e : g_sb.saves)
+        if (e.path == psvcard_path) { refresh(e); break; }
 }
 
 // How deep to go looking, and how much to look at. A PS3's savedata sits five
@@ -1945,6 +2232,112 @@ static int suggest_file(SaveEntry& save, const std::vector<unsigned char>& sfo,
     return best;
 }
 
+//
+// How big is one of a save's files?
+//
+// For every console but two that is a question for the filesystem. A PS1 or
+// PS2 save has no files on disk at all -- they live inside a .PSV, and the
+// container is the only thing that knows -- so the sizes are read once during
+// the scan and answered from there.
+//
+static uint64_t entry_file_size(const SaveEntry& save, size_t index) {
+    if (index >= save.files.size()) return 0;
+    if (save.container)
+        return index < save.file_sizes.size() ? save.file_sizes[index] : 0;
+
+    std::error_code ec;
+    const uintmax_t n = fs::file_size(fs::path(save.path) / save.files[index], ec);
+    return ec ? 0 : uint64_t(n);
+}
+
+//
+// Which file inside a container is the one somebody wants to patch?
+//
+// A memory-card save carries its own presentation with it -- icon.sys names
+// the save, and one to three .ico files are the 3D icon the console spun on
+// its dashboard -- and those are never what a code addresses. Every one of
+// the 2,641 real PS2 containers has an icon.sys, and most have icons besides.
+//
+// So the icons are set aside and the largest of what is left is offered,
+// which is the same rule used for a PS4 or Vita save. A PS1 container holds
+// exactly one file, its whole memory-card block, so this always answers that.
+//
+static bool psvcard_is_presentation(const std::string& name) {
+    const std::string n = lowered(name);
+    if (n == "icon.sys") return true;
+    for (const char* ext : { ".ico", ".icn" }) {
+        const size_t k = strlen(ext);
+        if (n.size() > k && n.compare(n.size() - k, k, ext) == 0) return true;
+    }
+    return false;
+}
+
+static int psvcard_suggest_file(const SaveEntry& save) {
+    int best = -1;
+    uint64_t biggest = 0;
+
+    for (size_t i = 0; i < save.files.size(); i++) {
+        if (psvcard_is_presentation(save.files[i])) continue;
+        const uint64_t n = i < save.file_sizes.size() ? save.file_sizes[i] : 0;
+        if (best < 0 || n > biggest) { biggest = n; best = int(i); }
+    }
+    // Nothing but presentation. Unusual, but a container is somebody's file
+    // and it may hold whatever it holds -- offer the first thing rather than
+    // nothing, so the save can still be opened and looked at.
+    if (best < 0 && !save.files.empty()) best = 0;
+    return best;
+}
+
+//
+// Is this .PSV a save, and if so what is in it?
+//
+// The PS1 and PS2 kept saves in memory-card blocks, so unlike every other
+// console here there is no folder to examine and no PARAM.SFO to read. What
+// there is instead is a container the PS3 wrote, and it carries everything:
+// the save's own memory-card directory, the files inside it, and the name the
+// console's save list showed.
+//
+static bool examine_psvcard(const fs::path& file, SaveEntry& out) {
+    std::vector<unsigned char> buf;
+    apsvc_info_t info;
+
+    if (!read_all(file.string(), buf)) return false;
+    if (apsvc_info(buf.data(), buf.size(), &info) != APSVC_OK) return false;
+
+    char title[ASAVE_NAME_LEN] = "";
+    apsvc_title(buf.data(), buf.size(), title, sizeof title);
+
+    asave_info_t id;
+    if (asave_identify_psvcard(info.dir_name, info.type, title, &id) != ASAVE_OK)
+        return false;
+
+    out.path        = file.string();
+    out.dir_name    = info.dir_name;
+    out.name        = id.name;          // empty: the catalogue fills it in
+    out.detail      = id.detail;
+    out.title_id    = id.title_id;
+    out.platform    = asave_platform_name(id.platform);
+    out.platform_id = id.platform;
+    out.encrypted   = false;
+    out.container   = true;
+
+    std::vector<apsvc_file_t> inner(size_t(info.file_count));
+    if (info.file_count > 0 &&
+        apsvc_files(buf.data(), buf.size(), inner.data(), info.file_count, nullptr) != APSVC_OK)
+        return false;
+
+    // Left in the container's own order rather than sorted: the order IS the
+    // layout, and a patch that names a slot by index means this one. It is
+    // also what apsvc_replace_at() counts in.
+    for (const apsvc_file_t& f : inner) {
+        out.files.push_back(f.name);
+        out.file_sizes.push_back(f.size);
+    }
+
+    out.suggest = psvcard_suggest_file(out);
+    return true;
+}
+
 // Is this folder a save, and if so what is in it? Returns false for every
 // other folder on the card, which is most of them.
 static bool examine(const fs::path& dir, SaveEntry& out) {
@@ -1994,7 +2387,7 @@ static bool examine(const fs::path& dir, SaveEntry& out) {
         char id[APFD_ACCT_ID_LEN + 1] = "";
         if (apfd_sfo_account_id(sfo.data(), sfo.size(), id, sizeof id) == APFD_OK)
             out.account = id;
-    } else if (info.platform == ASAVE_PS4 || info.platform == ASAVE_PSV) {
+    } else if (info.platform == ASAVE_PS4 || info.platform == ASAVE_PSVITA) {
         uint64_t id = 0;
         // Zero is left as "no account". It is what a decrypted or shared save
         // usually carries -- 48 of the 672 in apollo-saves -- and calling that
@@ -2037,10 +2430,23 @@ static void scan_walk(const fs::path& dir, int depth, std::vector<SaveEntry>& ou
         if (g_sb.cancel.load()) return;
         // Symlinks are not followed: a link pointing back up its own tree
         // would walk forever, and the depth cap only bounds how long.
-        if (!e.is_directory(ec) || e.is_symlink(ec)) continue;
+        if (e.is_symlink(ec)) continue;
         const std::string leaf = e.path().filename().string();
         if (leaf.empty() || leaf[0] == '.') continue;
-        scan_walk(e.path(), depth - 1, out);
+
+        if (e.is_directory(ec)) {
+            scan_walk(e.path(), depth - 1, out);
+            continue;
+        }
+
+        // A PS1 or PS2 save is a FILE, not a folder -- the only one of the six
+        // consoles for which that is true. Checked by extension first so the
+        // walk does not read every file on the card to find out.
+        if (e.is_regular_file(ec) && ends_with_ci(leaf, ".psv")) {
+            SaveEntry found;
+            if (examine_psvcard(e.path(), found))
+                out.push_back(std::move(found));
+        }
     }
 }
 
@@ -2148,6 +2554,15 @@ static void scan_collect() {
     g_sb.refilter = true;
     g_sb.selected = g_sb.saves.empty() ? -1 : 0;
 
+    // Which consoles turned up. A fixed order, so the buttons do not jump
+    // about between scans of different folders.
+    g_sb.platforms.clear();
+    g_sb.platforms.push_back("All");
+    for (const char* p : { "PS1", "PS2", "PS3", "PS4", "PSP", "PSV" })
+        for (const SaveEntry& s : g_sb.saves)
+            if (strcmp(s.platform, p) == 0) { g_sb.platforms.push_back(p); break; }
+    if (g_sb.platform >= int(g_sb.platforms.size())) g_sb.platform = 0;
+
     char buf[512];
     int coded = 0;
     for (const SaveEntry& s : g_sb.saves) if (s.patch_index >= 0) coded++;
@@ -2176,8 +2591,8 @@ static void refilter_saves() {
     g_sb.hits.clear();
     const std::string needle = lowered(g_sb.search);
     const char* platform = (g_sb.platform > 0
-                            && size_t(g_sb.platform) < g_db.platforms.size())
-                         ? g_db.platforms[size_t(g_sb.platform)].c_str() : nullptr;
+                            && size_t(g_sb.platform) < g_sb.platforms.size())
+                         ? g_sb.platforms[size_t(g_sb.platform)].c_str() : nullptr;
 
     for (size_t i = 0; i < g_sb.saves.size(); ++i) {
         const SaveEntry& s = g_sb.saves[i];
@@ -2212,20 +2627,10 @@ static void icon_drop() {
     g_icon = SaveIcon();
 }
 
-static void icon_load(const std::string& path) {
-    if (path == g_icon.path) return;   // already the one on screen
-    icon_drop();
-    g_icon.path = path;
-    if (path.empty()) return;
-
-    std::vector<unsigned char> file;
-    if (!read_all(path, file)) { g_icon.error = "could not be read"; return; }
-
-    uint8_t* rgba = nullptr;
-    int      w = 0, h = 0;
-    const int rc = apng_decode(file.data(), file.size(), &rgba, &w, &h);
-    if (rc != APNG_OK) { g_icon.error = apng_strerror(rc); return; }
-
+// Upload RGBA as the one icon on screen. Split out from icon_load() because a
+// PS1 or PS2 icon never was a file: it is rendered from the save itself, and
+// arrives here as pixels rather than as a PNG to decode.
+static void icon_upload(const uint8_t* rgba, int w, int h) {
     //
     // Padded to a power of two, and drawn with UVs that cut the padding back
     // off.
@@ -2243,7 +2648,6 @@ static void icon_load(const std::string& path) {
     std::vector<unsigned char> pot((size_t)pw * ph * 4, 0);
     for (int y = 0; y < h; y++)
         memcpy(&pot[(size_t)y * pw * 4], rgba + (size_t)y * w * 4, (size_t)w * 4);
-    apng_free(rgba);
 
     GLuint tex = 0;
     glGenTextures(1, &tex);
@@ -2263,6 +2667,97 @@ static void icon_load(const std::string& path) {
     g_icon.h   = h;
     g_icon.u   = float(w) / float(pw);
     g_icon.v   = float(h) / float(ph);
+}
+
+static void icon_load(const std::string& path) {
+    if (path == g_icon.path) return;   // already the one on screen
+    icon_drop();
+    g_icon.path = path;
+    if (path.empty()) return;
+
+    std::vector<unsigned char> file;
+    if (!read_all(path, file)) { g_icon.error = "could not be read"; return; }
+
+    uint8_t* rgba = nullptr;
+    int      w = 0, h = 0;
+    const int rc = apng_decode(file.data(), file.size(), &rgba, &w, &h);
+    if (rc != APNG_OK) { g_icon.error = apng_strerror(rc); return; }
+
+    icon_upload(rgba, w, h);
+    apng_free(rgba);
+}
+
+//
+// The icon a PS1 or PS2 save carries, which is not a picture until something
+// makes one: a PS1 save's is sixteen colours packed into its own first block,
+// and a PS2 save's is a textured 3D model that has to be rendered.
+//
+// Keyed on the container's path so the "already on screen" check still works
+// -- selecting the same save twice must not re-render it.
+//
+// Either way of getting a save's picture, chosen by the save. Every call site
+// wants this rather than one of the two below it.
+static void icon_load_for(const SaveEntry& save);
+
+static void icon_load_container(const SaveEntry& save) {
+    if (save.path == g_icon.path) return;
+    icon_drop();
+    g_icon.path = save.path;
+
+    std::vector<unsigned char> buf;
+    if (!read_all(save.path, buf)) { g_icon.error = "could not be read"; return; }
+
+    apsvc_info_t info;
+    if (apsvc_info(buf.data(), buf.size(), &info) != APSVC_OK) {
+        g_icon.error = "the container could not be read";
+        return;
+    }
+
+    if (info.type == APSVC_TYPE_PS1) {
+        apsvc_file_t f;
+        if (apsvc_files(buf.data(), buf.size(), &f, 1, nullptr) != APSVC_OK) {
+            g_icon.error = "the container lists no save";
+            return;
+        }
+        // Frame zero: these icons animate over two or three frames, and the
+        // list shows a still. Nothing here animates yet.
+        std::vector<uint8_t> rgba(AMCI_PS1_SIZE * AMCI_PS1_SIZE * 4);
+        const int rc = amci_ps1_frame(buf.data() + f.off, f.size, 0, rgba.data());
+        if (rc != AMCI_OK) { g_icon.error = amci_strerror(rc); return; }
+        icon_upload(rgba.data(), AMCI_PS1_SIZE, AMCI_PS1_SIZE);
+        return;
+    }
+
+    // PS2: the first .ico in the container. icon.sys names three -- the
+    // normal, copying and deleting icons -- and the first is the one the save
+    // list showed.
+    std::vector<apsvc_file_t> all(size_t(info.file_count));
+    if (info.file_count <= 0 ||
+        apsvc_files(buf.data(), buf.size(), all.data(), info.file_count, nullptr) != APSVC_OK) {
+        g_icon.error = "the container lists no files";
+        return;
+    }
+
+    for (const apsvc_file_t& f : all) {
+        if (!ends_with_ci(f.name, ".ico") && !ends_with_ci(f.name, ".icn")) continue;
+
+        uint8_t* rgba = nullptr;
+        const int rc = amci_ps2_render(buf.data() + f.off, f.size,
+                                       info.sys_off ? buf.data() + info.sys_off : nullptr,
+                                       info.sys_size, PSV_ICON_PX, &rgba);
+        if (rc != AMCI_OK) { g_icon.error = amci_strerror(rc); continue; }
+
+        icon_upload(rgba, PSV_ICON_PX, PSV_ICON_PX);
+        amci_free(rgba);
+        g_icon.error.clear();
+        return;
+    }
+    if (g_icon.error.empty()) g_icon.error = "the save carries no icon";
+}
+
+static void icon_load_for(const SaveEntry& save) {
+    if (save.container) icon_load_container(save);
+    else                icon_load(save.icon);
 }
 
 // Draw it at up to `box_w` x `box_h`, keeping its shape. A PS3 icon is
@@ -2315,11 +2810,47 @@ static std::string patch_wants_other_file(const SaveEntry& save, const std::stri
     return "";
 }
 
+//
+// The on-disk path for one of a save's files, opening the container first when
+// there is one. Empty when the file could not be produced, which is the only
+// way this fails -- an ordinary save's file is simply the path joined.
+//
+static std::string open_file_path(const SaveEntry& save, int file_index,
+                                  AppState::PsvCard& st) {
+    st.clear();
+    if (file_index < 0 || file_index >= int(save.files.size()))
+        return std::string();
+
+    if (!save.container)
+        return (fs::path(save.path) / save.files[size_t(file_index)]).string();
+
+    std::string extracted;
+    if (!psvcard_extract(save, file_index, extracted, st))
+        return std::string();
+    return extracted;
+}
+
+// The two steps that always go together: point the app at one of a save's
+// files, and remember the container it came out of if it came out of one.
+static bool adopt_save_file(const SaveEntry& save, int file_index) {
+    AppState::PsvCard st;
+    const std::string path = open_file_path(save, file_index, st);
+    if (path.empty()) return false;
+
+    adopt_target(path, save.title_id);   // clears g_app.psvcard
+    g_app.psvcard = st;                      // ...and this puts back what applies
+    return true;
+}
+
 static void open_save_file(const SaveEntry& save, int file_index) {
     if (file_index < 0 || file_index >= int(save.files.size())) return;
 
     const std::string name = save.files[size_t(file_index)];
-    adopt_target((fs::path(save.path) / name).string(), save.title_id);
+
+    if (!adopt_save_file(save, file_index)) {
+        g_app.show_log = true;
+        return;
+    }
 
     // adopt_target loads the matching patch only when nothing is open, so that
     // choosing a target never discards somebody's edited codes behind their
@@ -2340,7 +2871,15 @@ static void open_save_file(const SaveEntry& save, int file_index) {
 
     g_app.append_log(("The patch targets " + want + " - opening that instead of "
                       + name).c_str());
-    adopt_target((fs::path(save.path) / want).string(), save.title_id);
+
+    // By index rather than by name: four real containers hold two files called
+    // settings.dat, and writing back to the wrong one would corrupt the save.
+    int want_index = -1;
+    for (size_t i = 0; i < save.files.size(); i++)
+        if (save.files[i] == want) { want_index = int(i); break; }
+    if (want_index < 0) return;
+
+    adopt_save_file(save, want_index);
 }
 
 static void load_patch_from_db(int index) {
@@ -2374,12 +2913,23 @@ static void apply_selected() {
     if (!g_app.session) return;
     const char* target = g_app.target_path.empty() ? nullptr : g_app.target_path.c_str();
 
+    //
+    // What the backup has to protect is whatever Apply will OVERWRITE.
+    //
+    // Usually that is the target itself. For a PS1 or PS2 save it is not: the
+    // target is a scratch copy under the cache directory, and the file that
+    // gets rewritten is the .PSV it came out of. Backing up the scratch copy
+    // would leave the actual save unprotected while the checkbox said
+    // otherwise, which is worse than not offering a backup at all.
+    //
+    const std::string backup_of = g_app.psvcard.found ? g_app.psvcard.path : g_app.target_path;
+
     if (g_app.backup && target) {
-        if (backup_file(g_app.target_path))
-            g_app.append_log(("Backup written: " + g_app.target_path + ".bak").c_str());
+        if (backup_file(backup_of))
+            g_app.append_log(("Backup written: " + backup_of + ".bak").c_str());
         else
             g_app.append_log("[!] Backup failed (target unreadable?) — aborting.");
-        if (!std::ifstream(g_app.target_path + ".bak")) {
+        if (!std::ifstream(backup_of + ".bak")) {
             g_app.show_log = true;
             g_app.apply_msg = "Could not back up the target file, so nothing was patched.\n"
                               "Check the log for details.";
@@ -2423,6 +2973,11 @@ static void apply_selected() {
     const char* console = psp ? "PSP" : "PS3";
     const char* meta    = psp ? "PARAM.SFO" : "PARAM.PFD";
 
+    // A PS1 or PS2 save, whose target is a scratch copy lifted out of a .PSV.
+    // Not mutually exclusive with the above in principle, but no console ever
+    // encrypted a memory-card save, so in practice it never coincides.
+    const bool container = g_app.psvcard.found && g_app.psvcard.wrap && target;
+
     if (native) {
         g_app.append_log((std::string("=== Removing the ") + console
                           + "'s own encryption").c_str());
@@ -2463,16 +3018,37 @@ static void apply_selected() {
         if (!rewrapped) errors++;
     }
 
+    // ...and for the same reason, put a container's file back. This is the
+    // step that actually writes the save: everything up to here has been
+    // editing a scratch copy, and without it the .PSV on disk is untouched and
+    // the patching appears to have done nothing at all.
+    bool reboxed = true;
+    if (container) {
+        g_app.append_log("=== Putting the file back into the .PSV container");
+        reboxed = psvcard_wrap_target();
+        if (!reboxed) errors++;
+        else note_container_rebuilt(g_app.psvcard.path);
+    }
+
     // Result pop-up message.
     char msg[320];
     if (errors == 0) {
-        char tail[160] = "";
+        char tail[224] = "";
         if (native)
             snprintf(tail, sizeof tail,
                      "\nThe %s layer was taken off and put back, and %s was "
                      "rewritten with it.", console, meta);
+        else if (container)
+            snprintf(tail, sizeof tail,
+                     "\n%s was put back into the .PSV container, which was "
+                     "rebuilt and re-signed.", g_app.psvcard.inner.c_str());
         snprintf(msg, sizeof msg, "All done — %d code(s) applied successfully.%s",
                  applied, tail);
+    } else if (container && !reboxed) {
+        g_app.show_log = true;
+        snprintf(msg, sizeof msg,
+                 "The patched file could not be put back into the .PSV, so the "
+                 "container on disk is UNCHANGED.\nCheck the log for details.");
     } else if (native && !rewrapped) {
         g_app.show_log = true;
         snprintf(msg, sizeof msg,
@@ -3188,7 +3764,7 @@ static void draw_save_tooltip(const SaveEntry& s) {
     ImGui::BeginTooltip();
     ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
 
-    icon_load(s.icon);
+    icon_load_for(s);
     if (g_icon.tex) {
         icon_draw(112.0f * g_ui_scale, 78.0f * g_ui_scale);
         ImGui::SameLine();
@@ -3231,14 +3807,14 @@ static void draw_save_tooltip(const SaveEntry& s) {
         std::error_code ec;
         ImGui::Spacing();
         for (size_t f = 0; f < s.files.size() && f < MAX_FILES; f++) {
-            const uintmax_t n = fs::file_size(fs::path(s.path) / s.files[f], ec);
+            const uint64_t n = entry_file_size(s, f);
             // Not %-28.28s: a width cut at a byte boundary would split a
             // multi-byte character in a PS4 or Vita file name. SameLine puts
             // the size in a column where it fits and after the name where it
             // does not, which is the right way round.
             ImGui::Text("%s %s", int(f) == s.suggest ? "*" : " ", s.files[f].c_str());
             ImGui::SameLine(ImGui::GetFontSize() * 20.0f);
-            ImGui::TextDisabled("%s", ec ? "?" : human_size(n).c_str());
+            ImGui::TextDisabled("%s", human_size(n).c_str());
         }
         if (s.files.size() > MAX_FILES)
             ImGui::TextDisabled("   ...and %d more",
@@ -3292,6 +3868,7 @@ static void commit_open_save(const SaveEntry& save) {
         g_app.title_hint.clear();
         g_app.psp.clear();
         g_app.ps3.clear();
+        g_app.psvcard.clear();
         // ...and the match belongs to that other file. Re-running the
         // detection against an empty target is what clears it.
         detect_patch_for_target();
@@ -3331,6 +3908,12 @@ static void request_open_save(const SaveEntry& save) {
 // (see patch_wants_other_file).
 static int current_target_index() {
     if (!g_app.has_save || g_app.target_path.empty()) return -1;
+
+    // A container's files are not on disk, so the target is a scratch copy and
+    // the path does not contain the save's own. What identifies it there is
+    // which file was lifted out, which psvcard_extract() recorded.
+    if (g_app.save.container)
+        return g_app.psvcard.found ? g_app.psvcard.index : -1;
 
     for (size_t f = 0; f < g_app.save.files.size(); f++)
         if ((fs::path(g_app.save.path) / g_app.save.files[f]).string() == g_app.target_path)
@@ -3429,14 +4012,14 @@ static void draw_saves_screen() {
             ImGui::SameLine();
     };
 
-    for (size_t p = 0; p < g_db.platforms.size(); ++p) {
-        if (p) same_line_if_it_fits(g_db.platforms[p].c_str());
-        if (ImGui::RadioButton(g_db.platforms[p].c_str(), g_sb.platform == int(p))) {
+    for (size_t p = 0; p < g_sb.platforms.size(); ++p) {
+        if (p) same_line_if_it_fits(g_sb.platforms[p].c_str());
+        if (ImGui::RadioButton(g_sb.platforms[p].c_str(), g_sb.platform == int(p))) {
             g_sb.platform = int(p);
             g_sb.refilter = true;
         }
     }
-    if (!g_db.platforms.empty()) same_line_if_it_fits("Only saves with codes");
+    if (!g_sb.platforms.empty()) same_line_if_it_fits("Only saves with codes");
     if (ImGui::Checkbox("Only saves with codes", &g_sb.only_coded))
         g_sb.refilter = true;
 
@@ -4026,9 +4609,10 @@ static void draw_byte_order() {
 static void draw_save_header() {
     const SaveEntry& s = g_app.save;
 
-    // The picture the console itself shows. Decoded on demand, so only the
-    // save actually open has a texture.
-    icon_load(s.icon);
+    // The picture the console itself shows. Decoded -- or, for a PS1 or PS2
+    // save, rendered -- on demand, so only the save actually open has a
+    // texture.
+    icon_load_for(s);
     if (g_icon.tex) {
         icon_draw(128.0f * g_ui_scale, 88.0f * g_ui_scale);
         ImGui::SameLine();
@@ -4053,7 +4637,7 @@ static void draw_save_header() {
     // section below for its encryption layer and the button belongs there
     // with the rest of it, while a PS4 or Vita save has no such section --
     // nothing is encrypted -- so its one button belongs here.
-    const bool sfo_account = (s.platform_id == ASAVE_PS4 || s.platform_id == ASAVE_PSV);
+    const bool sfo_account = (s.platform_id == ASAVE_PS4 || s.platform_id == ASAVE_PSVITA);
     const bool know_account = strlen(g_saved.account_hex) == APFD_ACCT_ID_LEN;
 
     if (!s.account.empty() || (sfo_account && know_account)) {
@@ -4104,16 +4688,16 @@ static void draw_save_header() {
                           current >= 0 ? s.files[size_t(current)].c_str()
                                        : "(none - choose one)")) {
         for (size_t f = 0; f < s.files.size(); f++) {
-            const uintmax_t n = fs::file_size(fs::path(s.path) / s.files[f], ec);
+            const uint64_t n = entry_file_size(s, f);
             char row[640];
             // The star is the console's own answer, or the fallback. Kept in
             // the row rather than a legend, because a combo shows one line at
             // a time and a legend below it would describe nothing visible.
             snprintf(row, sizeof row, "%s%s   %s",
                      int(f) == s.suggest ? "* " : "   ",
-                     s.files[f].c_str(), ec ? "?" : human_size(n).c_str());
+                     s.files[f].c_str(), human_size(n).c_str());
             if (ImGui::Selectable(row, int(f) == current))
-                adopt_target((fs::path(s.path) / s.files[f]).string(), s.title_id);
+                adopt_save_file(s, int(f));
         }
         ImGui::EndCombo();
     }
@@ -4695,8 +5279,12 @@ static void print_open_state() {
                                                                  : g_app.save.name.c_str())
                                       : "(none - target picked by hand)");
     printf("  files       %d\n", g_app.has_save ? int(g_app.save.files.size()) : 0);
-    printf("  icon        %s\n", (g_app.has_save && !g_app.save.icon.empty())
-                                      ? "yes" : "none");
+    // A PS1 or PS2 save has no icon FILE -- there is one, but it has to be
+    // built from the save itself, so "is there a path" is the wrong question.
+    printf("  icon        %s\n",
+           !g_app.has_save                 ? "none" :
+           g_app.save.container            ? "rendered from the save" :
+           !g_app.save.icon.empty()        ? "yes" : "none");
     printf("  target      %s\n", g_app.target_path.empty() ? "(none)"
                                                             : g_app.target_path.c_str());
     printf("  title hint  %s\n", g_app.title_hint.empty() ? "(none)"

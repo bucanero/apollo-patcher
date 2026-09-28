@@ -35,23 +35,33 @@ import zipfile
 PLATFORMS = ["PS2", "PS3", "PS4", "PSP", "PSV"]
 
 #
-# Game names by title ID -- (platform, file in the checkout, separator).
+# Game names by title ID -- (platform, file in the checkout, separator,
+# encoding).
 #
-# apollo-patches ships four of these catalogues; these are the two the save
-# browser can use. A PS3 or PS4 save names its own game in PARAM.SFO and needs
-# no catalogue, and a VITA SAVE NAMES NOTHING AT ALL -- no TITLE_ID key, and a
-# TITLE that is usually empty -- so without this a Vita save is listed under
-# whatever the patch database happens to know, which is 123 titles against the
-# 4581 here.
+# apollo-patches ships four of these catalogues and the save browser now uses
+# all four. A PS3 or PS4 save names its own game in PARAM.SFO and needs no
+# catalogue; the other three consoles do, for three different reasons. A VITA
+# SAVE NAMES NOTHING AT ALL -- no TITLE_ID key, and a TITLE that is usually
+# empty -- so without this it is listed under whatever the patch database
+# happens to know, which is 123 titles against the 4581 here.
 #
-# ps1titleid.txt and ps2titleid.txt are left out deliberately: nothing browses
-# a PS1 or PS2 save yet, and the two of them are another 250KB in the zip. Add
-# them to this list the day something does -- but note they are Windows-1252,
-# not UTF-8 like these two, so they need `encoding=` changed below.
+# PS1 and PS2 are here because something does browse those saves now: they
+# arrive inside a .PSV container (see core/psvcard.c), and while a PS2 save at
+# least names its own SLOT, neither names its GAME -- so without these two a
+# PS1 or PS2 save is listed under its title ID alone.
+#
+# They are the reason the encoding is per-file. The PSP and Vita catalogues are
+# UTF-8; these two are Windows-1252, and neither decodes as UTF-8 at all
+# ("Astérix" in one, an umlaut in the other). Decoding cp1252 never fails --
+# every byte maps -- which also means a mis-tagged file would come through as
+# mojibake rather than as an error, so the encoding stays written down here
+# beside the file it belongs to.
 #
 TITLE_DBS = [
-    ("PSP", "psptitleid.txt", " "),
-    ("PSV", "psvtitleid.txt", "|"),
+    ("PSP", "psptitleid.txt", " ", "utf-8"),
+    ("PSV", "psvtitleid.txt", "|", "utf-8"),
+    ("PS1", "ps1titleid.txt", ";", "cp1252"),
+    ("PS2", "ps2titleid.txt", " ", "cp1252"),
 ]
 
 # A fixed timestamp for every entry: zip records mtimes, and a git checkout
@@ -103,11 +113,11 @@ def build_titles(root, path):
     rows = {}
     kept = 0
 
-    for platform, name, sep in TITLE_DBS:
+    for platform, name, sep, encoding in TITLE_DBS:
         source = os.path.join(root, name)
         if not os.path.isfile(source):
             continue
-        with open(source, encoding="utf-8") as fh:
+        with open(source, encoding=encoding) as fh:
             for line in fh:
                 line = line.strip()
                 if not line or sep not in line:
