@@ -299,9 +299,13 @@ wolf.
 ## PS1 and PS2: saves in a `.PSV` container
 
 Neither console encrypted saves, and neither wrote files. A PS1 or PS2 save
-lived in blocks on a memory card, and it only becomes a file when a **PS3
-exports it as a `.PSV`** — a signed container holding the save's whole
-memory-card directory.
+lived in blocks on a memory card, and it becomes a file only when something
+**exports it as a `.PSV`** — a signed container, originally the PS3's own
+export format, holding the save's whole memory-card directory. A PS3 writes
+them, and so do [apollo-ps2](https://github.com/bucanero/apollo-ps2) on the
+console itself and
+[ps2vmc-tool](https://github.com/bucanero/ps2vmc-tool) on a virtual memory
+card.
 
 That is the form these saves reach a computer in, and the app reads and writes
 it directly:
@@ -579,7 +583,7 @@ console:
 | PS3 | [apollo-ps3](https://github.com/bucanero/apollo-ps3) |
 | PS4 | [apollo-ps4](https://github.com/bucanero/apollo-ps4) |
 | Vita | [apollo-vita](https://github.com/bucanero/apollo-vita) |
-| PS1, PS2 | exported as `.PSV` by a PS3, or by [ps2vmc-tool](https://github.com/bucanero/ps2vmc-tool) from a virtual memory card |
+| PS1, PS2 | [apollo-ps2](https://github.com/bucanero/apollo-ps2), running on the console itself. Also exported as `.PSV` by a PS3, or by [ps2vmc-tool](https://github.com/bucanero/ps2vmc-tool) from a virtual memory card |
 
 PS4 and Vita saves must be **decrypted by the console-side app** before this
 one can do anything useful with them. PSP and PS3 saves can come across raw —

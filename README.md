@@ -43,7 +43,9 @@ twice** — the console wraps a save with a key of its own before the game's
 encryption is anywhere in the picture, and every patch addresses only the inner
 layer, so the wrapper has to come off first. **PS1 and PS2 saves are not files
 at all** — those consoles kept saves in memory-card blocks, so a save only
-reaches a computer inside a signed `.PSV` container a PS3 exported.
+reaches a computer inside a signed `.PSV` container — the PS3's export
+format, also written by [apollo-ps2](https://github.com/bucanero/apollo-ps2)
+and [ps2vmc-tool](https://github.com/bucanero/ps2vmc-tool).
 
 Both problems live under `core/`, reworked into buffer APIs with no stdio
 because there is no filesystem in a browser tab, and both parse their metadata

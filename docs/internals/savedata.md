@@ -20,7 +20,7 @@ itself the first half of the identification:
 
 **PS1 and PS2 are neither a folder nor an SFO.** Those consoles kept saves in
 memory-card blocks and wrote no `PARAM.SFO` at all — the format postdates them —
-so a save only becomes a file when a PS3 exports it as a signed `.PSV`
+so a save only becomes a file once it is exported as a signed `.PSV`
 container. The walk therefore looks at files as well as folders, and a `.PSV` is
 identified from what is inside it: the save's own memory-card directory name,
 its file list, and the name the console's save list showed. See
@@ -211,9 +211,11 @@ neither produced a **file**. A PS1 or PS2 save lived in blocks on a memory card,
 so there was nothing to copy off — which is why a scanner looking for a folder
 with a `PARAM.SFO` in it has never seen one.
 
-A save becomes a file when a PS3 exports it as a signed `.PSV` carrying the
-save's whole memory-card directory. That container is what this reads and
-writes, derived from
+A save becomes a file when something exports it as a signed `.PSV` carrying
+the save's whole memory-card directory — the PS3's own export format, also
+written by [apollo-ps2](https://github.com/bucanero/apollo-ps2) on the console
+and by [ps2vmc-tool](https://github.com/bucanero/ps2vmc-tool) from a virtual
+memory card. That container is what this reads and writes, derived from
 [apollo-ps4](https://github.com/bucanero/apollo-ps4)'s `psv_resign.c` and
 `psv_ps2.c` — themselves `ps3-psvresigner` by @dots_tb, with the CBPS group.
 
