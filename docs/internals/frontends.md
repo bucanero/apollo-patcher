@@ -222,9 +222,11 @@ is WRITTEN, and leaving them blank keeps whatever a save already says — which
 is what patching one in place wants.
 
 - **PSP, Fuse ID** (16 hex digits). Savedata modes 4 and 6 derive two
-  `PARAM.SFO` hashes from the console's own fuse. A PSP loads a save whose
-  values differ, so this only matters for reproducing one console's output byte
-  for byte.
+  `PARAM.SFO` hashes from the console's own fuse. The console's loader does not
+  enforce them, but a **game** may: a console-locked title verifies them itself
+  and flags the save when they do not match (*Gran Turismo* does). Blank means
+  `FFFFFFFFFFFFFFFF`. See
+  [save data](savedata.md#accounts-and-which-console-a-save-is-written-for).
 - **PS3, account ID** (16 hex digits) — your PSN account, and **usually the
   one to reach for**. It is written into the save's own `PARAM.SFO`, so the
   save loads on *any* PS3 that account has signed in to rather than on one

@@ -381,9 +381,17 @@ default is the safe one.
 
 ### PSP
 
-- **Fuse ID** (16 hex digits). Only matters if you are trying to reproduce one
-  specific console's output byte for byte. A PSP will load a save whose value
-  differs, so leaving this blank is right for almost everyone.
+- **Fuse ID** (16 hex digits) — the ID of one specific PSP. Blank means
+  `FFFFFFFFFFFFFFFF`, which is what Apollo falls back to on a console too.
+
+  Most games do not care: the PSP itself will load a save whose fuse-derived
+  hashes do not match, so leaving this blank is right most of the time.
+
+  **Some games are console-locked and do care.** They check those hashes
+  themselves and flag the save as invalid when the signature does not match —
+  *Gran Turismo* is the known example on PSP. For one of those, enter the fuse
+  ID of the console the save will be played on, or the game will reject a save
+  this app re-signed without it.
 
 ### PS3
 

@@ -746,7 +746,9 @@ static bool write_all(const std::string& path, const unsigned char* data, size_t
 // a save in place wants.
 //
 //   the PSP's Fuse ID    reaches the two PARAM.SFO hashes that savedata modes
-//                        4 and 6 derive from the console's own fuse
+//                        4 and 6 derive from the console's own fuse. Not
+//                        enforced by the console, but console-locked games
+//                        check it themselves (Gran Turismo does)
 //   the PS3's console ID reaches PARAM.SFO's second hash inside PARAM.PFD,
 //                        which is what binds a save to one machine
 //
@@ -4759,10 +4761,14 @@ static void draw_settings_window() {
     changed |= ImGui::InputText("Fuse ID", g_settings.fuse_hex, sizeof g_settings.fuse_hex,
                                     ImGuiInputTextFlags_CharsHexadecimal |
                                     ImGuiInputTextFlags_CharsUppercase);
-    hint("16 hex digits. Two PARAM.SFO hashes are derived from the console's own "
-         "fuse in savedata modes 4 and 6. A PSP loads a save whose values differ, "
-         "so this only matters for reproducing one console's output byte for "
-         "byte. Blank = FFFFFFFFFFFFFFFF.");
+    hint("16 hex digits, identifying one specific PSP. Two PARAM.SFO hashes are "
+         "derived from the console's own fuse in savedata modes 4 and 6.\n\n"
+         "The PSP's loader does not enforce them, so most saves move between "
+         "consoles regardless. But the check is there for the GAME to make, and "
+         "console-locked titles do: Gran Turismo verifies these hashes and flags "
+         "the savedata when they do not match. For one of those, enter the fuse "
+         "ID of the console the save will be played on.\n\n"
+         "Blank = FFFFFFFFFFFFFFFF.");
 
     ImGui::SeparatorText("PS3");
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);

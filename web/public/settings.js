@@ -8,9 +8,10 @@
  * whatever the save already says", which is what patching one in place wants.
  *
  *   PSP, Fuse ID       Two of a PARAM.SFO's hashes are derived from the
- *                      console's own fuse in savedata modes 4 and 6. A PSP
- *                      loads a save whose values differ, so this is only
- *                      needed to reproduce one console's output byte for byte.
+ *                      console's own fuse in savedata modes 4 and 6. The
+ *                      PSP's loader does not enforce them, but a GAME may:
+ *                      console-locked titles verify them and flag the save
+ *                      when they differ (Gran Turismo does).
  *
  *   PS3, console ID    PARAM.SFO's second hash inside PARAM.PFD is keyed by
  *                      the IDPS of one machine. Name one and the PS3 panel

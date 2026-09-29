@@ -312,8 +312,12 @@ leaving them blank keeps whatever a save already says — which is what patching
 one in place wants.
 
 - **PSP, Fuse ID.** Savedata modes 4 and 6 derive two `PARAM.SFO` hashes from
-  the console's own fuse. A PSP loads a save whose values differ, so this only
-  matters for reproducing one console's output byte for byte.
+  the console's own fuse. The PSP's own loader does not enforce them, so most
+  saves move between consoles regardless — but **the check is available to the
+  game**, and some titles make it: they verify the fuse-derived hashes and flag
+  the savedata when the signature does not match. *Gran Turismo* does. So this
+  is not only for reproducing one console's output byte for byte; for a
+  console-locked title it is what makes a re-signed save load at all.
 
 PS1 and PS2 have no such setting, and no account fields either — neither
 console had the concept.

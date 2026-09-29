@@ -543,7 +543,9 @@ const handlers = {
      * side WRITES and neither of which affects unwrapping:
      *
      *   the PSP's Fuse ID    reaches the two PARAM.SFO hashes that savedata
-     *                        modes 4 and 6 derive from the console's own fuse
+     *                        modes 4 and 6 derive from the console's own fuse.
+     *                        Not enforced by the console, but console-locked
+     *                        games check it themselves (Gran Turismo does)
      *   the PS3's console ID reaches PARAM.SFO's second hash in PARAM.PFD,
      *                        which is what binds a save to one machine
      *
