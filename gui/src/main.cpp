@@ -4761,13 +4761,10 @@ static void draw_settings_window() {
     changed |= ImGui::InputText("Fuse ID", g_settings.fuse_hex, sizeof g_settings.fuse_hex,
                                     ImGuiInputTextFlags_CharsHexadecimal |
                                     ImGuiInputTextFlags_CharsUppercase);
-    hint("16 hex digits, identifying one specific PSP. Two PARAM.SFO hashes are "
-         "derived from the console's own fuse in savedata modes 4 and 6.\n\n"
-         "The PSP's loader does not enforce them, so most saves move between "
-         "consoles regardless. But the check is there for the GAME to make, and "
-         "console-locked titles do: Gran Turismo verifies these hashes and flags "
-         "the savedata when they do not match. For one of those, enter the fuse "
-         "ID of the console the save will be played on.\n\n"
+    hint("16 hex digits, identifying one specific PSP. Most games load a save "
+         "whose value differs, but console-locked titles check the hashes it "
+         "derives and flag the save when they do not match - Gran Turismo does "
+         "- so those need the fuse ID of the console that will play the save. "
          "Blank = FFFFFFFFFFFFFFFF.");
 
     ImGui::SeparatorText("PS3");

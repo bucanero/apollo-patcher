@@ -388,10 +388,14 @@ default is the safe one.
   hashes do not match, so leaving this blank is right most of the time.
 
   **Some games are console-locked and do care.** They check those hashes
-  themselves and flag the save as invalid when the signature does not match —
-  *Gran Turismo* is the known example on PSP. For one of those, enter the fuse
-  ID of the console the save will be played on, or the game will reject a save
-  this app re-signed without it.
+  themselves and flag the save as invalid when the signature does not match.
+  *Gran Turismo* is a confirmed example on PSP, and it is not the only title
+  that does this — there is no catalogue of which games do. For one of those,
+  enter the fuse ID of the console the save will be played on, or the game will
+  reject a save this app re-signed without it.
+
+  If a save is still rejected on another console with the right fuse ID set,
+  see [the game locks its save some other way](#the-game-locks-its-save-some-other-way).
 
 ### PS3
 
@@ -577,7 +581,25 @@ Work through these in order:
    will not load.
 3. **Is the save signed to the right account?** See
    [moving a save](#moving-a-save-to-another-console-or-account).
-4. **Restore the backup** — `<target>.bak`, next to the file — and try again.
+4. **Is it a PSP game that checks the fuse ID?** See
+   [Settings ▸ PSP](#psp).
+5. **Restore the backup** — `<target>.bak`, next to the file — and try again.
+
+### The game locks its save some other way
+
+Some PSP games tie a save to one console by a scheme of their own, rather than
+through anything the format provides. A known pattern is writing the system's
+**Wi-Fi MAC address** into the save data and checking it on load.
+
+Nothing in this app can help with that, and nothing in it is meant to. These
+schemes are per-game and undocumented, so there is no general handling to
+write — each one has to be worked out and undone individually, which is what a
+game-specific `.savepatch` code is for. If the database has a code for your
+game, it may already do this; if not, that is where the work would go.
+
+The symptom is a save that patches and re-signs cleanly, carries the right
+account and fuse ID, and is still refused by that one game on a console it did
+not come from.
 
 ### Where the backup went
 

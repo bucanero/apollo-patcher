@@ -317,7 +317,15 @@ one in place wants.
   game**, and some titles make it: they verify the fuse-derived hashes and flag
   the savedata when the signature does not match. *Gran Turismo* does. So this
   is not only for reproducing one console's output byte for byte; for a
-  console-locked title it is what makes a re-signed save load at all.
+  console-locked title it is what makes a re-signed save load at all. Which
+  titles enforce it is not catalogued anywhere.
+
+  **Per-game locking is out of scope, deliberately.** Some PSP titles bind a
+  save to one console by means of their own rather than through anything the
+  format offers — writing the system's Wi-Fi MAC address into the save data and
+  checking it on load is a known pattern. There is no general handling to
+  write: each scheme is undocumented and particular to its game, so undoing one
+  belongs in that game's `.savepatch`, not here.
 
 PS1 and PS2 have no such setting, and no account fields either — neither
 console had the concept.
