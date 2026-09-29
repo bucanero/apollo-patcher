@@ -14,6 +14,10 @@ drive the same `libapollo` engine the console apps use.
 The command-line tools (`patcher`, `dumper`) and the engine itself live in
 [apollo-lib](https://github.com/bucanero/apollo-lib).
 
+![The desktop app's saves list, showing PS3 saves by game with their slot,
+console, title ID and whether the patch database has codes, and a hover panel
+detailing one save.](docs/images/saves-list.webp)
+
 ## Documentation
 
 | | |

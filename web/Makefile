@@ -288,10 +288,15 @@ verify: $(INDEX) | $(DIST)
 # keeps the patcher at /; the save-decrypters site copies tools.html over
 # index.html and gets the tools at / instead. tools.html links to
 # ./patcher.html, which is correct in both.
+# The guide's images come from docs/ rather than public/, and are copied here
+# rather than in the $(GUIDE) rule: that rule only reruns when the markdown or
+# the renderer changes, so a newly ADDED screenshot would never reach dist/.
+# This target always runs.
 static: | $(DIST)
 	@cp $(STATIC) $(DIST)/
 	@cp $(DIST)/index.html $(DIST)/patcher.html
-	@echo "copied $(words $(STATIC)) static files to $(DIST)/ (+ patcher.html)"
+	@mkdir -p $(DIST)/images && cp ../docs/images/* $(DIST)/images/
+	@echo "copied $(words $(STATIC)) static files to $(DIST)/ (+ patcher.html, images/)"
 
 $(DIST):
 	@mkdir -p $@

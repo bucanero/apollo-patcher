@@ -37,9 +37,14 @@ import sys
 # run in half and leaves the asterisks on the page, which is exactly the bug
 # this shape avoids.
 _CODE = re.compile(r'`([^`]+)`')
+# Images before links: ![alt](src) contains [alt](src), so the link pattern
+# would match the inside of one and leave a stray '!' on the page.
+_IMG  = re.compile(r'!\[([^\]]*)\]\(([^)\s]+)\)')
 _LINK = re.compile(r'\[([^\]]*)\]\(([^)\s]+)\)')
 _BOLD = re.compile(r'\*\*(.+?)\*\*', re.S)
 _ITAL = re.compile(r'\*([^*\n]+)\*')
+_ONLY_IMG  = re.compile(r'!\[[^\]]*\]\([^)\s]+\)')
+_ONLY_ITAL = re.compile(r'\*[^*]+\*')
 
 REPO_DOCS = 'https://github.com/bucanero/apollo-patcher/blob/main/docs/'
 
@@ -67,6 +72,14 @@ def inline(text):
         ext = ' target="_blank" rel="noopener"' if href.startswith('http') else ''
         return f'<a href="{html.escape(href, quote=True)}"{ext}>{m.group(1)}</a>'
 
+    def image(m):
+        # Paths are relative to docs/, and the Makefile copies docs/images/ to
+        # dist/images/, so the same `images/...` path is correct in the repo
+        # and on the site. Nothing to rewrite.
+        return (f'<img src="{html.escape(m.group(2), quote=True)}" '
+                f'alt="{m.group(1)}" loading="lazy">')
+
+    t = _IMG.sub(image, t)
     t = _LINK.sub(link, t)
     # Bold before italic: what is left over as a single `*` pair once the `**`
     # pairs are gone is an italic run, including one nested inside a bold one.
@@ -193,7 +206,35 @@ def render(md):
         while i < n and lines[i].strip() and not _starts_block(lines, i):
             para.append(lines[i].strip())
             i += 1
-        out.append('<p>' + inline(' '.join(para)) + '</p>')
+        text = ' '.join(para)
+
+        # A paragraph that is nothing but an image is a figure, and an
+        # all-italic paragraph straight after it is its caption. Emitting
+        # <p><img></p> followed by <p><em></em></p> would leave the two
+        # unrelated in the markup, so the caption could not be styled as one
+        # without :has() -- and would not be a caption to a screen reader
+        # either.
+        if _ONLY_IMG.fullmatch(text):
+            figure = ['<figure>', inline(text)]
+            j = i
+            while j < n and not lines[j].strip():
+                j += 1
+            if j < n and not _starts_block(lines, j):
+                cap = []
+                k = j
+                while k < n and lines[k].strip() and not _starts_block(lines, k):
+                    cap.append(lines[k].strip())
+                    k += 1
+                caption = ' '.join(cap)
+                if _ONLY_ITAL.fullmatch(caption):
+                    figure.append('<figcaption>'
+                                  + inline(caption[1:-1]) + '</figcaption>')
+                    i = k
+            figure.append('</figure>')
+            out.append('\n'.join(figure))
+            continue
+
+        out.append('<p>' + inline(text) + '</p>')
 
     return '\n'.join(out)
 

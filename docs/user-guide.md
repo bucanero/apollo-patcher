@@ -133,6 +133,14 @@ off.
 
 Press **File ▸ Saves** (Ctrl+B) to get here from anywhere.
 
+![The saves list: PS3 saves by game, with Slot, Console, Title ID, Codes and
+Owner columns, and a hover panel showing one save's artwork, path, account and
+target file.](images/saves-list.webp)
+
+*Hovering a row opens the panel shown here: the save's own artwork, where it is
+on disk, which account it is signed to, whether the database has codes, and
+which file the console's metadata says is the save.*
+
 ### What counts as a save
 
 For four of the six consoles a save is a **folder** with the console's metadata
