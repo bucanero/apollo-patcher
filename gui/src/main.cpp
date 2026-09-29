@@ -566,6 +566,14 @@ static void adopt_session(apctl_session_t* session,
 #define URL_LIB       "https://github.com/bucanero/apollo-lib"
 #define URL_PATCHES   "https://github.com/bucanero/apollo-patches"
 
+// The user guide, rendered onto the project's own site by web/Makefile from
+// docs/user-guide.md. The site rather than the repo's markdown because the
+// page reads better and is the same document either way -- and because the one
+// failure this menu item cannot help with is the app not starting at all, for
+// which the guide's troubleshooting section is also linked from the release
+// notes.
+#define URL_GUIDE     "https://bucanero.github.io/apollo-patcher/guide.html"
+
 // Hand a URL to the desktop. Every caller passes a compile-time constant from
 // the list above, so there is nothing to quote-escape.
 static void open_url(const char* url) {
@@ -627,6 +635,7 @@ static void draw_about() {
     ImGui::Spacing();
 
     ImGui::TextDisabled("Project");
+    link_row("User guide", URL_GUIDE);
     link_row("apollo-patcher (this app)", URL_PATCHER);
     link_row("apollo-lib (the engine)", URL_LIB);
     link_row("apollo-patches (the patch database)", URL_PATCHES);
@@ -4440,6 +4449,7 @@ static void draw_menu_bar(bool* want_quit) {
         if (ImGui::BeginMenu("Help")) {
             ImGui::MenuItem("Legend: SW=Save Wizard  BSD  PY=Python", nullptr, false, false);
             ImGui::Separator();
+            if (ImGui::MenuItem("User guide")) open_url(URL_GUIDE);
             if (ImGui::MenuItem("Project on GitHub")) open_url(URL_PATCHER);
             if (ImGui::MenuItem("About " APP_NAME "...")) g_want_about = true;
             ImGui::EndMenu();

@@ -56,6 +56,11 @@ MODULE      = $(DIST)/apollo.mjs
 INDEX       = $(DIST)/patches.json
 MODLIST     = $(DIST)/python-modules.json
 TOOLS       = $(DIST)/tools.json
+# The user guide, rendered from the same markdown the repo serves, so the
+# site and the repo cannot drift. tools/make-guide.py handles only the
+# subset the guide uses and fails the build on anything else.
+GUIDE       = $(DIST)/guide.html
+GUIDE_SRC   = ../docs/user-guide.md
 # A committed INPUT, not build output: producing it needs the real game saves
 # in bucanero/save-decrypters, which are not vendored. `make verify` rewrites
 # it; a plain build just reads it, so dist/ can be wiped without losing it.
@@ -151,7 +156,7 @@ LDFLAGS     = -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=worker \
 
 .PHONY: all serve verify clean
 
-all: $(MODULE) $(INDEX) $(MODLIST) $(TOOLS) static
+all: $(MODULE) $(INDEX) $(MODLIST) $(TOOLS) $(GUIDE) static
 
 # The --spill-pointers step is not optional: without it the MicroPython path
 # corrupts memory in this module.
@@ -212,6 +217,12 @@ $(VERIFIED):
 # crawling a directory listing. 300 bytes.
 $(MODLIST): ../tools/build-index.py $(PYTHON_MODULES) | $(DIST)
 	@python3 ../tools/build-index.py $(APOLLO_PATCHES) $@ --format=modules
+
+# The guide page. Depends on the renderer as well as the markdown, so editing
+# either rebuilds it. `static` copies guide.css alongside, like every other
+# stylesheet in public/.
+$(GUIDE): $(GUIDE_SRC) ../tools/make-guide.py | $(DIST)
+	@python3 ../tools/make-guide.py $(GUIDE_SRC) $@
 
 # Named as a prerequisite above, so a missing checkout stops here with this
 # message instead of failing deep inside emcc's file_packager.
