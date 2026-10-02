@@ -467,9 +467,10 @@ static int ends_body(const char *line)
            wildcard_match_icase(line, "PATH:*");
 }
 
-/* The prefixes the loader accepts inside a "[...]" header, in ITS order. Only
- * the first one is consumed, so "[DEFAULT:PYTHON:x]" is a DEFAULT code named
- * "PYTHON:x" -- which is why a type still cannot always be written down. */
+/* The prefixes the loader accepts inside a "[...]" header, in ITS order. They
+ * compose -- the loader reads them off the front one after another -- so a
+ * type can always be stated, whatever else the title already says. GROUP is
+ * the exception: the loader reads it on its own, before the others. */
 /* Arrays, not pointers: their addresses are compile-time constants, so the
  * table below can be initialised with them and identity comparisons on the
  * returned prefix are meaningful. */
@@ -486,16 +487,21 @@ static const char *const HEADER_PREFIXES[] = {
     P_DEFAULT, P_INFO, P_PYTHON, P_SW, P_BSD, P_LE, P_BE, P_GROUP
 };
 
-static const char *header_prefix(const char *line)
+/* The prefix `p` starts with, if any. `p` points at a title's contents -- just
+ * past the '[', or just past a prefix already consumed. */
+static const char *prefix_at(const char *p)
 {
-    if (line[0] != '[') return NULL;
-
     for (size_t i = 0; i < sizeof(HEADER_PREFIXES) / sizeof(*HEADER_PREFIXES); i++) {
         size_t n = strlen(HEADER_PREFIXES[i]);
-        if (strncasecmp(line + 1, HEADER_PREFIXES[i], n) == 0)
+        if (strncasecmp(p, HEADER_PREFIXES[i], n) == 0)
             return HEADER_PREFIXES[i];
     }
     return NULL;
+}
+
+static const char *header_prefix(const char *line)
+{
+    return (line[0] == '[') ? prefix_at(line + 1) : NULL;
 }
 
 /* The three prefixes that state a type, as opposed to marking a code default,
@@ -553,23 +559,35 @@ static int inferred_type(const char *body)
  * console builds whose engine predates these two prefixes: they would keep the
  * code but call it "SW:Max Money".
  *
- * A title whose single prefix slot is already spent on something else
- * ("[DEFAULT:...]") still cannot say a type; apctl_export_mismatches() is what
- * reports those.
+ * Prefixes compose, so whatever else the title already says is kept and the
+ * type is written alongside it: a retyped "[DEFAULT:Max Money]" comes back as
+ * "[DEFAULT:SW:Max Money]". Only a group heading is left alone -- the loader
+ * reads it on its own, ahead of the prefix chain, and it is not a code.
  */
 static int emit_header(ebuf_t *b, const char *line, int type, const char *body)
 {
-    const char *had  = header_prefix(line);
     const char *want = (type == inferred_type(body)) ? NULL : type_prefix(type);
 
-    if (line[0] != '[' || (had && !is_type_prefix(had)))
+    if (line[0] != '[' || header_prefix(line) == P_GROUP)
         return eb_str(b, line);
 
-    /* Skip whatever type prefix is there now; `want` replaces it, or nothing
-     * does when the body speaks for itself. */
-    const char *rest = line + 1 + (is_type_prefix(had) ? strlen(had) : 0);
+    if (!eb_str(b, "[")) return 0;
 
-    return eb_str(b, "[") && (want ? eb_str(b, want) : 1) && eb_str(b, rest);
+    /* Copy the chain as it stands, dropping whatever type it declares now:
+     * `want` states the type below, or nothing does when the body speaks for
+     * itself. Stop where the loader stops -- at the first word that is not a
+     * prefix, and at GROUP, which does not compose. */
+    const char *rest = line + 1;
+    for (const char *had; (had = prefix_at(rest)) != NULL && had != P_GROUP; ) {
+        size_t n = strlen(had);
+
+        if (!is_type_prefix(had) && !eb_add(b, rest, n))
+            return 0;
+
+        rest += n;
+    }
+
+    return (want ? eb_str(b, want) : 1) && eb_str(b, rest);
 }
 
 /* Does the file use CRLF? Length-bounded: patch bytes come straight off disk

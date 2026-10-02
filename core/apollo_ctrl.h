@@ -150,11 +150,11 @@ char *apctl_export_patch(apctl_session_t *s, const char *original, size_t origin
  *
  * This is not paranoia: the format cannot express every state the editor
  * allows. Each of the three types has a title prefix ("[SW:...]", "[BSD:...]",
- * "[PYTHON:...]"), but only ONE prefix is read per title -- so a code already
- * marked "[DEFAULT:...]" or "[INFO:...]" has no room left to state a type, and
- * neither has a group header. Rather than guess which cases those are, this
- * re-parses the exported text and compares, so a front-end can name exactly
- * which edits its file will not carry.
+ * "[PYTHON:...]") and prefixes compose, so a type can be stated alongside
+ * whatever else a title already says -- but a group header still cannot carry
+ * one. Rather than guess which cases those are, this re-parses the exported
+ * text and compares, so a front-end can name exactly which edits its file will
+ * not carry.
  */
 int apctl_export_mismatches(apctl_session_t *s, const char *exported, size_t len,
                             int *rows, int max);

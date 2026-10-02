@@ -205,6 +205,24 @@ float ps2icon_loop_seconds(const ps2icon_t *icon);
 void ps2icon_morph_at(const ps2icon_t *icon, float t,
                       int *shape_a, int *shape_b, float *morph);
 
+/**
+ * How far the model has turned at `t` seconds, in radians.
+ *
+ * These icons were shown on a turntable, and the rotation is not decoration:
+ * it is what shows a model to BE one. Gran Turismo's is a cube with the logo
+ * on its faces, and held still it is a flat square.
+ *
+ * It applies to EVERY icon, not only the ones that morph -- 1,898 of the 2,345
+ * in the save database carry a single shape and have nothing to morph, and
+ * those are exactly the ones a still frame misrepresents.
+ *
+ * The rate is icon3d.js's `state.yaw = t * 0.5`: one turn every 4*pi seconds,
+ * about 12.6. `t` is the same clock that drives ps2icon_morph_at().
+ */
+#define PS2ICON_SPIN_RATE  0.5f   /* radians a second; icon3d.js's `t * 0.5` */
+
+float ps2icon_yaw_at(float t);
+
 
 #ifdef __cplusplus
 }

@@ -62,12 +62,19 @@ int ps2icon_render(const ps2icon_t *icon, const ps2_IconSys_t *sys,
  * out for a given time. Positions are interpolated and nothing else, matching
  * the reference renderer's vertex shader.
  *
+ * `yaw` turns the model about its own Y axis, in radians -- the turntable the
+ * console's dashboard spun these on, which ps2icon_yaw_at() gives for a time.
+ * Pass 0 for a front-facing still. It matters more than it sounds: a model
+ * held still can be indistinguishable from a flat picture, which is the whole
+ * of what a Gran Turismo icon looks like without it.
+ *
  * The model is sized over EVERY shape rather than the pose being drawn, so an
  * animation cannot swim in and out of frame as it plays.
  */
 int ps2icon_render_at(const ps2icon_t *icon, const ps2_IconSys_t *sys,
 		      int size, int supersample, enum ps2render_bg bg,
-		      int shape_a, int shape_b, float morph, uint8_t **out);
+		      int shape_a, int shape_b, float morph, float yaw,
+		      uint8_t **out);
 
 #ifdef __cplusplus
 }

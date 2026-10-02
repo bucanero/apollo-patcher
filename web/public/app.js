@@ -750,10 +750,11 @@ function download() {
  * into the download, because patch files are not all UTF-8.
  *
  * A forced type is written into the title ([SW:...], [BSD:...], [PYTHON:...])
- * and survives a reload -- but a title carries only one marker, so a code
- * already flagged [DEFAULT:...] or [INFO:...] has no room to state one. The
- * engine re-parses what it just built and says which codes those are, and the
- * page passes that on rather than letting the user find out later.
+ * and survives a reload. Prefixes compose, so a code already flagged
+ * [DEFAULT:...] or [INFO:...] states its type alongside that; a group heading
+ * is the one title that cannot carry one. The engine re-parses what it just
+ * built and says which codes came back different, and the page passes that on
+ * rather than letting the user find out later.
  */
 async function savePatchFile() {
     if (!state.patchName) return;
@@ -788,8 +789,8 @@ async function savePatchFile() {
         appendLog([
             `Note: ${res.mismatches.length} code${res.mismatches.length === 1 ? '' : 's'} ` +
             `will read back differently from that file (${names}${
-                res.mismatches.length > 3 ? ', …' : ''}). A code title carries only one ` +
-            'marker, so one that is already [DEFAULT:…] or [INFO:…] cannot also state its type.',
+                res.mismatches.length > 3 ? ', …' : ''}). The .savepatch format cannot ` +
+            'express every edit, and a group heading cannot state a type at all.',
         ]);
         /* Say it where it will be seen: the log is collapsed by default. */
         $('log-panel').open = true;

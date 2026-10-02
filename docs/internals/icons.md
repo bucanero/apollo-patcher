@@ -103,26 +103,45 @@ supplies the three directional lights and the ambient term. `core/ps2/` is
 apollo-ps4's parser and software rasteriser, ported — so it needs no GL context
 of its own and works in the wasm build too.
 
-### It animates
+### It turns, and it morphs
 
-It is a model with up to eight morph targets, and the app plays them: the pose
-is re-rendered every frame, interpolating between shapes on the loop the file
-itself states. The morph is positions only, matching
+Two separate motions, and they are easy to confuse:
+
+| | what it is | which icons |
+|---|---|---|
+| **the turn** | the model rotating on its Y axis, `t * 0.5` radians a second — one revolution every 12.6s | **every** icon |
+| **the morph** | interpolating between the file's shapes on the loop it states | the 447 with more than one shape |
+
+The morph is positions only, matching
 [ps2vmc-tool](https://github.com/bucanero/ps2vmc-tool)'s WebGL renderer so the
-two agree about what a save looks like moving.
+two agree about what a save looks like moving. Both are driven by one clock,
+as they are there.
 
-Most icons do not move — 1,898 of the 2,345 in the save database carry a single
-shape — so `animated` is checked first and the common case costs nothing.
+**The turn is not decoration — it is what shows a model to be a model.** Gran
+Turismo 4's icon is 132 vertices in a single shape: a box with the logo on its
+faces. Held still it is a flat square, and nothing about it says otherwise.
+Rotate it and 42% of the pixels change by 45°, returning to within 0.01% at
+180° because the box is symmetric. That measurement *is* the argument for
+rotating: the icons with nothing to morph — 1,898 of the 2,345 in the save
+database carry a single shape — are exactly the ones a still frame
+misrepresents.
+
+This is also why the turn costs something where the morph did not. A
+single-shape icon used to be rendered once and never again; now every icon is
+re-posed every frame. Measured here at 128px/4x, one render is 1.8ms against a
+16ms frame — and the hover rule below caps it at one render per frame however
+many copies are on screen, which is the same ceiling the animated icons
+already lived under.
 
 ### Hovering shows it bigger
 
-Hovering the icon on the patcher screen shows it bigger, still animating, at
+Hovering the icon on the patcher screen shows it bigger, still turning, at
 256px against a transparent background. That is the closest this gets to
 what the save looked like on a television, and it is rendered only while the
 pointer is actually on it.
 
 While the panel is up the **small copy holds its pose**. Both are the same
-model, and animating both means rasterising it twice a frame — which a Windows
+model, and drawing both means rasterising it twice a frame — which a Windows
 7 machine on an Athlon XP 2400+ notices. The one being pointed at gets the
 animation.
 
