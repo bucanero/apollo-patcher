@@ -418,3 +418,12 @@ void ps2icon_morph_at(const ps2icon_t *icon, float t,
 	if (shape_b) *shape_b = icon->order[(i + 1) % n];
 	if (morph)   *morph   = pos - (float)i;
 }
+
+/* See ps2icon.h. The reference renderer spins at this rate whenever it is
+ * playing; its one non-spinning path is the still it paints into a tile at
+ * rest, which this repo has no equivalent of -- every icon shown here is a
+ * playing one. */
+float ps2icon_yaw_at(float t)
+{
+	return t * PS2ICON_SPIN_RATE;
+}

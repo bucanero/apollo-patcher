@@ -2848,15 +2848,19 @@ static const char* describe_container_icon(const SaveEntry& save) {
 static void icon_render_pose(int px, int ss, unsigned* tex) {
     if (!g_icon.model_valid) return;
 
+    // One clock drives both, exactly as it does in the reference renderer:
+    // the morph walks the shape list, the yaw turns the model on the spot.
+    const float t = float(ImGui::GetTime() - g_icon.began);
+
     int a = g_icon.model.still_shape, b = a;
     float morph = 0.0f;
     if (g_icon.animated)
-        ps2icon_morph_at(&g_icon.model,
-                         float(ImGui::GetTime() - g_icon.began), &a, &b, &morph);
+        ps2icon_morph_at(&g_icon.model, t, &a, &b, &morph);
 
     uint8_t* rgba = nullptr;
     if (ps2icon_render_at(&g_icon.model, g_icon.have_sys ? &g_icon.sys : nullptr,
-                          px, ss, PS2RENDER_BG_TRANSPARENT, a, b, morph, &rgba) != 0
+                          px, ss, PS2RENDER_BG_TRANSPARENT, a, b, morph,
+                          ps2icon_yaw_at(t), &rgba) != 0
         || !rgba)
         return;
 
@@ -2994,20 +2998,21 @@ static void icon_load_for(const SaveEntry& save) {
     else                icon_load(save.icon);
 
     //
-    // A model that moves is re-posed every frame. A PNG cannot move and a
-    // one-shape model has nowhere to move to, so neither costs anything.
+    // A model is re-posed every frame, whether or not it morphs: EVERY icon
+    // turns on its axis, and the ones with a single shape are exactly the
+    // ones a still frame misrepresents. A PNG cannot move and costs nothing.
     //
     // ...but NOT while the hover panel is up. Both copies are the same model
-    // and animating both means rasterising it twice a frame, which is real
-    // work on a slow machine -- an Athlon XP 2400+ shows it. The big one is
-    // what the pointer is pointed at, so it gets the animation and the small
-    // one holds its pose until the pointer leaves.
+    // and drawing both means rasterising it twice a frame, which is real work
+    // on a slow machine -- an Athlon XP 2400+ shows it. The big one is what
+    // the pointer is pointed at, so it keeps moving and the small one holds
+    // its pose until the pointer leaves. That cap is why this stayed
+    // affordable when the turn made every icon a moving one.
     //
     // Keyed on LAST frame's hover, because the panel is drawn after this
-    // runs. One frame of lag on an icon that loops over a second or more is
-    // not something an eye can find.
+    // runs. One frame of lag at this rate is not something an eye can find.
     //
-    if (g_icon.animated && g_icon.hover_frame < ImGui::GetFrameCount() - 1)
+    if (g_icon.hover_frame < ImGui::GetFrameCount() - 1)
         icon_render_pose(PSV_ICON_PX, PSV_ICON_SS, &g_icon.tex);
 }
 
@@ -3028,20 +3033,22 @@ static void icon_hover_panel() {
     g_icon.hover_frame = ImGui::GetFrameCount();
 
     // Rendered while hovered and dropped when the pointer leaves, so the cost
-    // is paid only while somebody is looking. A still is rendered once; an
-    // animated one is re-posed like the small copy.
-    if (!g_icon.big_tex || g_icon.animated)
-        icon_render_pose(PSV_ICON_BIG_PX, PSV_ICON_BIG_SS, &g_icon.big_tex);
+    // is paid only while somebody is looking -- and re-posed every frame,
+    // since it is turning even when it has no shapes to morph between.
+    icon_render_pose(PSV_ICON_BIG_PX, PSV_ICON_BIG_SS, &g_icon.big_tex);
     if (!g_icon.big_tex) return;
 
     ImGui::BeginTooltip();
     const float side = float(PSV_ICON_BIG_PX) * g_ui_scale;
     ImGui::Image((ImTextureID)(intptr_t)g_icon.big_tex, ImVec2(side, side));
+    // About the MORPH, not the turn: every icon turns, so saying so of each
+    // one would be noise. What differs between icons is whether they also
+    // change shape.
     if (g_icon.animated)
         ImGui::TextDisabled("%d shapes, %.1fs loop",
                             g_icon.model.shape_count, g_icon.loop);
     else
-        ImGui::TextDisabled("a still icon - this one does not animate");
+        ImGui::TextDisabled("one shape - this one turns but does not animate");
     ImGui::EndTooltip();
 }
 
@@ -3393,8 +3400,9 @@ static void do_save_patch()    { g_pending_save_patch = true; }
 // lines and option blocks all survive (see apctl_export_patch). It then
 // re-reads what it built and reports codes that would come back different.
 // A forced type is written as a title prefix ([SW:...], [BSD:...],
-// [PYTHON:...]) and survives, but only one prefix fits per title, so a code
-// already marked [DEFAULT:...] or [INFO:...] has no room to state one.
+// [PYTHON:...]) and survives. Prefixes compose, so a code already marked
+// [DEFAULT:...] or [INFO:...] states its type alongside that; a group heading
+// is the one title that cannot carry one.
 //
 static void save_patch_file(const std::string& path) {
     size_t len = 0;
@@ -3421,9 +3429,9 @@ static void save_patch_file(const std::string& path) {
 
     if (miss > 0) {
         snprintf(msg, sizeof msg,
-                 "[!] %d code(s) will read back differently from that file - a "
-                 "title can carry only one marker, so a code that is already "
-                 "[DEFAULT:...] or [INFO:...] cannot also state its type:", miss);
+                 "[!] %d code(s) will read back differently from that file - "
+                 "the .savepatch format cannot express every edit, and a group "
+                 "heading cannot state a type at all:", miss);
         g_app.append_log(msg);
 
         for (int i = 0; i < miss && i < 32; i++) {

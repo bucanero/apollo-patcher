@@ -198,8 +198,11 @@ look at the list and return.
 The game's name, its icon, the console and the title ID.
 
 **Hover the icon** to see it larger. For a PS2 save that means the actual 3D
-model the console showed, animating — which is the closest this gets to what
-the save looked like on a television.
+model the console showed, turning on its axis the way the dashboard spun it —
+which is the closest this gets to what the save looked like on a television.
+
+Every PS2 icon turns. Only some also change shape: most are a single model, and
+the turn is what shows them to be models at all rather than flat pictures.
 
 ### The target file — which file gets patched
 

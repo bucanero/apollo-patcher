@@ -52,6 +52,15 @@ static void m_multiply(const float *a, const float *b, float *o)
 				       a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
 }
 
+/* Column-major, same indices as icon3d.js's rotateY(). */
+static void m_rotate_y(float a, float *m)
+{
+	const float c = cosf(a), s = sinf(a);
+
+	m_identity(m);
+	m[0] = c; m[2] = -s; m[8] = s; m[10] = c;
+}
+
 static void m_perspective(float fovy, float aspect, float near, float far, float *m)
 {
 	float f = 1.0f / tanf(fovy / 2.0f), nf = 1.0f / (near - far);
@@ -275,12 +284,13 @@ int ps2icon_render(const ps2icon_t *icon, const ps2_IconSys_t *sys,
 	/* A still is the pose the icon rests in, and nothing to morph towards. */
 	return ps2icon_render_at(icon, sys, size, supersample, bg,
 				 icon ? icon->still_shape : 0,
-				 icon ? icon->still_shape : 0, 0.0f, out);
+				 icon ? icon->still_shape : 0, 0.0f, 0.0f, out);
 }
 
 int ps2icon_render_at(const ps2icon_t *icon, const ps2_IconSys_t *sys,
 		      int size, int supersample, enum ps2render_bg bg,
-		      int shape_a, int shape_b, float morph, uint8_t **out)
+		      int shape_a, int shape_b, float morph, float yaw,
+		      uint8_t **out)
 {
 	float model[16], view[16], proj[16], flip[16], sc[16], tr[16], tmp[16], mvp[16];
 	float mn[3], mx[3], center[3], radius = 1.0f;
@@ -329,8 +339,17 @@ int ps2icon_render_at(const ps2icon_t *icon, const ps2_IconSys_t *sys,
 	if (!(radius > 0.001f))
 		radius = 0.001f;
 
-	/* model = scale(1/radius) * flip * translate(-center); the still is drawn
-	 * with no yaw or pitch, so the rotations icon3d.js applies are identity. */
+	/*
+	 * model = rotateY(yaw) * scale(1/radius) * flip * translate(-center),
+	 * which is icon3d.js's chain with its rotateX(pitch) left at identity:
+	 * pitch is the drag the web viewer gives a mouse, and there is nothing
+	 * here to drag with.
+	 *
+	 * The yaw is NOT a view setting -- it is the turntable the dashboard
+	 * spun these on, and it is what shows a model to BE a model. Gran
+	 * Turismo's icon is a cube with the logo on its faces; held still it is
+	 * indistinguishable from a flat square.
+	 */
 	m_identity(flip);
 	flip[5] = -1.0f;                 /* PS2 model space is Y-down */
 	flip[10] = -1.0f;
@@ -341,6 +360,13 @@ int ps2icon_render_at(const ps2icon_t *icon, const ps2_IconSys_t *sys,
 
 	m_multiply(flip, tr, tmp);
 	m_multiply(sc, tmp, model);
+	if (yaw != 0.0f) {
+		float roty[16];
+
+		m_rotate_y(yaw, roty);
+		m_multiply(roty, model, tmp);
+		memcpy(model, tmp, sizeof model);
+	}
 
 	m_identity(view);
 	view[14] = CAM_Z;
