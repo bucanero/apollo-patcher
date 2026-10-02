@@ -304,9 +304,12 @@ static int export_misses(apctl_session_t *s, const char *original, size_t len,
  * What a .savepatch can and cannot state about a type, on a patch whose
  * headers are known exactly.
  *
- * All three types have a title prefix now ([SW:], [BSD:], [PYTHON:]), so a
- * forced type survives a save -- except on a title whose single prefix slot is
- * already spent, which is the one case the caller still has to be told about.
+ * All three types have a title prefix ([SW:], [BSD:], [PYTHON:]) and prefixes
+ * compose, so a forced type now survives a save whatever else the title
+ * already says -- including on a [DEFAULT:] or [INFO:] code, which used to be
+ * the one case the caller had to be told about. The round-trip check stays:
+ * a group heading still cannot state a type, and it catches anything else the
+ * format turns out not to carry.
  */
 static void check_format_limits(void)
 {
@@ -370,11 +373,24 @@ static void check_format_limits(void)
     free(out); out = NULL;
     apctl_revert_code(script);
 
-    /* The one case left: [DEFAULT:...] has spent its prefix slot. */
+    /* Prefixes compose, so a title that already says something can still say
+     * its type: this used to be the one case the exporter had to report. */
     apctl_set_code_text(preset, "print('hi')\n");
     apctl_set_code_type(preset, APOLLO_CODE_PYTHON);
-    CHECK("[DEFAULT:] -> Python still reported unwritable",
-          export_misses(s, PATCH, LEN, NULL) == 1);
+    CHECK("[DEFAULT:] -> Python survives", export_misses(s, PATCH, LEN, &out) == 0);
+    CHECK("...as [DEFAULT:PYTHON:Preselected]",
+          out && strstr(out, "[DEFAULT:PYTHON:Preselected]") != NULL);
+    CHECK("...keeping it pre-selected", out && strstr(out, "[PYTHON:DEFAULT:") == NULL);
+    free(out); out = NULL;
+    apctl_revert_code(preset);
+
+    /* And retyping it again replaces the type rather than stacking another. */
+    apctl_set_code_text(preset, "set [x]:0\n");
+    apctl_set_code_type(preset, APOLLO_CODE_SAVEWIZARD);
+    CHECK("[DEFAULT:] -> Save Wizard survives", export_misses(s, PATCH, LEN, &out) == 0);
+    CHECK("...as [DEFAULT:SW:Preselected]",
+          out && strstr(out, "[DEFAULT:SW:Preselected]") != NULL);
+    free(out); out = NULL;
     apctl_revert_code(preset);
 
     CHECK("reverted session exports clean", export_misses(s, PATCH, LEN, NULL) == 0);
