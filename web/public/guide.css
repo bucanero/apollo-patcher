@@ -1,0 +1,133 @@
+/* The user guide page — long-form prose, on style.css's tokens.
+ *
+ * Only what a generated document needs: the site's own shell (topbar,
+ * gh-button) comes from style.css, so this file is the reading column and
+ * nothing else. No rule here is used by any other page. */
+
+.guide {
+    max-width: 760px;              /* ~80 characters at this size; past that
+                                      the eye loses the start of the next line */
+    margin: 0 auto;
+    padding: 28px 20px 80px;
+    color: var(--ink);
+    font-size: 16px;
+    line-height: 1.65;
+}
+
+/* No border-top here: the guide writes its own `---` before every h2, and a
+   rule as well as a border drew two lines. The author's separator wins. */
+.guide h2 {
+    margin: 1.4em 0 0.6em;
+    font-size: 25px;
+    letter-spacing: -0.015em;
+}
+.guide h3 { margin: 1.9em 0 0.5em; font-size: 19px; }
+.guide h4 { margin: 1.6em 0 0.4em; font-size: 16px; color: var(--ink-dim); }
+
+.guide > h2:first-child { margin-top: 0; }
+
+.guide p { margin: 0.85em 0; }
+.guide ul, .guide ol { margin: 0.85em 0; padding-left: 1.5em; }
+.guide li { margin: 0.35em 0; }
+
+.guide a { color: var(--accent); }
+.guide a:hover { text-decoration: underline; }
+
+/* An anchor target scrolled to from the Contents list would otherwise land
+   with its heading flush against the viewport edge. */
+.guide :target { scroll-margin-top: 16px; }
+
+.guide code {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+    font-size: 0.88em;
+    /* Wrap rather than overflow: several code spans here are whole file paths
+       (~/Library/Application Support/apollo-patcher/settings.txt) and a phone
+       is narrower than they are.
+
+       break-word, NOT anywhere: `anywhere` also shrinks min-content width, so
+       inside a table cell it broke `.PSV` across two lines to narrow the
+       column. break-word only breaks a token that genuinely cannot fit. */
+    overflow-wrap: break-word;
+}
+
+.guide pre {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    overflow-x: auto;              /* a command line is not reflowable */
+    line-height: 1.5;
+}
+.guide pre code {
+    background: none;
+    border: 0;
+    padding: 0;
+    font-size: 0.9em;
+    overflow-wrap: normal;
+}
+
+/* Screenshots. Full width of the reading column, at their own aspect ratio;
+   the source is a 2x capture, so it stays sharp on a retina display and is
+   simply scaled down elsewhere. */
+.guide img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin: 1.4em 0 0.6em;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+}
+
+.guide figure { margin: 0; }
+
+.guide figcaption {
+    margin: 0 0 1.4em;
+    color: var(--ink-dim);
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.guide blockquote {
+    margin: 1.2em 0;
+    padding: 0.1em 1em;
+    border-left: 3px solid var(--accent);
+    background: var(--panel);
+    border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.guide hr {
+    margin: 2.4em 0;
+    border: 0;
+    border-top: 1px solid var(--line);
+}
+
+/* Tables carry most of the per-console detail, and several are wider than a
+   phone. The wrapper scrolls instead of the page. */
+.guide .table-wrap { overflow-x: auto; margin: 1.1em 0; }
+
+.guide table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 15px;
+}
+.guide th, .guide td {
+    border: 1px solid var(--line);
+    padding: 7px 10px;
+    text-align: left;
+    vertical-align: top;
+}
+.guide thead th { background: var(--panel-2); font-weight: 600; }
+.guide tbody tr:nth-child(even) { background: color-mix(in srgb, var(--panel-2) 45%, transparent); }
+
+/* An empty leading header cell is the guide's idiom for a row-label column;
+   it should read as a label column, not as a heading nobody wrote. */
+.guide tbody td:first-child { font-weight: 500; }
+
+@media (max-width: 600px) {
+    .guide { font-size: 15px; padding: 20px 16px 60px; }
+    .guide h2 { font-size: 21px; }
+    .guide h3 { font-size: 17px; }
+}

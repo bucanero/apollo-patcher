@@ -566,6 +566,14 @@ static void adopt_session(apctl_session_t* session,
 #define URL_LIB       "https://github.com/bucanero/apollo-lib"
 #define URL_PATCHES   "https://github.com/bucanero/apollo-patches"
 
+// The user guide, rendered onto the project's own site by web/Makefile from
+// docs/user-guide.md. The site rather than the repo's markdown because the
+// page reads better and is the same document either way -- and because the one
+// failure this menu item cannot help with is the app not starting at all, for
+// which the guide's troubleshooting section is also linked from the release
+// notes.
+#define URL_GUIDE     "https://bucanero.github.io/apollo-patcher/guide.html"
+
 // Hand a URL to the desktop. Every caller passes a compile-time constant from
 // the list above, so there is nothing to quote-escape.
 static void open_url(const char* url) {
@@ -627,6 +635,7 @@ static void draw_about() {
     ImGui::Spacing();
 
     ImGui::TextDisabled("Project");
+    link_row("User guide", URL_GUIDE);
     link_row("apollo-patcher (this app)", URL_PATCHER);
     link_row("apollo-lib (the engine)", URL_LIB);
     link_row("apollo-patches (the patch database)", URL_PATCHES);
@@ -737,7 +746,9 @@ static bool write_all(const std::string& path, const unsigned char* data, size_t
 // a save in place wants.
 //
 //   the PSP's Fuse ID    reaches the two PARAM.SFO hashes that savedata modes
-//                        4 and 6 derive from the console's own fuse
+//                        4 and 6 derive from the console's own fuse. Not
+//                        enforced by the console, but console-locked games
+//                        check it themselves (Gran Turismo does)
 //   the PS3's console ID reaches PARAM.SFO's second hash inside PARAM.PFD,
 //                        which is what binds a save to one machine
 //
@@ -4440,6 +4451,7 @@ static void draw_menu_bar(bool* want_quit) {
         if (ImGui::BeginMenu("Help")) {
             ImGui::MenuItem("Legend: SW=Save Wizard  BSD  PY=Python", nullptr, false, false);
             ImGui::Separator();
+            if (ImGui::MenuItem("User guide")) open_url(URL_GUIDE);
             if (ImGui::MenuItem("Project on GitHub")) open_url(URL_PATCHER);
             if (ImGui::MenuItem("About " APP_NAME "...")) g_want_about = true;
             ImGui::EndMenu();
@@ -4749,10 +4761,11 @@ static void draw_settings_window() {
     changed |= ImGui::InputText("Fuse ID", g_settings.fuse_hex, sizeof g_settings.fuse_hex,
                                     ImGuiInputTextFlags_CharsHexadecimal |
                                     ImGuiInputTextFlags_CharsUppercase);
-    hint("16 hex digits. Two PARAM.SFO hashes are derived from the console's own "
-         "fuse in savedata modes 4 and 6. A PSP loads a save whose values differ, "
-         "so this only matters for reproducing one console's output byte for "
-         "byte. Blank = FFFFFFFFFFFFFFFF.");
+    hint("16 hex digits, identifying one specific PSP. Most games load a save "
+         "whose value differs, but console-locked titles check the hashes it "
+         "derives and flag the save when they do not match - Gran Turismo does "
+         "- so those need the fuse ID of the console that will play the save. "
+         "Blank = FFFFFFFFFFFFFFFF.");
 
     ImGui::SeparatorText("PS3");
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
