@@ -286,6 +286,18 @@ save** section appears with everything filled in already.
   This is what repairs a save left half-done by a failed run.
 - **Resign PARAM.PFD** / **Resign PARAM.SFO** — regenerates the metadata's own
   hashes alone, leaving every file as it is. Needs no key.
+- **Decrypt all files** / **Re-encrypt all files** — the same thing for *every*
+  file the console wrapped, not just the target. A save often holds several,
+  and this saves re-picking the target for each one.
+
+  It is not all-or-nothing: each file is independent, so one that is missing
+  from the folder or has no key in the database is reported and skipped rather
+  than stopping the rest. The log names every file either way, and the last
+  line says how many of how many came through.
+
+  On the PS3 one thing differs — the key is per **file**, not per game, so a
+  save can have keys for some of its files and not others. `PARAM.SFO` is
+  listed in every `PARAM.PFD` but never encrypted, so it is left alone.
 
 ### If the app has no key for your game
 
