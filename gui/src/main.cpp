@@ -66,11 +66,26 @@
 #include <shellapi.h>   // ShellExecuteA for opening links; WIN32_LEAN_AND_MEAN excludes it
 #endif
 
-// Window icon (Windows/Linux only). Kept fully inside the guard so macOS pulls
-// in neither zlib nor the icon data.
-#ifndef __APPLE__
+// zlib is linked for the engine's own use either way; both the window icon and
+// the code-type icons are stored deflated and inflated at startup.
 #include <zlib.h>
+
+// Window icon (Windows/Linux only): macOS takes its icon from the bundle.
+#ifndef __APPLE__
 #include "icon_rgba_z.h"   // 256x256 RGBA, zlib-deflated (inflated at startup)
+#endif
+
+// The code-type icons, baked by tools/make-type-icons.py. Optional: without
+// them the type column falls back to the coloured letters it always had, and
+// the build does not care -- the same courtesy the patch bundle gets.
+// The header is always generated when Python is available, and defines
+// APOLLO_HAVE_TYPE_ICONS only when there was art to bake. Keyed that way round
+// on purpose: a header that only sometimes exists is one this file records no
+// dependency on, so adding art later rebuilt nothing and changed nothing.
+#if defined(__has_include)
+#  if __has_include("type_icons.h")
+#    include "type_icons.h"
+#  endif
 #endif
 
 static GLFWwindow* g_window = nullptr;   // for native dialog parenting
@@ -208,8 +223,12 @@ struct AppState {
     // above it does not already show. Only a FAILURE opens it, and only
     // alongside a message that says to look there.
     bool                show_log = false;
+    // The result box. Raised by Apply and by the whole-save decrypt passes --
+    // one modal, because they are the same thing to a reader: an action
+    // finished, here is what happened.
     bool                open_apply_popup = false;
     std::string         apply_msg;
+    std::string         apply_title = "Apply";   // the caption, not the identity
 
     // The database patch this target's own location names, or -1. Every title
     // ID in the database is exactly 9 characters and save folders are named
@@ -414,6 +433,117 @@ static ImVec4 type_color(int t) {
         case APOLLO_CODE_SAVEWIZARD: return ImVec4(0.45f, 0.70f, 0.95f, 1.0f); // blue
         default:                     return ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
     }
+}
+
+//
+// The three code-type icons as GL textures, or 0 each when they were not
+// baked in. Uploaded once, after the GL context exists; never freed, because
+// they live exactly as long as the window does.
+//
+// The three code-type icons as GL textures, with the slice of each texture
+// the real art occupies. Uploaded once, after the GL context exists; never
+// freed, because they live exactly as long as the window does.
+struct TypeIcon {
+    unsigned tex  = 0;
+    float    aspect = 1.0f;   // art width / art height
+    float    u1 = 1.0f, v1 = 1.0f;   // where the art ends inside the texture
+};
+static TypeIcon g_type_icon[3];   // [0] Save Wizard, [1] Python, [2] BSD
+
+#ifdef APOLLO_HAVE_TYPE_ICONS
+static TypeIcon upload_type_icon(const type_icon_t& ic) {
+    TypeIcon out;
+    std::vector<unsigned char> rgba(ic.rgba_bytes);
+    uLongf got = ic.rgba_bytes;
+
+    if (uncompress(rgba.data(), &got, ic.z, (uLong)ic.z_len) != Z_OK
+        || got != ic.rgba_bytes)
+        return out;
+
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    // tex_w/tex_h are powers of two; the art sits in the top-left corner and
+    // the UVs below cut the padding back off. OpenGL 1.1 takes nothing else.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ic.tex_w, ic.tex_h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+
+    out.tex    = tex;
+    out.aspect = float(ic.art_w) / float(ic.art_h);
+    out.u1     = float(ic.art_w) / float(ic.tex_w);
+    out.v1     = float(ic.art_h) / float(ic.tex_h);
+    return out;
+}
+#endif
+
+static void load_type_icons() {
+#ifdef APOLLO_HAVE_TYPE_ICONS
+    for (int i = 0; i < 3 && i < (int)(sizeof TYPE_ICONS / sizeof TYPE_ICONS[0]); i++)
+        g_type_icon[i] = upload_type_icon(TYPE_ICONS[i]);
+#endif
+}
+
+static const TypeIcon* type_icon_for(int t) {
+    int i;
+    switch (t) {
+        case APOLLO_CODE_SAVEWIZARD: i = 0; break;
+        case APOLLO_CODE_PYTHON:     i = 1; break;
+        case APOLLO_CODE_BSD:        i = 2; break;
+        default:                     return nullptr;
+    }
+    return g_type_icon[i].tex ? &g_type_icon[i] : nullptr;
+}
+
+
+//
+// The interpreter a code runs under, as a small picture rather than two
+// letters.
+//
+// The art is three PNGs baked into the binary by tools/make-type-icons.py,
+// the same way src/icon_rgba_z.h carries the app icon: decoded to RGBA and
+// zlib-deflated at build time, inflated and uploaded once at startup. A font
+// could not do this job -- the atlas is Noto Sans JP over a fixed set of
+// ranges and has no pictographs, ImWchar is 16 bits here so an emoji
+// codepoint cannot even be indexed, and colour emoji would want FreeType,
+// which this build does not use.
+//
+// Without the generated header the build still works and the column falls
+// back to the coloured letters it always had, the same courtesy the patch
+// bundle gets. That is also what a screen with no textures left shows.
+//
+static void draw_type_icon(int t, int flags) {
+    const float sz = ImGui::GetFontSize();
+
+    // A code the engine marked EMPTY is a heading or a separator in the patch
+    // rather than something that runs, so it has no interpreter to name. It
+    // still carries a type -- APOLLO_CODE_SAVEWIZARD is 1, which is what an
+    // unset one reads as -- so without this every one of them claimed to be a
+    // Save Wizard code.
+    if (flags & APOLLO_CODE_FLAG_EMPTY) {
+        ImGui::Dummy(ImVec2(sz, sz));
+        return;
+    }
+
+    if (const TypeIcon* ic = type_icon_for(t)) {
+        // Square art draws at the line height. Anything wider is fitted
+        // inside that square instead of widening the row: the column is a
+        // fixed 48px and art is not allowed to set its size, so a wide mark
+        // would otherwise be clipped with nothing saying why.
+        float w = sz * ic->aspect, h = sz;
+        if (ic->aspect > 1.0f) { w = sz; h = sz / ic->aspect; }
+        ImGui::Image((ImTextureID)(intptr_t)ic->tex, ImVec2(w, h),
+                     ImVec2(0.0f, 0.0f), ImVec2(ic->u1, ic->v1));
+    } else {
+        ImGui::TextColored(type_color(t), "%s", type_tag(t));
+    }
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", type_name(t));
 }
 
 // Returns true if every option group of a code has a selection (sel >= 0).
@@ -1171,10 +1301,11 @@ static bool psvcard_wrap_target() {
     return true;
 }
 
-static bool psp_unwrap_target() {
+static bool psp_unwrap_file(const std::string& path, const char* listed) {
     std::vector<unsigned char> sfo, enc;
-    if (!read_all(g_app.psp.sfo_path, sfo) || !read_all(g_app.target_path, enc)) {
-        g_app.append_log("[!] PSP: could not read the save or its PARAM.SFO");
+    if (!read_all(g_app.psp.sfo_path, sfo) || !read_all(path, enc)) {
+        g_app.append_log((std::string("[!] PSP: could not read ") + listed
+                          + " or its PARAM.SFO").c_str());
         return false;
     }
 
@@ -1187,30 +1318,36 @@ static bool psp_unwrap_target() {
         g_app.append_log((std::string("[!] PSP decrypt failed: ") + apsp_strerror(rc)).c_str());
         return false;
     }
-    if (!write_all(g_app.target_path, out.data(), got)) {
-        g_app.append_log("[!] PSP: could not write the decrypted save");
+    if (!write_all(path, out.data(), got)) {
+        g_app.append_log((std::string("[!] PSP: could not write ") + listed).c_str());
         return false;
     }
 
     char msg[256];
-    snprintf(msg, sizeof msg, "PSP layer removed: %zu -> %zu bytes", enc.size(), got);
+    snprintf(msg, sizeof msg, "PSP layer removed from %s: %zu -> %zu bytes",
+             listed, enc.size(), got);
     g_app.append_log(msg);
     return true;
+}
+
+static bool psp_unwrap_target() {
+    return psp_unwrap_file(g_app.target_path, g_app.psp.listed.c_str());
 }
 
 // ...and put it back, rewriting PARAM.SFO with it. Both files are written or
 // neither is: a save whose PARAM.SFO does not match its data does not load, so
 // a half-done wrap is worse than none.
-static bool psp_wrap_target() {
+static bool psp_wrap_file(const std::string& path, const char* listed) {
     std::vector<unsigned char> sfo, plain;
-    if (!read_all(g_app.psp.sfo_path, sfo) || !read_all(g_app.target_path, plain)) {
-        g_app.append_log("[!] PSP: could not read the save or its PARAM.SFO");
+    if (!read_all(g_app.psp.sfo_path, sfo) || !read_all(path, plain)) {
+        g_app.append_log((std::string("[!] PSP: could not read ") + listed
+                          + " or its PARAM.SFO").c_str());
         return false;
     }
 
     std::vector<unsigned char> out(apsp_encrypted_size(plain.size()));
     size_t got = 0;
-    int rc = apsp_encrypt(sfo.data(), sfo.size(), g_app.psp.listed.c_str(),
+    int rc = apsp_encrypt(sfo.data(), sfo.size(), listed,
                           plain.data(), plain.size(), g_app.psp.key,
                           out.data(), out.size(), &got);
     if (rc != APSP_OK) {
@@ -1226,16 +1363,128 @@ static bool psp_wrap_target() {
         g_app.append_log("[!] PSP: could not write PARAM.SFO");
         return false;
     }
-    if (!write_all(g_app.target_path, out.data(), got)) {
-        g_app.append_log("[!] PSP: could not write the encrypted save");
+    if (!write_all(path, out.data(), got)) {
+        g_app.append_log((std::string("[!] PSP: could not write ") + listed).c_str());
         return false;
     }
 
     char msg[256];
-    snprintf(msg, sizeof msg, "PSP layer restored: %zu -> %zu bytes, PARAM.SFO rewritten",
-             plain.size(), got);
+    snprintf(msg, sizeof msg,
+             "PSP layer restored on %s: %zu -> %zu bytes, PARAM.SFO rewritten",
+             listed, plain.size(), got);
     g_app.append_log(msg);
     return true;
+}
+
+static bool psp_wrap_target() {
+    return psp_wrap_file(g_app.target_path, g_app.psp.listed.c_str());
+}
+
+//
+// One action, one answer.
+//
+// The whole-save passes below build their own counts; this is the short form
+// for the single-file buttons beside them. Without it those buttons succeed in
+// silence, which reads as nothing having happened -- and on an action that
+// rewrites a save in place, "did that work?" is not a question to leave open.
+//
+// Failure also raises the log, because the box can only say that something
+// went wrong; the log says what.
+//
+static void report_action(const char *title, bool ok, const char *done) {
+    g_app.apply_msg   = ok ? std::string(done)
+                           : std::string(title) + " did not work.\n"
+                             "Check the log for details.";
+    g_app.apply_title = title;
+    g_app.open_apply_popup = true;
+    if (!ok) g_app.show_log = true;
+}
+
+//
+// Every file the console wrapped, in one pass.
+//
+// A save folder often holds more than one encrypted file -- the metadata's own
+// list is the authoritative answer to which -- and taking them off one at a
+// time means re-picking the target for each. This walks SAVEDATA_FILE_LIST
+// instead.
+//
+// Deliberately NOT all-or-nothing. Each file is independent, so one that is
+// missing from the folder or already plaintext should not stop the rest; the
+// count at the end says what actually happened, and the log names every file
+// either way. Stopping at the first failure would leave a half-done save with
+// no way to tell how far it got.
+//
+// `wrap` says which direction. The per-file functions log their own detail.
+//
+static void psp_all_files(bool wrap) {
+    std::vector<unsigned char> sfo;
+    if (!read_all(g_app.psp.sfo_path, sfo)) {
+        g_app.append_log("[!] PSP: could not read PARAM.SFO");
+        g_app.show_log = true;
+        g_app.apply_msg   = "PARAM.SFO could not be read, so nothing was changed.";
+        g_app.apply_title = wrap ? "Re-encrypt all files" : "Decrypt all files";
+        g_app.open_apply_popup = true;
+        return;
+    }
+
+    const int n = apsp_sfo_file_count(sfo.data(), sfo.size());
+    if (n <= 0) {
+        g_app.append_log("PSP: PARAM.SFO lists no encrypted files");
+        g_app.show_log = true;
+        g_app.apply_msg   = "PARAM.SFO lists no encrypted files, so there was nothing to do.";
+        g_app.apply_title = wrap ? "Re-encrypt all files" : "Decrypt all files";
+        g_app.open_apply_popup = true;
+        return;
+    }
+
+    const std::string folder = dir_of(g_app.psp.sfo_path);
+    int done = 0, failed = 0, absent = 0;
+
+    for (int i = 0; i < n; i++) {
+        char name[APSP_NAME_LEN + 1];
+        if (apsp_sfo_file_name(sfo.data(), sfo.size(), i, name, sizeof name) != APSP_OK)
+            continue;
+
+        const std::string path = folder + name;
+        if (!std::ifstream(path)) {
+            g_app.append_log((std::string("PSP: ") + name
+                              + " is listed but not in the folder - skipped").c_str());
+            absent++;
+            continue;
+        }
+        if (wrap ? psp_wrap_file(path, name) : psp_unwrap_file(path, name)) done++;
+        else                                                               failed++;
+    }
+
+    char msg[256];
+    snprintf(msg, sizeof msg, "PSP: %s %d of %d listed file%s%s%s",
+             wrap ? "re-encrypted" : "decrypted", done, n, n == 1 ? "" : "s",
+             absent ? ", some not in the folder" : "",
+             failed ? ", some failed - see above" : "");
+    g_app.append_log(msg);
+
+    // The log is raised only when something went wrong, like every other
+    // button here. A clean run says so in the result box instead -- an action
+    // the user asked for has to answer, and silence reads as "nothing
+    // happened" whether or not it did.
+    if (failed) g_app.show_log = true;
+
+    char box[320];
+    if (failed)
+        snprintf(box, sizeof box,
+                 "%s %d of %d file(s). %d failed.\nCheck the log for which, and why.",
+                 wrap ? "Re-encrypted" : "Decrypted", done, n, failed);
+    else
+        snprintf(box, sizeof box, "All done - %s %d of %d file(s)%s.",
+                 wrap ? "re-encrypted" : "decrypted", done, n,
+                 absent ? ", the rest were not in the folder" : "");
+    g_app.apply_msg   = box;
+    g_app.apply_title = wrap ? "Re-encrypt all files" : "Decrypt all files";
+    g_app.open_apply_popup = true;
+
+    // The target is one of these, so the checkbox has to follow or Apply would
+    // unwrap an already-plaintext file (or wrap one twice).
+    if (done) g_app.psp.wrap = wrap;
 }
 
 // Regenerate the PARAM.SFO hashes alone — what an already-plaintext save needs
@@ -1398,14 +1647,16 @@ static void ps3_detect() {
 }
 
 // Take the console's layer off the target file, in place.
-static bool ps3_unwrap_target() {
+static bool ps3_unwrap_file(const std::string& path, const char* listed,
+                            const unsigned char* sfid) {
     std::vector<unsigned char> pfd, enc;
-    if (!read_all(g_app.ps3.pfd_path, pfd) || !read_all(g_app.target_path, enc)) {
-        g_app.append_log("[!] PS3: could not read the save or its PARAM.PFD");
+    if (!read_all(g_app.ps3.pfd_path, pfd) || !read_all(path, enc)) {
+        g_app.append_log((std::string("[!] PS3: could not read ") + listed
+                          + " or its PARAM.PFD").c_str());
         return false;
     }
 
-    long long want = apfd_decrypted_size(pfd.data(), pfd.size(), g_app.ps3.listed.c_str());
+    long long want = apfd_decrypted_size(pfd.data(), pfd.size(), listed);
     if (want < 0) {
         g_app.append_log((std::string("[!] PS3 decrypt failed: ")
                           + apfd_strerror((int)want)).c_str());
@@ -1414,38 +1665,45 @@ static bool ps3_unwrap_target() {
 
     std::vector<unsigned char> out((size_t)want ? (size_t)want : 1);
     size_t got = 0;
-    int rc = apfd_decrypt(pfd.data(), pfd.size(), g_app.ps3.listed.c_str(),
-                          enc.data(), enc.size(), g_app.ps3.sfid,
+    int rc = apfd_decrypt(pfd.data(), pfd.size(), listed,
+                          enc.data(), enc.size(), sfid,
                           out.data(), out.size(), &got);
     if (rc != APFD_OK) {
         g_app.append_log((std::string("[!] PS3 decrypt failed: ") + apfd_strerror(rc)).c_str());
         return false;
     }
-    if (!write_all(g_app.target_path, out.data(), got)) {
-        g_app.append_log("[!] PS3: could not write the decrypted save");
+    if (!write_all(path, out.data(), got)) {
+        g_app.append_log((std::string("[!] PS3: could not write ") + listed).c_str());
         return false;
     }
 
     char msg[256];
-    snprintf(msg, sizeof msg, "PS3 layer removed: %zu -> %zu bytes", enc.size(), got);
+    snprintf(msg, sizeof msg, "PS3 layer removed from %s: %zu -> %zu bytes",
+             listed, enc.size(), got);
     g_app.append_log(msg);
     return true;
+}
+
+static bool ps3_unwrap_target() {
+    return ps3_unwrap_file(g_app.target_path, g_app.ps3.listed.c_str(), g_app.ps3.sfid);
 }
 
 // ...and put it back, rewriting PARAM.PFD with it. Both files are written or
 // neither is: a save whose PARAM.PFD does not match its data does not load, so
 // a half-done wrap is worse than none.
-static bool ps3_wrap_target() {
+static bool ps3_wrap_file(const std::string& path, const char* listed,
+                          const unsigned char* sfid) {
     std::vector<unsigned char> pfd, plain;
-    if (!read_all(g_app.ps3.pfd_path, pfd) || !read_all(g_app.target_path, plain)) {
-        g_app.append_log("[!] PS3: could not read the save or its PARAM.PFD");
+    if (!read_all(g_app.ps3.pfd_path, pfd) || !read_all(path, plain)) {
+        g_app.append_log((std::string("[!] PS3: could not read ") + listed
+                          + " or its PARAM.PFD").c_str());
         return false;
     }
 
     std::vector<unsigned char> out(apfd_encrypted_size(plain.size()));
     size_t got = 0;
-    int rc = apfd_encrypt(pfd.data(), pfd.size(), g_app.ps3.listed.c_str(),
-                          plain.data(), plain.size(), g_app.ps3.sfid,
+    int rc = apfd_encrypt(pfd.data(), pfd.size(), listed,
+                          plain.data(), plain.size(), sfid,
                           out.data(), out.size(), &got);
     if (rc != APFD_OK) {
         g_app.append_log((std::string("[!] PS3 encrypt failed: ") + apfd_strerror(rc)).c_str());
@@ -1459,16 +1717,116 @@ static bool ps3_wrap_target() {
         g_app.append_log("[!] PS3: could not write PARAM.PFD");
         return false;
     }
-    if (!write_all(g_app.target_path, out.data(), got)) {
-        g_app.append_log("[!] PS3: could not write the encrypted save");
+    if (!write_all(path, out.data(), got)) {
+        g_app.append_log((std::string("[!] PS3: could not write ") + listed).c_str());
         return false;
     }
 
     char msg[256];
-    snprintf(msg, sizeof msg, "PS3 layer restored: %zu -> %zu bytes, PARAM.PFD rewritten",
-             plain.size(), got);
+    snprintf(msg, sizeof msg,
+             "PS3 layer restored on %s: %zu -> %zu bytes, PARAM.PFD rewritten",
+             listed, plain.size(), got);
     g_app.append_log(msg);
     return true;
+}
+
+static bool ps3_wrap_target() {
+    return ps3_wrap_file(g_app.target_path, g_app.ps3.listed.c_str(), g_app.ps3.sfid);
+}
+
+//
+// Every protected file in the save, in one pass. See psp_all_files() above for
+// why this is not all-or-nothing.
+//
+// Two things differ from the PSP. PARAM.SFO is listed in every PARAM.PFD and
+// is never encrypted, so it is skipped by the same test ps3_detect() uses
+// rather than being offered and then failing. And the secure file ID is per
+// FILE here, not per title, so each one is looked up on its own -- a file the
+// key database does not cover is reported and passed over, which is the right
+// answer: guessing a key produces noise that looks like output.
+//
+static void ps3_all_files(bool wrap) {
+    std::vector<unsigned char> pfd;
+    if (!read_all(g_app.ps3.pfd_path, pfd)) {
+        g_app.append_log("[!] PS3: could not read PARAM.PFD");
+        g_app.show_log = true;
+        g_app.apply_msg   = "PARAM.PFD could not be read, so nothing was changed.";
+        g_app.apply_title = wrap ? "Re-encrypt all files" : "Decrypt all files";
+        g_app.open_apply_popup = true;
+        return;
+    }
+
+    const int n = apfd_entry_count(pfd.data(), pfd.size());
+    if (n <= 0) {
+        g_app.append_log("PS3: PARAM.PFD lists no files");
+        g_app.show_log = true;
+        g_app.apply_msg   = "PARAM.PFD lists no files, so there was nothing to do.";
+        g_app.apply_title = wrap ? "Re-encrypt all files" : "Decrypt all files";
+        g_app.open_apply_popup = true;
+        return;
+    }
+
+    const std::string folder = dir_of(g_app.ps3.pfd_path);
+    int done = 0, failed = 0, eligible = 0;
+
+    for (int i = 0; i < n; i++) {
+        char name[APFD_NAME_LEN] = "";
+        if (apfd_entry_name(pfd.data(), pfd.size(), i, name, sizeof name) != APFD_OK)
+            continue;
+        if (apfd_entry_has_builtin_key(name))      // PARAM.SFO: listed, never encrypted
+            continue;
+
+        eligible++;
+        const std::string path = folder + name;
+        if (!std::ifstream(path)) {
+            g_app.append_log((std::string("PS3: ") + name
+                              + " is listed but not in the folder - skipped").c_str());
+            continue;
+        }
+
+        unsigned char sfid[APFD_SFID_LEN];
+        std::string note;
+        if (!ps3_key_from_bundle(g_app.ps3.folder, name, sfid, note)) {
+            g_app.append_log((std::string("PS3: no key for ") + name + " (" + note
+                              + ") - skipped").c_str());
+            failed++;
+            continue;
+        }
+
+        if (wrap ? ps3_wrap_file(path, name, sfid) : ps3_unwrap_file(path, name, sfid)) done++;
+        else                                                                            failed++;
+    }
+
+    char msg[256];
+    if (eligible == 0)
+        snprintf(msg, sizeof msg,
+                 "PS3: this save has no encrypted files - PARAM.PFD lists %d, "
+                 "all unprotected", n);
+    else
+        snprintf(msg, sizeof msg, "PS3: %s %d of %d protected file%s%s",
+                 wrap ? "re-encrypted" : "decrypted", done, eligible,
+                 eligible == 1 ? "" : "s", failed ? ", some failed - see above" : "");
+    g_app.append_log(msg);
+    if (failed || eligible == 0) g_app.show_log = true;
+
+    char box[320];
+    if (eligible == 0)
+        snprintf(box, sizeof box,
+                 "This save has no encrypted files - PARAM.PFD lists %d, and "
+                 "none of them is protected.", n);
+    else if (failed)
+        snprintf(box, sizeof box,
+                 "%s %d of %d file(s). %d could not be done.\nCheck the log "
+                 "for which, and why - a missing key is the usual reason.",
+                 wrap ? "Re-encrypted" : "Decrypted", done, eligible, failed);
+    else
+        snprintf(box, sizeof box, "All done - %s %d of %d protected file(s).",
+                 wrap ? "re-encrypted" : "decrypted", done, eligible);
+    g_app.apply_msg   = box;
+    g_app.apply_title = wrap ? "Re-encrypt all files" : "Decrypt all files";
+    g_app.open_apply_popup = true;
+
+    if (done) g_app.ps3.wrap = wrap;
 }
 
 // Regenerate the PARAM.PFD signatures alone, leaving every entry as it is.
@@ -3353,6 +3711,7 @@ static void apply_selected() {
                  errors, applied);
     }
     g_app.apply_msg = msg;
+    g_app.apply_title = "Apply";
     g_app.open_apply_popup = true;
 }
 
@@ -3618,7 +3977,7 @@ static void draw_code_list() {
 
             // --- col 2: type badge ---
             ImGui::TableSetColumnIndex(2);
-            ImGui::TextColored(type_color(c->type), "%s", type_tag(c->type));
+            draw_type_icon(c->type, c->flags);
 
             // --- option dropdown rows (under the Code column) ---
             for (int g = 0; g < apctl_opt_group_count(c); ++g) {
@@ -4457,10 +4816,9 @@ static void draw_menu_bar(bool* want_quit) {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Help")) {
-            ImGui::MenuItem("Legend: SW=Save Wizard  BSD  PY=Python", nullptr, false, false);
-            ImGui::Separator();
             if (ImGui::MenuItem("User guide")) open_url(URL_GUIDE);
             if (ImGui::MenuItem("Project on GitHub")) open_url(URL_PATCHER);
+            ImGui::Separator();
             if (ImGui::MenuItem("About " APP_NAME "...")) g_want_about = true;
             ImGui::EndMenu();
         }
@@ -4527,27 +4885,28 @@ static void draw_psp_section() {
 
     ImGui::BeginDisabled(!g_app.psp.have_key);
     if (ImGui::Button("Decrypt only")) {
-        if (psp_unwrap_target()) g_app.psp.wrap = false;  // plaintext now; do not unwrap twice
-        else                     g_app.show_log = true;
+        const bool ok = psp_unwrap_target();
+        if (ok) g_app.psp.wrap = false;   // plaintext now; do not unwrap twice
+        report_action("Decrypt only", ok,
+                      "The console's layer is off, so the file on disk is now "
+                      "plaintext.\nThe unwrap box above has been turned off to "
+                      "match.");
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Take the console's layer off and leave it off, for editing\n"
                           "the file by hand. Turns the checkbox above off.");
     ImGui::SameLine();
     if (ImGui::Button("Re-encrypt")) {
-        if (psp_wrap_target()) g_app.psp.wrap = true;
-        else                   g_app.show_log = true;
+        const bool ok = psp_wrap_target();
+        if (ok) g_app.psp.wrap = true;
+        report_action("Re-encrypt", ok,
+                      "The console's layer is back on, and PARAM.SFO has been "
+                      "rewritten\nwith the file's new hash.");
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Put the console's layer back on, and rewrite PARAM.SFO\n"
                           "with the file's new hash.");
     ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    if (ImGui::Button("Resign PARAM.SFO")) { if (!psp_resign()) g_app.show_log = true; }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Recompute the PARAM.SFO hashes alone. Needs no game key -\n"
-                          "for a save that was never encrypted.");
 
     ImGui::Spacing();
 }
@@ -4622,66 +4981,35 @@ static void draw_ps3_section() {
 
     ImGui::BeginDisabled(!g_app.ps3.have_key);
     if (ImGui::Button("Decrypt only##ps3")) {
-        if (ps3_unwrap_target()) {
+        const bool ok = ps3_unwrap_target();
+        if (ok) {
             g_app.ps3.wrap = false;   // it is plaintext now; do not unwrap twice
             g_app.ps3.hash_checked = false;
-        } else {
-            g_app.show_log = true;
         }
+        report_action("Decrypt only", ok,
+                      "The console's layer is off, so the file on disk is now "
+                      "plaintext.\nThe unwrap box above has been turned off to "
+                      "match.");
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Take the console's layer off and leave it off, for editing\n"
                           "the file by hand. Turns the checkbox above off.");
     ImGui::SameLine();
     if (ImGui::Button("Re-encrypt##ps3")) {
-        if (ps3_wrap_target()) {
+        const bool ok = ps3_wrap_target();
+        if (ok) {
             g_app.ps3.wrap = true;
             g_app.ps3.hash_checked = false;
-        } else {
-            g_app.show_log = true;
         }
+        report_action("Re-encrypt", ok,
+                      "The console's layer is back on, and PARAM.PFD has been "
+                      "rewritten\nwith the file's new size and hash.");
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Put the console's layer back on, and rewrite PARAM.PFD\n"
                           "with the file's new size and hash.");
+
     ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    if (ImGui::Button("Resign PARAM.PFD")) { if (!ps3_resign()) g_app.show_log = true; }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Recompute the PARAM.PFD signatures alone. Needs no key -\n"
-                          "for a database whose entries something else edited.");
-
-    // Offered only once an account has been named in Settings. Listed before
-    // the console button because it is the one to reach for: an account ID
-    // travels between machines where an IDPS does not.
-    if (strlen(g_saved.account_hex) == APFD_ACCT_ID_LEN) {
-        ImGui::SameLine();
-        ImGui::BeginDisabled(g_app.ps3.sfo_path.empty());
-        if (ImGui::Button("Sign to your account"))
-            { if (!ps3_account_resign()) g_app.show_log = true; }
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(g_app.ps3.sfo_path.empty()
-                ? "No PARAM.SFO beside this save - the account fields live in it."
-                : "Write account %s into this save's PARAM.SFO and update\n"
-                  "PARAM.PFD to match, so it loads on any PS3 signed in to\n"
-                  "that account.", g_saved.account_hex);
-    }
-
-    // Offered only once a console has been named in Settings, because without
-    // one there is nothing to bind TO.
-    if (apfd_get_console(nullptr)) {
-        ImGui::SameLine();
-        ImGui::BeginDisabled(g_app.ps3.sfo_path.empty());
-        if (ImGui::Button("Re-bind to your console")) { if (!ps3_rebind()) g_app.show_log = true; }
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(g_app.ps3.sfo_path.empty()
-                ? "No PARAM.SFO beside this save - the hashes are taken over it."
-                : "Rewrite the PARAM.SFO hashes that name a console, so the save\n"
-                  "belongs to the one in Settings instead of the one it came from.");
-    }
 
     ImGui::Spacing();
 }
@@ -4905,6 +5233,141 @@ static void draw_byte_order() {
 // the target -- next to the controls that act on it, rather than back on the
 // list where nothing could be done about it.
 //
+//
+// What applies to the WHOLE save, as a column on the right of the header.
+//
+// Kept apart from the PSP/PS3 sections below on purpose, because they answer
+// different questions. Everything down there is about the one file the File
+// dropdown names: unwrap it, put it back, the key it needs. These are about
+// the save -- every encrypted file in it, the metadata covering all of them,
+// whose it is. Side by side, "Re-bind to your console" sat a few pixels from
+// "Decrypt only" and the two read as the same kind of thing.
+//
+// Drawn only for the two consoles that wrap saves themselves; nothing else
+// here has a whole-save action to offer.
+//
+static void draw_save_actions() {
+    const bool psp = g_app.psp.found, ps3 = g_app.ps3.found;
+    if (!psp && !ps3) return;
+
+    const bool can_sign   = ps3 && strlen(g_saved.account_hex) == APFD_ACCT_ID_LEN;
+    const bool can_rebind = ps3 && apfd_get_console(nullptr) != 0;
+    const char* resign    = psp ? "Resign PARAM.SFO" : "Resign PARAM.PFD";
+
+    // Width from the widest label actually on show, the way every column in
+    // this app is sized -- a fixed one would either clip "Re-bind to your
+    // console" or leave the short labels swimming.
+    const ImGuiStyle& st = ImGui::GetStyle();
+    float bw = 0.0f;
+    auto widen = [&](const char* s) {
+        const float w = ImGui::CalcTextSize(s).x;
+        if (w > bw) bw = w;
+    };
+    widen("Decrypt all files");
+    widen("Re-encrypt all files");
+    widen(resign);
+    if (can_sign)   widen("Sign to your account");
+    if (can_rebind) widen("Re-bind to your console");
+    bw += st.FramePadding.x * 2.0f + 8.0f;
+
+    const ImVec2 sz(bw, 0.0f);
+    const float  total = bw * 2.0f + st.ItemSpacing.x;
+    const float  room  = ImGui::GetWindowContentRegionMax().x
+                       - ImGui::GetWindowContentRegionMin().x;
+
+    // Only if there is somewhere to put it. On a narrow window the buttons
+    // fall below the header rather than overlapping the save's name.
+    if (room > total + bw) {
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - total);
+    } else {
+        ImGui::Spacing();
+    }
+
+    // Two across, filling left to right. Called immediately before each
+    // button, so only the ones actually drawn count towards the wrap -- the
+    // last two appear only once Settings names an account or a console.
+    int n = 0;
+    auto place = [&] { if (n++ & 1) ImGui::SameLine(); };
+
+    ImGui::BeginGroup();
+
+    ImGui::BeginDisabled(psp ? !g_app.psp.have_key : !g_app.ps3.have_key);
+    place();
+    if (ImGui::Button("Decrypt all files##wsa", sz)) {
+        if (psp) psp_all_files(false);
+        else   { ps3_all_files(false); g_app.ps3.hash_checked = false; }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Every file the console wrapped, not just the target.%s",
+                          ps3 ? "\nPARAM.SFO is listed but never encrypted, so it is\n"
+                                "left alone. Needs a key for each file." : "");
+    place();
+    if (ImGui::Button("Re-encrypt all files##wsa", sz)) {
+        if (psp) psp_all_files(true);
+        else   { ps3_all_files(true); g_app.ps3.hash_checked = false; }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Put the layer back on every file, and rewrite the\n"
+                          "metadata. The other half of \"Decrypt all files\".");
+    ImGui::EndDisabled();
+
+    place();
+    if (psp) {
+        if (ImGui::Button("Resign PARAM.SFO##wsa", sz))
+            report_action("Resign PARAM.SFO", psp_resign(),
+                          "PARAM.SFO's own hashes have been recomputed.\n"
+                          "No file in the save was touched.");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Recompute the PARAM.SFO hashes alone. Needs no game key -\n"
+                              "for a save that was never encrypted.");
+    } else {
+        if (ImGui::Button("Resign PARAM.PFD##wsa", sz))
+            report_action("Resign PARAM.PFD", ps3_resign(),
+                          "PARAM.PFD's signatures have been recomputed.\n"
+                          "Every entry in it was left as it was.");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Recompute the PARAM.PFD signatures alone. Needs no key -\n"
+                              "for a database whose entries something else edited.");
+    }
+
+    // Before the console button because it is the one to reach for: an account
+    // ID travels between machines where an IDPS does not.
+    if (can_sign) {
+        place();
+        ImGui::BeginDisabled(g_app.ps3.sfo_path.empty());
+        if (ImGui::Button("Sign to your account##wsa", sz))
+            report_action("Sign to your account", ps3_account_resign(),
+                          "This save is now signed to your account, in both\n"
+                          "places PARAM.SFO keeps it, and PARAM.PFD has been\n"
+                          "updated to match.");
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(g_app.ps3.sfo_path.empty()
+                ? "No PARAM.SFO beside this save - the account fields live in it."
+                : "Write account %s into this save's PARAM.SFO and update\n"
+                  "PARAM.PFD to match, so it loads on any PS3 signed in to\n"
+                  "that account.", g_saved.account_hex);
+    }
+
+    if (can_rebind) {
+        place();
+        ImGui::BeginDisabled(g_app.ps3.sfo_path.empty());
+        if (ImGui::Button("Re-bind to your console##wsa", sz))
+            report_action("Re-bind to your console", ps3_rebind(),
+                          "This save is now bound to the console in Settings,\n"
+                          "and PARAM.PFD has been re-signed around it.");
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(g_app.ps3.sfo_path.empty()
+                ? "No PARAM.SFO beside this save - the hashes are taken over it."
+                : "Rewrite the PARAM.SFO hashes that name a console, so the save\n"
+                  "belongs to the one in Settings instead of the one it came from.");
+    }
+
+    ImGui::EndGroup();
+}
+
 static void draw_save_header() {
     const SaveEntry& s = g_app.save;
 
@@ -4927,6 +5390,8 @@ static void draw_save_header() {
     ImGui::TextDisabled("%s", s.dir_name.c_str());
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", s.path.c_str());
     ImGui::EndGroup();
+
+    draw_save_actions();
 
     //
     // Only when there IS an icon and it would not read. A save with no
@@ -4975,7 +5440,10 @@ static void draw_save_header() {
         if (sfo_account && know_account && mine <= 0) {
             ImGui::SameLine();
             if (ImGui::SmallButton("Sign to your account"))
-                { if (!sfo_account_resign()) g_app.show_log = true; }
+                report_action("Sign to your account", sfo_account_resign(),
+                              "This save is now signed to your account. Exactly the\n"
+                              "eight bytes of ACCOUNT_ID changed - there is no\n"
+                              "signature here to keep in step.");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Write account %s into this save's sce_sys/param.sfo,\n"
                                   "so the console treats it as yours. Nothing else in the\n"
@@ -5179,8 +5647,13 @@ static void draw_patch_screen() {
     }
 
     // --- apply result popup ---
-    if (g_app.open_apply_popup) { ImGui::OpenPopup("Apply"); g_app.open_apply_popup = false; }
-    if (ImGui::BeginPopupModal("Apply", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    // ImGui hashes a window's whole name, so the caption is kept out of the
+    // identity with ### -- see "One window, one identity" in the docs. Without
+    // it, changing the title would make this a different popup and the open
+    // request would be raised against the wrong one.
+    if (g_app.open_apply_popup) { ImGui::OpenPopup("###result"); g_app.open_apply_popup = false; }
+    if (ImGui::BeginPopupModal((g_app.apply_title + "###result").c_str(), nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextUnformatted(g_app.apply_msg.c_str());
         ImGui::Spacing();
         if (ImGui::Button("OK", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
@@ -5883,6 +6356,7 @@ int main(int argc, char** argv) {
     apply_style();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL2_Init();
+    load_type_icons();   // needs the GL context, so not with the fonts above
 
     // The folder from last time, scanned in the background while the window
     // comes up. Costs nothing when there is none, and means the saves screen
