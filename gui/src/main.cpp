@@ -66,11 +66,26 @@
 #include <shellapi.h>   // ShellExecuteA for opening links; WIN32_LEAN_AND_MEAN excludes it
 #endif
 
-// Window icon (Windows/Linux only). Kept fully inside the guard so macOS pulls
-// in neither zlib nor the icon data.
-#ifndef __APPLE__
+// zlib is linked for the engine's own use either way; both the window icon and
+// the code-type icons are stored deflated and inflated at startup.
 #include <zlib.h>
+
+// Window icon (Windows/Linux only): macOS takes its icon from the bundle.
+#ifndef __APPLE__
 #include "icon_rgba_z.h"   // 256x256 RGBA, zlib-deflated (inflated at startup)
+#endif
+
+// The code-type icons, baked by tools/make-type-icons.py. Optional: without
+// them the type column falls back to the coloured letters it always had, and
+// the build does not care -- the same courtesy the patch bundle gets.
+// The header is always generated when Python is available, and defines
+// APOLLO_HAVE_TYPE_ICONS only when there was art to bake. Keyed that way round
+// on purpose: a header that only sometimes exists is one this file records no
+// dependency on, so adding art later rebuilt nothing and changed nothing.
+#if defined(__has_include)
+#  if __has_include("type_icons.h")
+#    include "type_icons.h"
+#  endif
 #endif
 
 static GLFWwindow* g_window = nullptr;   // for native dialog parenting
@@ -414,6 +429,117 @@ static ImVec4 type_color(int t) {
         case APOLLO_CODE_SAVEWIZARD: return ImVec4(0.45f, 0.70f, 0.95f, 1.0f); // blue
         default:                     return ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
     }
+}
+
+//
+// The three code-type icons as GL textures, or 0 each when they were not
+// baked in. Uploaded once, after the GL context exists; never freed, because
+// they live exactly as long as the window does.
+//
+// The three code-type icons as GL textures, with the slice of each texture
+// the real art occupies. Uploaded once, after the GL context exists; never
+// freed, because they live exactly as long as the window does.
+struct TypeIcon {
+    unsigned tex  = 0;
+    float    aspect = 1.0f;   // art width / art height
+    float    u1 = 1.0f, v1 = 1.0f;   // where the art ends inside the texture
+};
+static TypeIcon g_type_icon[3];   // [0] Save Wizard, [1] Python, [2] BSD
+
+#ifdef APOLLO_HAVE_TYPE_ICONS
+static TypeIcon upload_type_icon(const type_icon_t& ic) {
+    TypeIcon out;
+    std::vector<unsigned char> rgba(ic.rgba_bytes);
+    uLongf got = ic.rgba_bytes;
+
+    if (uncompress(rgba.data(), &got, ic.z, (uLong)ic.z_len) != Z_OK
+        || got != ic.rgba_bytes)
+        return out;
+
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    // tex_w/tex_h are powers of two; the art sits in the top-left corner and
+    // the UVs below cut the padding back off. OpenGL 1.1 takes nothing else.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ic.tex_w, ic.tex_h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+
+    out.tex    = tex;
+    out.aspect = float(ic.art_w) / float(ic.art_h);
+    out.u1     = float(ic.art_w) / float(ic.tex_w);
+    out.v1     = float(ic.art_h) / float(ic.tex_h);
+    return out;
+}
+#endif
+
+static void load_type_icons() {
+#ifdef APOLLO_HAVE_TYPE_ICONS
+    for (int i = 0; i < 3 && i < (int)(sizeof TYPE_ICONS / sizeof TYPE_ICONS[0]); i++)
+        g_type_icon[i] = upload_type_icon(TYPE_ICONS[i]);
+#endif
+}
+
+static const TypeIcon* type_icon_for(int t) {
+    int i;
+    switch (t) {
+        case APOLLO_CODE_SAVEWIZARD: i = 0; break;
+        case APOLLO_CODE_PYTHON:     i = 1; break;
+        case APOLLO_CODE_BSD:        i = 2; break;
+        default:                     return nullptr;
+    }
+    return g_type_icon[i].tex ? &g_type_icon[i] : nullptr;
+}
+
+
+//
+// The interpreter a code runs under, as a small picture rather than two
+// letters.
+//
+// The art is three PNGs baked into the binary by tools/make-type-icons.py,
+// the same way src/icon_rgba_z.h carries the app icon: decoded to RGBA and
+// zlib-deflated at build time, inflated and uploaded once at startup. A font
+// could not do this job -- the atlas is Noto Sans JP over a fixed set of
+// ranges and has no pictographs, ImWchar is 16 bits here so an emoji
+// codepoint cannot even be indexed, and colour emoji would want FreeType,
+// which this build does not use.
+//
+// Without the generated header the build still works and the column falls
+// back to the coloured letters it always had, the same courtesy the patch
+// bundle gets. That is also what a screen with no textures left shows.
+//
+static void draw_type_icon(int t, int flags) {
+    const float sz = ImGui::GetFontSize();
+
+    // A code the engine marked EMPTY is a heading or a separator in the patch
+    // rather than something that runs, so it has no interpreter to name. It
+    // still carries a type -- APOLLO_CODE_SAVEWIZARD is 1, which is what an
+    // unset one reads as -- so without this every one of them claimed to be a
+    // Save Wizard code.
+    if (flags & APOLLO_CODE_FLAG_EMPTY) {
+        ImGui::Dummy(ImVec2(sz, sz));
+        return;
+    }
+
+    if (const TypeIcon* ic = type_icon_for(t)) {
+        // Square art draws at the line height. Anything wider is fitted
+        // inside that square instead of widening the row: the column is a
+        // fixed 48px and art is not allowed to set its size, so a wide mark
+        // would otherwise be clipped with nothing saying why.
+        float w = sz * ic->aspect, h = sz;
+        if (ic->aspect > 1.0f) { w = sz; h = sz / ic->aspect; }
+        ImGui::Image((ImTextureID)(intptr_t)ic->tex, ImVec2(w, h),
+                     ImVec2(0.0f, 0.0f), ImVec2(ic->u1, ic->v1));
+    } else {
+        ImGui::TextColored(type_color(t), "%s", type_tag(t));
+    }
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", type_name(t));
 }
 
 // Returns true if every option group of a code has a selection (sel >= 0).
@@ -3618,7 +3744,7 @@ static void draw_code_list() {
 
             // --- col 2: type badge ---
             ImGui::TableSetColumnIndex(2);
-            ImGui::TextColored(type_color(c->type), "%s", type_tag(c->type));
+            draw_type_icon(c->type, c->flags);
 
             // --- option dropdown rows (under the Code column) ---
             for (int g = 0; g < apctl_opt_group_count(c); ++g) {
@@ -4457,10 +4583,9 @@ static void draw_menu_bar(bool* want_quit) {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Help")) {
-            ImGui::MenuItem("Legend: SW=Save Wizard  BSD  PY=Python", nullptr, false, false);
-            ImGui::Separator();
             if (ImGui::MenuItem("User guide")) open_url(URL_GUIDE);
             if (ImGui::MenuItem("Project on GitHub")) open_url(URL_PATCHER);
+            ImGui::Separator();
             if (ImGui::MenuItem("About " APP_NAME "...")) g_want_about = true;
             ImGui::EndMenu();
         }
@@ -5883,6 +6008,7 @@ int main(int argc, char** argv) {
     apply_style();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL2_Init();
+    load_type_icons();   // needs the GL context, so not with the fonts above
 
     // The folder from last time, scanned in the background while the window
     // comes up. Costs nothing when there is none, and means the saves screen

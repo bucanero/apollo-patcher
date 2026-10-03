@@ -127,6 +127,60 @@ if(APOLLO_BUNDLE)
     add_dependencies(apollo_patcher_gui_bundle apollo_patches_bundle)
 endif()
 
+# The code-type icons, baked into a header by tools/make-type-icons.py.
+#
+# Optional, like the patch bundle: with no art and no Python the configure step
+# says so and carries on, and the type column falls back to the coloured
+# letters.
+#
+# CONFIGURE_DEPENDS on the glob, for the same reason the patch bundle uses it.
+# An EXISTS check here is evaluated ONCE, at configure time, so dropping the
+# art in and building did nothing at all until cmake happened to re-run -- and
+# the symptom was an app that looked unchanged with nothing anywhere saying
+# why. The glob makes adding a file re-trigger configure on its own.
+set(_type_icon_dir "${CMAKE_CURRENT_SOURCE_DIR}/assets/icons")
+file(GLOB _type_icon_src CONFIGURE_DEPENDS "${_type_icon_dir}/type-*.png")
+
+set(_type_icon_needed
+    "${_type_icon_dir}/type-savewizard.png"
+    "${_type_icon_dir}/type-python.png"
+    "${_type_icon_dir}/type-bsd.png")
+
+set(_type_icons_present TRUE)
+foreach(_f ${_type_icon_needed})
+    if(NOT EXISTS "${_f}")
+        set(_type_icons_present FALSE)
+        get_filename_component(_missing "${_f}" NAME)
+        message(STATUS "Code-type icons: ${_missing} is missing")
+    endif()
+endforeach()
+
+if(Python3_EXECUTABLE)
+    set(_type_icons_h "${CMAKE_CURRENT_SOURCE_DIR}/src/type_icons.h")
+    add_custom_command(
+        OUTPUT  "${_type_icons_h}"
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_SOURCE_DIR}/tools/make-type-icons.py"
+                "${_type_icon_dir}" "${_type_icons_h}"
+        DEPENDS ${_type_icon_src} "${CMAKE_SOURCE_DIR}/tools/make-type-icons.py"
+        COMMENT "Baking the code-type icons"
+        VERBATIM)
+    target_sources(apollo_patcher_gui PRIVATE "${_type_icons_h}")
+    # Explicit, because main.cpp reaches the header through __has_include and
+    # a compile that ran while it was absent recorded no dependency on it.
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
+        PROPERTIES OBJECT_DEPENDS "${_type_icons_h}")
+    if(_type_icons_present)
+        message(STATUS "Code-type icons: baking from ${_type_icon_dir}")
+    else()
+        message(STATUS
+            "Code-type icons: incomplete, so the type column shows SW/PY/BSD "
+            "as text. See ${_type_icon_dir}/README.md")
+    endif()
+else()
+    message(STATUS "Code-type icons: no Python3, so the type column stays text.")
+endif()
+
 # The font, put where load_font() looks for it -- the same two places as the
 # patch database, for the same reason. Copied per file rather than declared as
 # a bundle resource, so the non-Apple builds get it beside the executable too.
