@@ -458,10 +458,66 @@ is one action and not two buttons.
 
 **PS4 and Vita** go through `sfo_account_resign()`, which is very much
 simpler: these are decrypted saves with the console's own layer already off,
-so there is no signature to keep in step. `asfo_set_account_id()` rewrites the
-value at its own eight bytes, so the file neither grows nor moves. Verified on
-real saves: the file stays 2,728 bytes and **exactly eight contiguous bytes
-change**, the `ACCOUNT_ID` and nothing else.
+so nothing has to be re-wrapped around the change.
+`asfo_set_account_id()` rewrites the value at its own eight bytes, so the file
+neither grows nor moves. Verified on real saves: the file stays 2,728 bytes and
+**exactly eight contiguous bytes change**, the `ACCOUNT_ID` and nothing else.
+
+#### What is deliberately not rewritten
+
+A PS4 `param.sfo` *does* carry a keyed hash, and it is worth being exact about
+why this leaves it alone. Inside the `PARAMS` blob sits `psid_hmac`:
+HMAC-SHA256 of the console's 16-byte OpenPSID under a published key, which is
+what apollo-ps4's `sfo_patch_psid()` computes. It binds the save to one
+console — and the console checks it **only for a save that names no account**.
+
+So the two are alternatives, the same way they are on a PS3:
+
+| the save | what binds it |
+|---|---|
+| names an account | `ACCOUNT_ID` |
+| names none | `PARAMS.psid_hmac`, to one console |
+
+Writing an account is therefore both the better fix and the one that takes the
+hash out of the picture, which is also why `asfo_set_account_id()` refuses an
+ID of zero: clearing the account would hand the save back to a console hash
+belonging to someone else's machine.
+
+The hash is written too, when Settings names an OpenPSID — the PS4 tab — so a
+save satisfies both checks and travels to a console that has not signed in to
+the account either. `asfo_ps4_set_psid_hmac()` is the same computation
+apollo-ps4's `sfo_patch_psid()` performs, HMAC-SHA256 under the published key
+over all sixteen bytes. Two more fields go with it, both of them what
+`patch_sfo()` writes: `PARAMS.user_id` from the PS4 tab, and `title_id_1`
+copied over `title_id_2`.
+
+All three are best-effort and all three are **PS4 only**. A save carrying no
+`PARAMS` is ordinary rather than a failure, an OpenPSID nobody has supplied is
+simply not written, and the account above is the part that matters. What is
+*not* optional is the console: the offsets below belong to the PS4 and land on
+other things elsewhere.
+
+| console | what lives at `PARAMS` + | |
+|---|---|---|
+| **PS4** | `0x04` `user_id`, `0x08` `psid_hmac`, `0x2C`/`0x3C` the title IDs | written here |
+| **PS3** | `0x30` the account ID | never written here |
+| **Vita** | `0x28` the title ID | never written here |
+
+Both of the others sit inside what is `psid_hmac` on a PS4, so a misrouted
+write would not fail — it would quietly replace a title ID or an account with
+32 bytes of hash. `sfo_account_resign()` gates on `ASAVE_PS4` for that reason,
+and `asfo_ps4_*` cannot do the check itself: nothing in the blob says which
+console wrote it.
+
+On the Vita the question does not arise anyway. apollo-vita's `patch_sfo()`
+has its `sfo_patch_psid()` and `sfo_patch_user_id()` calls commented out, so
+the account is all it writes either — which is what this matches.
+
+`core/test_save.c`'s `check_ps4_params()` covers the three writers: each
+writes its own field and leaves every other byte alone, a `PARAMS` shorter
+than `0x50` is refused outright rather than half-written, and the HMAC is
+checked against a vector computed with Python's `hmac`/`hashlib` rather than
+against mbedTLS agreeing with itself.
 
 That is also why there is no `.bak` for it — an eight-byte overwrite at a
 known offset is undone by signing the save back, and a stray `param.sfo.bak`

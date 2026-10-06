@@ -379,8 +379,23 @@ hand and re-signing all work for every save regardless.
 Open it with **File ▸ Settings…** — everything in it is optional, and every
 default is the safe one.
 
-### Save data
+It is laid out in tabs: **General** for the things that are not tied to one
+console, then **PSP**, **PS3** and **PS4** for each console's own identity.
+Fill in only the tab for the machine a save is going to. A tab whose field is
+half-typed is marked with a **!** so the warning at the foot of the window is
+never about something you cannot see.
 
+(There is no Vita tab. A Vita save needs nothing beyond the account on
+**General** — apollo-vita writes nothing else either.)
+
+### General
+
+- **Account ID (PSN)** (16 hex digits) — **usually the one field anybody
+  needs**, and the only one here that is not tied to a single console: the
+  same account ID goes into a PS3, PS4 or Vita save, so the save will load on
+  *any* machine that account has signed in to. Entering one makes **Sign to
+  your account** appear on PS3, PS4 and Vita saves, and turns on the **Owner**
+  column in the saves list.
 - **Byte order** — *Auto*, *Big-endian* or *Little-endian*. **Leave it on
   Auto.** PS3 saves are big-endian and nothing else Apollo covers is, and each
   patch in the database says which it is.
@@ -414,18 +429,31 @@ default is the safe one.
 
 ### PS3
 
-- **Account ID (PSN)** (16 hex digits) — **usually the one to reach for.** It
-  is written into the save itself, so the save will load on *any* PS3 that
-  account has signed in to. Entering one makes **Sign to your account** appear
-  on PS3, PS4 and Vita saves, and turns on the **Owner** column in the saves
-  list.
 - **Console ID (IDPS)** (32 hex digits, plus a user number) — binds a save to
-  one specific machine. Entering one makes **Re-bind to your console** appear.
+  one specific machine, for when the account is not the answer. Entering one
+  makes **Re-bind to your console** appear. The user number reaches only a
+  trophy folder's hashes.
 
-Both hex fields are all-or-nothing: a half-typed value is not "no value", it is
+### PS4
+
+Both fields are optional, and the account on **General** remains the thing to
+set first.
+
+- **OpenPSID** (32 hex digits) — your PS4's own ID. `param.sfo` carries a
+  hash of it, and the console checks that hash **only for a save that names no
+  account**. Fill this in and **Sign to your account** writes it as well, so
+  the save satisfies both checks and will also load on a console that has
+  never signed in to your account.
+- **User ID** — that console's local user number. `0` leaves whatever the save
+  already says.
+
+Together with the account these are exactly what apollo-ps4 writes when it
+re-signs a save on the console itself.
+
+Every hex field is all-or-nothing: a half-typed value is not "no value", it is
 one that would bind a save to the wrong machine, so **Save** stays disabled
-until each is either empty or complete. **Clear all** blanks all three ID
-fields at once.
+until each is either empty or complete. **Clear all** blanks every ID field at
+once.
 
 Leaving these blank keeps whatever a save already says, which is what patching
 one in place wants.
@@ -456,10 +484,17 @@ use either or both.
 Signing to an account is usually what people actually want, and it is the more
 portable of the two.
 
-Where the button appears differs by console, and deliberately. A PS3 save has a
-whole section for its encryption layer and the button sits there with the rest
-of it. A PS4 or Vita save has no such section — nothing about it is encrypted —
-so its button is in the header beside the account line.
+**On a PS4, the two are one action.** Its `param.sfo` carries a hash binding
+the save to one console, checked only for a save that names no account — so an
+account alone is already enough. Put your OpenPSID on the **PS4** tab in
+Settings as well and **Sign to your account** writes both, which is what
+apollo-ps4 does on the console; the save then satisfies either check. A Vita
+save needs only the account.
+
+Where the button appears differs by console, and deliberately. A PS3 save's
+button is in the grid at the top of the save header, with the other actions
+that affect the whole save. A PS4 or Vita save has no such grid — nothing about
+it is encrypted — so its button sits inline beside the account line.
 
 Both are single actions that keep the save internally consistent. Do not try to
 do half of one by hand.

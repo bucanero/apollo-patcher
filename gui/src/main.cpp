@@ -1104,10 +1104,16 @@ static bool write_all(const std::string& path, const unsigned char* data, size_t
 enum ByteOrder { BYTE_ORDER_AUTO = 0, BYTE_ORDER_BIG = 1, BYTE_ORDER_LITTLE = 2 };
 
 struct Settings {
-    char fuse_hex[17]    = "";     // 16 hex digits, or empty for the default
-    char console_hex[33] = "";     // 32 hex digits, or empty for "leave alone"
-    char account_hex[17] = "";     // 16 hex digits, the PSN account ID
-    int  user_id         = 1;
+    char fuse_hex[17]    = "";     // PSP:  16 hex digits, or empty for the default
+    char console_hex[33] = "";     // PS3:  32 hex digits (IDPS), or empty
+    char psid_hex[33]    = "";     // PS4:  32 hex digits (OpenPSID), or empty
+    // The PSN account ID, and the one field here that is not per-console: the
+    // same 64-bit number identifies the account on all of them. A PS3 writes
+    // it as sixteen ASCII hex digits and a PS4 or Vita as eight raw bytes,
+    // which is a difference in the file and not in the value.
+    char account_hex[17] = "";     // 16 hex digits
+    int  user_id         = 1;      // PS3: the user number, 1..n
+    int  ps4_user_id     = 0;      // PS4: the console-local user, 0 = leave alone
     int  byte_order      = BYTE_ORDER_AUTO;
     // Where the saves are. Not a property of a console like the two above,
     // but the same kind of thing: something the person tells the app once and
@@ -1201,8 +1207,14 @@ static void settings_load() {
 
         if (key == "psp_fuse_id")    snprintf(g_settings.fuse_hex, sizeof g_settings.fuse_hex, "%s", val.c_str());
         else if (key == "ps3_console_id") snprintf(g_settings.console_hex, sizeof g_settings.console_hex, "%s", val.c_str());
-        else if (key == "ps3_account_id") snprintf(g_settings.account_hex, sizeof g_settings.account_hex, "%s", val.c_str());
+        /* account_id was written as ps3_account_id before it was shared with
+         * the PS4 and Vita. Both are read so an existing file still loads;
+         * only the new name is written back. */
+        else if (key == "account_id" || key == "ps3_account_id")
+            snprintf(g_settings.account_hex, sizeof g_settings.account_hex, "%s", val.c_str());
         else if (key == "ps3_user_id")    g_settings.user_id = atoi(val.c_str());
+        else if (key == "ps4_psid")       snprintf(g_settings.psid_hex, sizeof g_settings.psid_hex, "%s", val.c_str());
+        else if (key == "ps4_user_id")    g_settings.ps4_user_id = atoi(val.c_str());
         else if (key == "saves_root")     g_settings.saves_root = val;
         else if (key == "byte_order")
             /* Named rather than numbered, so the file stays readable and an
@@ -1233,8 +1245,10 @@ static bool settings_store() {
         << "# Both are optional; blank keeps whatever a save already says.\n"
         << "psp_fuse_id=" << g_saved.fuse_hex << "\n"
         << "ps3_console_id=" << g_saved.console_hex << "\n"
-        << "ps3_account_id=" << g_saved.account_hex << "\n"
         << "ps3_user_id=" << g_saved.user_id << "\n"
+        << "ps4_psid=" << g_saved.psid_hex << "\n"
+        << "ps4_user_id=" << g_saved.ps4_user_id << "\n"
+        << "account_id=" << g_saved.account_hex << "\n"
         << "saves_root=" << g_saved.saves_root << "\n"
         << "byte_order=" << (g_saved.byte_order == BYTE_ORDER_BIG    ? "big"
                            : g_saved.byte_order == BYTE_ORDER_LITTLE ? "little"
@@ -2167,6 +2181,27 @@ static bool ps3_account_resign() {
 // offset is undone by signing the save back, and a stray param.sfo.bak inside
 // sce_sys is worse than the thing it guards against.
 //
+/*
+ * What the last sfo_account_resign() wrote. The account always; the three PS4
+ * PARAMS fields only when the save is a PS4's and Settings names them. The
+ * message afterwards reports what happened rather than what was attempted,
+ * because "signed to your account" and "signed and bound to your console" are
+ * different outcomes and the person needs to know which they got.
+ */
+// apfd_sfid_from_hex() fills APFD_SFID_LEN bytes; the PSID buffer below is
+// sized ASFO_PSID_LEN. They are both 16 and come from different headers, so
+// the compiler is asked to keep saying so.
+static_assert(APFD_SFID_LEN == ASFO_PSID_LEN,
+              "the 16-byte hex reader and the OpenPSID field have diverged");
+
+struct SfoResignResult {
+    bool psid  = false;   // the console hash
+    bool user  = false;   // the console-local user ID
+    bool title = false;   // title_id_1 copied over title_id_2
+    bool ps4   = false;   // was this the console those three apply to?
+};
+static SfoResignResult g_sfo_resign;
+
 static bool sfo_account_resign() {
     std::vector<unsigned char> sfo;
 
@@ -2204,6 +2239,36 @@ static bool sfo_account_resign() {
             : "[!] This save's ACCOUNT_ID is not the eight-byte kind a PS4 or Vita writes");
         return false;
     }
+
+    // The rest of what apollo-ps4's patch_sfo() writes, and PS4 ONLY.
+    //
+    // Every console calls a key PARAMS and none of them agree on what is in
+    // it: the PS4 fields written here land on a Vita's title ID and a PS3's
+    // account. apollo-vita leaves them alone for that reason -- its own
+    // patch_sfo() has these two calls commented out -- so this follows it.
+    //
+    // All three are best-effort. A save with no PARAMS at all is an ordinary
+    // thing rather than a failure, and the account above is the part that
+    // matters; a console that cannot be named simply is not written.
+    int wrote_psid = 0, wrote_user = 0, wrote_title = 0;
+    g_sfo_resign = SfoResignResult{};
+    g_sfo_resign.ps4 = (g_app.save.platform_id == ASAVE_PS4);
+    if (g_app.save.platform_id == ASAVE_PS4) {
+        wrote_title = asfo_ps4_sync_title_id(sfo.data(), sfo.size()) == ASFO_OK;
+
+        // apfd_sfid_from_hex() is the 16-byte hex reader this app already uses
+        // for things that are not secure file IDs -- the disc hash key goes
+        // through it too. An OpenPSID is the same shape: 32 digits, all or
+        // nothing, NUL-terminated.
+        uint8_t psid[ASFO_PSID_LEN];
+        if (apfd_sfid_from_hex(g_saved.psid_hex, psid) == APFD_OK)
+            wrote_psid = asfo_ps4_set_psid_hmac(sfo.data(), sfo.size(), psid) == ASFO_OK;
+
+        if (g_saved.ps4_user_id > 0)
+            wrote_user = asfo_ps4_set_user_id(sfo.data(), sfo.size(),
+                                              (uint32_t)g_saved.ps4_user_id) == ASFO_OK;
+    }
+
     if (!write_all(path, sfo.data(), sfo.size())) {
         g_app.append_log(("[!] Could not write " + path).c_str());
         return false;
@@ -2214,14 +2279,44 @@ static bool sfo_account_resign() {
     g_app.save.account = now;
     note_account_change(g_app.save.path, now);
 
-    char msg[256];
-    if (had && was)
-        snprintf(msg, sizeof msg, "param.sfo signed to account %s (was %016llx)",
-                 now, (unsigned long long)was);
-    else
-        snprintf(msg, sizeof msg, "param.sfo signed to account %s (it named none before)", now);
+    g_sfo_resign.psid  = wrote_psid  != 0;
+    g_sfo_resign.user  = wrote_user  != 0;
+    g_sfo_resign.title = wrote_title != 0;
+
+    char msg[320];
+    int n = had && was
+          ? snprintf(msg, sizeof msg, "param.sfo signed to account %s (was %016llx)",
+                     now, (unsigned long long)was)
+          : snprintf(msg, sizeof msg, "param.sfo signed to account %s (it named none before)",
+                     now);
+    if (n > 0 && n < (int)sizeof msg && (wrote_psid || wrote_user || wrote_title))
+        snprintf(msg + n, sizeof msg - n, "; also wrote%s%s%s",
+                 wrote_psid  ? " the console hash" : "",
+                 wrote_user  ? " the user ID"     : "",
+                 wrote_title ? " the title ID"    : "");
     g_app.append_log(msg);
     return true;
+}
+
+// Spelled out afterwards, from g_sfo_resign.
+static std::string sfo_resign_summary() {
+    std::string m = "This save is now signed to your account.";
+
+    if (g_sfo_resign.psid)
+        m += "\n\nIt is also bound to the console in Settings: param.sfo's\n"
+             "hash of that console's OpenPSID has been recomputed.";
+    else if (g_sfo_resign.ps4)
+        m += "\n\nparam.sfo also carries a hash binding the save to a console,\n"
+             "and that is left as it was - a PS4 checks it only for a save\n"
+             "naming no account, which this one no longer is. Fill in the\n"
+             "OpenPSID on the PS4 tab in Settings to write it as well.";
+
+    if (g_sfo_resign.user)
+        m += "\nThe console-local user ID was written too.";
+    if (g_sfo_resign.title)
+        m += "\nThe save's second title ID was brought into step with its first.";
+
+    return m;
 }
 
 static bool ps3_rebind() {
@@ -5288,63 +5383,120 @@ static void draw_settings_window() {
          "none of them changes how a save is READ - only what is written back. "
          "Left blank, a save keeps whatever it already says.");
 
-    ImGui::SeparatorText("Save data");
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
-    const char* ORDERS[] = { "Auto (detect from the patch)", "Big-endian", "Little-endian" };
-    bool order_changed = ImGui::Combo("Byte order", &g_settings.byte_order,
-                                      ORDERS, IM_ARRAYSIZE(ORDERS));
-    hint("Auto is right for every patch in the database. Force one only for a "
-         "loose patch file for a console the database does not cover.");
-    if (g_settings.byte_order != BYTE_ORDER_AUTO) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.65f, 0.35f, 1.0f));
-        ImGui::TextWrapped("Remembered across runs and applied to every save. The "
-                           "patcher screen says so when it disagrees with the patch "
-                           "you have open.");
-        ImGui::PopStyleColor();
-    }
-
-    ImGui::SeparatorText("PSP");
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
-    bool changed = order_changed;
-    changed |= ImGui::InputText("Fuse ID", g_settings.fuse_hex, sizeof g_settings.fuse_hex,
-                                    ImGuiInputTextFlags_CharsHexadecimal |
-                                    ImGuiInputTextFlags_CharsUppercase);
-    hint("16 hex digits, identifying one specific PSP. Most games load a save "
-         "whose value differs, but console-locked titles check the hashes it "
-         "derives and flag the save when they do not match - Gran Turismo does "
-         "- so those need the fuse ID of the console that will play the save. "
-         "Blank = FFFFFFFFFFFFFFFF.");
-
-    ImGui::SeparatorText("PS3");
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
-    changed |= ImGui::InputText("Console ID (IDPS)", g_settings.console_hex,
-                                sizeof g_settings.console_hex,
-                                ImGuiInputTextFlags_CharsHexadecimal |
-                                ImGuiInputTextFlags_CharsUppercase);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
-    changed |= ImGui::InputInt("User number", &g_settings.user_id);
-    if (g_settings.user_id < 1) g_settings.user_id = 1;
-
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
-    changed |= ImGui::InputText("Account ID (PSN)", g_settings.account_hex,
-                                sizeof g_settings.account_hex,
-                                ImGuiInputTextFlags_CharsHexadecimal);
-
-    hint("Two ways to re-sign a save, and the account is usually the one to "
-         "reach for: 16 hex digits, written into the save's own PARAM.SFO, so it "
-         "loads on ANY PS3 that account has signed in to. The console ID is 32 "
-         "hex digits and binds a save to one machine; the user number reaches "
-         "only a trophy folder's hashes. Name either and the PS3 section offers "
-         "the matching action.");
-
-    // The fields are all-or-nothing: a half-typed value is not "no value", it
-    // is one that would bind a save to the wrong machine, or the wrong account.
+    // The lengths every hex field must have when it is not empty, worked out
+    // before the tabs so a tab can be marked when something inside it is
+    // half-typed -- otherwise the warning at the foot of the window would
+    // point at a field on a page nobody can see.
+    //
+    // All-or-nothing on purpose: a half-typed value is not "no value", it is
+    // one that would bind a save to the wrong machine, or the wrong account.
     const size_t fuse_len = strlen(g_settings.fuse_hex);
     const size_t cid_len  = strlen(g_settings.console_hex);
+    const size_t psid_len = strlen(g_settings.psid_hex);
     const size_t acct_len = strlen(g_settings.account_hex);
-    const bool   ok = (fuse_len == 0 || fuse_len == 16)
-                   && (cid_len  == 0 || cid_len  == 32)
-                   && (acct_len == 0 || acct_len == APFD_ACCT_ID_LEN);
+    const bool   psp_ok   = fuse_len == 0 || fuse_len == 16;
+    const bool   ps3_ok   = cid_len  == 0 || cid_len  == 32;
+    const bool   ps4_ok   = psid_len == 0 || psid_len == 32;
+    const bool   gen_ok   = acct_len == 0 || acct_len == APFD_ACCT_ID_LEN;
+    const bool   ok       = psp_ok && ps3_ok && ps4_ok && gen_ok;
+
+    // "PSP" when the page is fine and "PSP !" when it is not, with the ID
+    // pinned by ### so the tab keeps its identity either way and does not
+    // reset to the first page as somebody types.
+    auto tab_label = [](const char* name, const char* id, bool fine) {
+        static char buf[4][32];
+        static int  n = 0;
+        char* b = buf[n = (n + 1) & 3];
+        snprintf(b, sizeof buf[0], "%s%s###%s", name, fine ? "" : " !", id);
+        return (const char*)b;
+    };
+
+    bool changed = false, order_changed = false;
+
+    if (ImGui::BeginTabBar("##settabs")) {
+
+        if (ImGui::BeginTabItem(tab_label("General", "gen", gen_ok))) {
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
+            changed |= ImGui::InputText("Account ID (PSN)", g_settings.account_hex,
+                                        sizeof g_settings.account_hex,
+                                        ImGuiInputTextFlags_CharsHexadecimal);
+            hint("16 hex digits, and the one setting here that is not tied to a "
+                 "single console: the same account ID is written into a PS3, PS4 "
+                 "or Vita save, and signing a save to it is what makes it load "
+                 "for you on any machine that account has signed in to. Usually "
+                 "the only field anybody needs.");
+
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+            const char* ORDERS[] = { "Auto (detect from the patch)", "Big-endian", "Little-endian" };
+            order_changed = ImGui::Combo("Byte order", &g_settings.byte_order,
+                                         ORDERS, IM_ARRAYSIZE(ORDERS));
+            changed |= order_changed;
+            hint("Auto is right for every patch in the database. Force one only for a "
+                 "loose patch file for a console the database does not cover.");
+            if (g_settings.byte_order != BYTE_ORDER_AUTO) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.65f, 0.35f, 1.0f));
+                ImGui::TextWrapped("Remembered across runs and applied to every save. The "
+                                   "patcher screen says so when it disagrees with the patch "
+                                   "you have open.");
+                ImGui::PopStyleColor();
+            }
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem(tab_label("PSP", "psp", psp_ok))) {
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+            changed |= ImGui::InputText("Fuse ID", g_settings.fuse_hex, sizeof g_settings.fuse_hex,
+                                        ImGuiInputTextFlags_CharsHexadecimal |
+                                        ImGuiInputTextFlags_CharsUppercase);
+            hint("16 hex digits, identifying one specific PSP. Most games load a save "
+                 "whose value differs, but console-locked titles check the hashes it "
+                 "derives and flag the save when they do not match - Gran Turismo does "
+                 "- so those need the fuse ID of the console that will play the save. "
+                 "Blank = FFFFFFFFFFFFFFFF.");
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem(tab_label("PS3", "ps3", ps3_ok))) {
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
+            changed |= ImGui::InputText("Console ID (IDPS)", g_settings.console_hex,
+                                        sizeof g_settings.console_hex,
+                                        ImGuiInputTextFlags_CharsHexadecimal |
+                                        ImGuiInputTextFlags_CharsUppercase);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+            changed |= ImGui::InputInt("User number", &g_settings.user_id);
+            if (g_settings.user_id < 1) g_settings.user_id = 1;
+            hint("32 hex digits binding a save to one PS3, for when the account on "
+                 "the General tab is not the answer. The user number reaches only a "
+                 "trophy folder's hashes. Name the console and the save header "
+                 "offers Re-bind to your console.");
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem(tab_label("PS4", "ps4", ps4_ok))) {
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
+            changed |= ImGui::InputText("OpenPSID", g_settings.psid_hex,
+                                        sizeof g_settings.psid_hex,
+                                        ImGuiInputTextFlags_CharsHexadecimal |
+                                        ImGuiInputTextFlags_CharsUppercase);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+            changed |= ImGui::InputInt("User ID", &g_settings.ps4_user_id);
+            if (g_settings.ps4_user_id < 0) g_settings.ps4_user_id = 0;
+            hint("32 hex digits identifying one PS4. param.sfo carries a hash of it, "
+                 "and the console checks that hash only for a save naming NO account "
+                 "- so the account on the General tab is still the thing to set "
+                 "first. Fill these in and signing a save writes them too, which is "
+                 "what apollo-ps4 does on the console itself. The user ID is that "
+                 "console's local user number; 0 leaves whatever the save says.");
+            ImGui::EndTabItem();
+        }
+
+        ImGui::EndTabBar();
+    }
 
     /* The order alone: apply just the byte order, not settings_apply(), which
      * would also push whatever half-typed hex is in the fields. */
@@ -5376,8 +5528,9 @@ static void draw_settings_window() {
     ImGui::SameLine();
     if (ImGui::Button("Clear all")) {
         g_settings.fuse_hex[0] = g_settings.console_hex[0] = '\0';
-        g_settings.account_hex[0] = '\0';
+        g_settings.psid_hex[0] = g_settings.account_hex[0] = '\0';
         g_settings.user_id = 1;
+        g_settings.ps4_user_id = 0;
         g_settings.byte_order = BYTE_ORDER_AUTO;
         settings_apply();
         g_saved = g_settings;
@@ -5388,9 +5541,10 @@ static void draw_settings_window() {
     if (!ok) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f), "%s",
-                           fuse_len && fuse_len != 16 ? "the Fuse ID needs 16 hex digits"
-                           : cid_len && cid_len != 32  ? "the console ID needs 32 hex digits"
-                                                       : "the account ID needs 16 hex digits");
+                           !gen_ok ? "General: the account ID needs 16 hex digits"
+                           : !psp_ok ? "PSP: the fuse ID needs 16 hex digits"
+                           : !ps3_ok ? "PS3: the console ID needs 32 hex digits"
+                                     : "PS4: the OpenPSID needs 32 hex digits");
     } else if (!g_settings.status.empty()) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.55f, 1.0f), "%s", g_settings.status.c_str());
@@ -5654,16 +5808,25 @@ static void draw_save_header() {
         }
         if (sfo_account && know_account && mine <= 0) {
             ImGui::SameLine();
-            if (ImGui::SmallButton("Sign to your account"))
-                report_action("Sign to your account", sfo_account_resign(),
-                              "This save is now signed to your account. Exactly the\n"
-                              "eight bytes of ACCOUNT_ID changed - there is no\n"
-                              "signature here to keep in step.");
+            if (ImGui::SmallButton("Sign to your account")) {
+                const bool ok = sfo_account_resign();
+                report_action("Sign to your account", ok,
+                              sfo_resign_summary().c_str());
+            }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Write account %s into this save's sce_sys/param.sfo,\n"
-                                  "so the console treats it as yours. Nothing else in the\n"
-                                  "save changes - there is no signature to keep in step.",
-                                  g_saved.account_hex);
+                                  "so the console treats it as yours.%s",
+                                  g_saved.account_hex,
+                                  s.platform_id != ASAVE_PS4
+                                  ? "" :
+                                  strlen(g_saved.psid_hex) == 32
+                                  ? "\nThe PS4 fields from Settings go in as well: the hash\n"
+                                    "of your console's OpenPSID, and the user ID. That is\n"
+                                    "the same set apollo-ps4 writes on the console."
+                                  : "\nparam.sfo also holds a hash binding the save to one\n"
+                                    "console. A PS4 checks it only for a save that names no\n"
+                                    "account, so it is left alone - name an OpenPSID on the\n"
+                                    "PS4 tab in Settings to have it written too.");
         }
     }
 
