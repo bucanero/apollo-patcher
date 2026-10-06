@@ -6114,19 +6114,25 @@ static void draw_patch_screen() {
             { std::lock_guard<std::mutex> lk(g_app.apply_mtx); stage = g_app.apply_stage; }
             ImGui::TextDisabled("%s", stage.c_str());
 
+            // The bar SWEEPS rather than fills, and carries the count as its
+            // overlay instead.
+            //
+            // A filled bar measures the wrong thing here. One code routinely
+            // takes longer than all the others together -- Max Payne 3's last
+            // code recompresses the save -- so the bar reaches 3/4 in a moment
+            // and then holds, perfectly still, for as long as the job actually
+            // takes. A still bar during the slow part is the exact impression
+            // this dialog exists to dispel. ImGui draws the overlay text in
+            // indeterminate mode too, so nothing is lost but the proportion,
+            // which was not worth much.
+            char over[64];
             const int done  = g_app.apply_step.load();
             const int total = g_app.apply_steps.load();
-            const float w   = ImGui::GetFontSize() * 22.0f;
-            if (total > 0) {
-                char over[64];
-                snprintf(over, sizeof over, "%d / %d", done, total);
-                ImGui::ProgressBar(float(done) / float(total), ImVec2(w, 0.0f), over);
-            } else {
-                // Nothing to count yet -- a bar that sweeps rather than fills,
-                // so the dialog still reads as working during the unwrap.
-                const float t = float(ImGui::GetTime());
-                ImGui::ProgressBar(-1.0f * t, ImVec2(w, 0.0f), "working");
-            }
+            if (total > 0) snprintf(over, sizeof over, "%d / %d", done, total);
+            else           snprintf(over, sizeof over, "working");
+
+            ImGui::ProgressBar(-1.0f * float(ImGui::GetTime()),
+                               ImVec2(ImGui::GetFontSize() * 22.0f, 0.0f), over);
             ImGui::Spacing();
             ImGui::TextDisabled("The log window shows each code as it runs.");
         } else {
