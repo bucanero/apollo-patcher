@@ -73,9 +73,7 @@
 // The app icon, 256x256 RGBA and zlib-deflated. Two users, and only one of
 // them is per-platform: glfwSetWindowIcon() dresses the title bar on Windows
 // and Linux (macOS takes the Dock icon from the .app bundle instead), while
-// the launch splash draws it everywhere. So the header is included
-// unconditionally -- it was #ifndef __APPLE__ when the title bar was its only
-// reader, and that cost the Mac build nothing because nothing referenced it.
+// the launch splash draws it everywhere.
 #include "icon_rgba_z.h"
 
 // The code-type icons, baked by tools/make-type-icons.py. Optional: without
