@@ -70,10 +70,13 @@
 // the code-type icons are stored deflated and inflated at startup.
 #include <zlib.h>
 
-// Window icon (Windows/Linux only): macOS takes its icon from the bundle.
-#ifndef __APPLE__
-#include "icon_rgba_z.h"   // 256x256 RGBA, zlib-deflated (inflated at startup)
-#endif
+// The app icon, 256x256 RGBA and zlib-deflated. Two users, and only one of
+// them is per-platform: glfwSetWindowIcon() dresses the title bar on Windows
+// and Linux (macOS takes the Dock icon from the .app bundle instead), while
+// the launch splash draws it everywhere. So the header is included
+// unconditionally -- it was #ifndef __APPLE__ when the title bar was its only
+// reader, and that cost the Mac build nothing because nothing referenced it.
+#include "icon_rgba_z.h"
 
 // The code-type icons, baked by tools/make-type-icons.py. Optional: without
 // them the type column falls back to the coloured letters it always had, and
@@ -740,6 +743,206 @@ static void link_row(const char* label, const char* url) {
     ImGui::PopID();
 }
 
+//
+// The launch screen: its own small window, before the main one exists on
+// screen.
+//
+// The window is created hidden, undecorated and splash-sized; the splash runs
+// its own short loop in it; then it is decorated, grown to the real size,
+// re-centred and shown. One GLFWwindow and one GL context throughout, so the
+// font atlas and the icon textures are uploaded once and survive the change --
+// a second window would need a second context, and ImGui's GLFW backend binds
+// to one window at a time.
+//
+// It carries no new art. src/icon_rgba_z.h already holds the icon for
+// glfwSetWindowIcon(), so this adds one 256x256 upload, deleted again when the
+// splash ends. On Windows and Linux that is the whole cost. On macOS the
+// header had been excluded outright -- the Dock icon comes from the .app
+// bundle and nothing else read it -- so the Mac binary grows by the deflated
+// icon, about 50KB, and that is the only place this is not free.
+//
+// It does NOT gate startup. The patch database is already open and the folder
+// scan from last session is already running on its own thread by the time the
+// splash appears, so the work that would make someone wait happens behind it
+// rather than after it. A click or Esc/Space/Enter ends it early.
+//
+#define SPLASH_HOLD  1.6f    // seconds fully opaque
+#define SPLASH_FADE  0.5f    // seconds fading out
+
+static GLuint g_splash_tex = 0;
+
+// Inflate the baked icon and hand it to GL. 256x256 is already a power of two,
+// so it needs none of the padding the save icons do.
+static bool splash_upload() {
+    std::vector<unsigned char> rgba(apollo_icon_rgba_size);
+    uLongf got = apollo_icon_rgba_size;
+    if (uncompress(rgba.data(), &got, apollo_icon_rgba_z, apollo_icon_rgba_z_len) != Z_OK
+        || got != apollo_icon_rgba_size)
+        return false;            // no icon, no splash; nothing else breaks
+
+    glGenTextures(1, &g_splash_tex);
+    glBindTexture(GL_TEXTURE_2D, g_splash_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, apollo_icon_w, apollo_icon_h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    return g_splash_tex != 0;
+}
+
+// What the splash says, and how big a window it needs. Measured from the font
+// that is actually loaded rather than guessed at, the same way every column in
+// the app is sized.
+struct SplashText {
+    char  ver[128];
+    float art, pad, gap, name_sz;
+    ImVec2 name_wh, ver_wh, copy_wh;
+    int   w, h;
+};
+// U+00A9 as a plain UTF-8 literal. It is in the atlas -- the default glyph
+// range covers Latin-1, which is also where the registered sign the game
+// names already use comes from -- and every toolchain here (clang, gcc,
+// mingw-gcc) reads and emits UTF-8 source by default, so the bytes survive.
+static const char* const SPLASH_COPY = "© 2020-2026 by Bucanero";
+
+static SplashText splash_measure() {
+    SplashText t;
+    ImFont*     ft   = ImGui::GetFont();
+    const float base = ImGui::GetFontSize();
+
+    snprintf(t.ver, sizeof t.ver, "Version %s", APOLLO_PATCHER_VERSION);
+
+    t.art     = base * 6.4f;
+    t.pad     = base * 1.6f;
+    t.gap     = base * 0.5f;
+    t.name_sz = base * 1.45f;
+    t.name_wh = ft->CalcTextSizeA(t.name_sz, FLT_MAX, 0.0f, APP_NAME);
+    t.ver_wh  = ft->CalcTextSizeA(base, FLT_MAX, 0.0f, t.ver);
+    t.copy_wh = ft->CalcTextSizeA(base, FLT_MAX, 0.0f, SPLASH_COPY);
+
+    t.w = int(std::max(std::max(t.name_wh.x, t.ver_wh.x),
+                       std::max(t.copy_wh.x, t.art)) + t.pad * 2.0f);
+    t.h = int(t.art + t.gap + t.name_wh.y + t.gap * 0.6f + t.ver_wh.y
+              + t.gap * 1.1f + t.copy_wh.y + t.pad * 2.0f);
+    return t;
+}
+
+static void splash_draw(const SplashText& t, float alpha) {
+    ImDrawList*          dl = ImGui::GetForegroundDrawList();
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImFont*              ft = ImGui::GetFont();
+    const float          base = ImGui::GetFontSize();
+
+    const ImVec2 p0 = vp->WorkPos;
+    const ImVec2 p1(p0.x + vp->WorkSize.x, p0.y + vp->WorkSize.y);
+    const float  cx = p0.x + vp->WorkSize.x * 0.5f;
+
+    auto fade = [&](float r, float g, float b, float a) {
+        return ImGui::GetColorU32(ImVec4(r, g, b, a * alpha));
+    };
+
+    // The window has no frame of its own, so the splash draws its own edge.
+    dl->AddRectFilled(p0, p1, fade(0.13f, 0.13f, 0.16f, 1.0f));
+    dl->AddRect(ImVec2(p0.x + 0.5f, p0.y + 0.5f), ImVec2(p1.x - 0.5f, p1.y - 0.5f),
+                fade(1, 1, 1, 0.16f), 0.0f, 0, 1.0f);
+
+    float y = p0.y + t.pad;
+    dl->AddImage((ImTextureID)(intptr_t)g_splash_tex,
+                 ImVec2(cx - t.art * 0.5f, y), ImVec2(cx + t.art * 0.5f, y + t.art),
+                 ImVec2(0, 0), ImVec2(1, 1), fade(1, 1, 1, 1));
+    y += t.art + t.gap;
+
+    dl->AddText(ft, t.name_sz, ImVec2(cx - t.name_wh.x * 0.5f, y),
+                fade(1, 1, 1, 1), APP_NAME);
+    y += t.name_wh.y + t.gap * 0.6f;
+
+    dl->AddText(ft, base, ImVec2(cx - t.ver_wh.x * 0.5f, y),
+                fade(0.75f, 0.78f, 0.85f, 1), t.ver);
+    y += t.ver_wh.y + t.gap * 1.1f;
+
+    dl->AddText(ft, base, ImVec2(cx - t.copy_wh.x * 0.5f, y),
+                fade(0.55f, 0.57f, 0.62f, 1), SPLASH_COPY);
+}
+
+static bool splash_dismissed() {
+    return ImGui::IsMouseClicked(ImGuiMouseButton_Left)
+        || ImGui::IsMouseClicked(ImGuiMouseButton_Right)
+        || ImGui::IsKeyPressed(ImGuiKey_Escape, false)
+        || ImGui::IsKeyPressed(ImGuiKey_Space,  false)
+        || ImGui::IsKeyPressed(ImGuiKey_Enter,  false);
+}
+
+// Put a window of this size in the middle of the monitor the user is on.
+static void centre_window(GLFWwindow* window, int w, int h) {
+    GLFWmonitor* mon = glfwGetPrimaryMonitor();
+    if (!mon) return;
+    int mx = 0, my = 0, mw = 0, mh = 0;
+    glfwGetMonitorWorkarea(mon, &mx, &my, &mw, &mh);
+    if (mw > 0 && mh > 0)
+        glfwSetWindowPos(window, mx + (mw - w) / 2, my + (mh - h) / 2);
+}
+
+// Run the splash to completion in `window`, which arrives hidden, undecorated
+// and any size. Returns false if the user closed it -- quitting during the
+// splash should quit, not fall through into the main window.
+static bool splash_run(GLFWwindow* window) {
+    if (!splash_upload()) return true;
+
+    // One frame's worth of ImGui state is needed before the font can be
+    // measured, so size and place the window from inside the loop, on the
+    // first pass, and only show it once there is something to show.
+    SplashText t{};
+    bool  placed = false;
+    float t0     = 0.0f;
+
+    while (!glfwWindowShouldClose(window)) {
+        glfwPollEvents();
+        ImGui_ImplOpenGL2_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+
+        if (!placed) {
+            t = splash_measure();
+            glfwSetWindowSize(window, t.w, t.h);
+            centre_window(window, t.w, t.h);
+            t0     = float(ImGui::GetTime());
+            placed = true;
+        }
+
+        const float age = float(ImGui::GetTime()) - t0;
+        float alpha = age < SPLASH_HOLD ? 1.0f
+                                        : 1.0f - (age - SPLASH_HOLD) / SPLASH_FADE;
+
+        // A click or a key takes the rest of the fade rather than cutting to
+        // nothing, so dismissing it does not read as a flicker.
+        if (age < SPLASH_HOLD && splash_dismissed()) {
+            t0    = float(ImGui::GetTime()) - SPLASH_HOLD;
+            alpha = 1.0f;
+        }
+        if (alpha <= 0.0f) { ImGui::EndFrame(); break; }
+
+        splash_draw(t, alpha);
+
+        ImGui::Render();
+        int fw, fh; glfwGetFramebufferSize(window, &fw, &fh);
+        glViewport(0, 0, fw, fh);
+        glClearColor(0.13f, 0.13f, 0.16f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+        glfwSwapBuffers(window);
+
+        // Shown only after the first frame has been drawn and swapped, so the
+        // window never appears as an empty rectangle.
+        if (!glfwGetWindowAttrib(window, GLFW_VISIBLE)) glfwShowWindow(window);
+    }
+
+    glDeleteTextures(1, &g_splash_tex);
+    g_splash_tex = 0;
+    return !glfwWindowShouldClose(window);
+}
+
 static bool g_want_about = false;
 
 static void draw_about() {
@@ -758,7 +961,7 @@ static void draw_about() {
     ImGui::Spacing();
     ImGui::Separator();
 
-    ImGui::Text("Copyright (C) 2020-2026 Damian Parrino (Bucanero)");
+    ImGui::Text("Copyright © 2020-2026 Damian Parrino (Bucanero)");
     ImGui::TextWrapped("Licensed under the GNU General Public License v3 or "
                        "later. This program comes with no warranty, to the "
                        "extent permitted by law.");
@@ -4843,9 +5046,10 @@ static void draw_menu_bar(bool* want_quit) {
 //
 // The checkbox is the main event and defaults to ON: a detected PSP save is
 // almost always one somebody wants patched, and doing it by hand means three
-// steps in the right order. The three buttons below are for the other case —
+// steps in the right order. The two buttons below are for the other case —
 // opening a save in the hex editor, or repairing one that a failed run left
-// decrypted.
+// decrypted. They act on the file chosen above them; the whole-save actions,
+// resigning among them, are in the grid at the top of the save header.
 //
 static void draw_psp_section() {
     if (!g_app.psp.found) return;
@@ -5426,10 +5630,12 @@ static void draw_save_header() {
                             "texture instead)");
     }
 
-    // Where signing happens differs by console: a PS3 save has a whole
-    // section below for its encryption layer and the button belongs there
-    // with the rest of it, while a PS4 or Vita save has no such section --
-    // nothing is encrypted -- so its one button belongs here.
+    // Where signing happens differs by console. A PS3 save's button is in the
+    // action grid at the top of this header, with the other whole-save
+    // actions -- hence "above", and hence the g_app.ps3.found test, because
+    // the grid is what draws that button and it is not there without it. A
+    // PS4 or Vita save has no grid (nothing about it is encrypted), so its one
+    // button sits inline on this line instead.
     const bool sfo_account = (s.platform_id == ASAVE_PS4 || s.platform_id == ASAVE_PSVITA);
     const bool know_account = strlen(g_saved.account_hex) == APFD_ACCT_ID_LEN;
 
@@ -5444,8 +5650,9 @@ static void draw_save_header() {
             ImGui::TextColored(mine > 0 ? ImVec4(0.55f, 0.85f, 0.60f, 1.0f)
                                         : ImVec4(0.95f, 0.75f, 0.45f, 1.0f), "%s",
                                mine > 0 ? "- yours"
-                                        : (sfo_account ? "- not yours"
-                                                       : "- not yours, sign it below"));
+                                        : (sfo_account || !g_app.ps3.found
+                                               ? "- not yours"
+                                               : "- not yours, sign it above"));
         }
         if (sfo_account && know_account && mine <= 0) {
             ImGui::SameLine();
@@ -6335,9 +6542,18 @@ int main(int argc, char** argv) {
     int win_w = 0, win_h = 0;
     default_window_size(&win_w, &win_h);   // needs glfwInit, for the monitor
 
-    // No context hints: GLFW's default legacy/compatibility context is what the
-    // fixed-function opengl2 backend needs, on every platform.
-    GLFWwindow* window = glfwCreateWindow(win_w, win_h, "Apollo Save Patcher", nullptr, nullptr);
+    // Born hidden and undecorated: the splash runs in this same window first,
+    // and it is grown, decorated and shown below once the splash is over. The
+    // size here is a placeholder -- splash_run() measures the real one from the
+    // loaded font. Hidden also means no empty rectangle flashes up while the
+    // font atlas and the icons are still uploading.
+    glfwWindowHint(GLFW_VISIBLE,   GLFW_FALSE);
+    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+
+    // No other context hints: GLFW's default legacy/compatibility context is
+    // what the fixed-function opengl2 backend needs, on every platform.
+    GLFWwindow* window = glfwCreateWindow(480, 420, "Apollo Save Patcher", nullptr, nullptr);
     if (!window) {
         fatal("Could not create an OpenGL context.\n\n"
               "This machine's graphics driver may not support OpenGL — this is "
@@ -6373,6 +6589,29 @@ int main(int argc, char** argv) {
     // shows a list rather than an empty one on every launch.
     if (!g_saved.saves_root.empty() && is_dir(g_saved.saves_root))
         scan_start(g_saved.saves_root);
+
+    // The splash, alone, in this window -- the scan above and the patch
+    // database are already working behind it. Closing it quits.
+    if (!splash_run(window)) {
+        g_sb.cancel = true;
+        scan_join();
+        g_app.close();
+        ImGui_ImplOpenGL2_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return 0;
+    }
+
+    // Now the real window: dressed, resizable, centred and visible.
+    glfwHideWindow(window);
+    glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_TRUE);
+    glfwSetWindowAttrib(window, GLFW_RESIZABLE, GLFW_TRUE);
+    glfwSetWindowSize(window, win_w, win_h);
+    centre_window(window, win_w, win_h);
+    glfwShowWindow(window);
+    glfwFocusWindow(window);
 
     bool want_quit = false;
     while (!glfwWindowShouldClose(window) && !want_quit) {
