@@ -102,5 +102,3 @@ Six consoles, with the console's own encryption handled where there is any:
   most numbers in the docs are measured over.
 - The three READMEs are orientation only; the implementation detail moved into
   the references above.
-
----
