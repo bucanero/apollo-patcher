@@ -749,8 +749,8 @@ static void draw_about() {
     if (!ImGui::BeginPopupModal("About", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
 
-    ImGui::Text(APP_NAME " %s", APOLLO_PATCHER_VERSION);
-    ImGui::TextDisabled("Apollo engine %s", APOLLO_LIB_VERSION);
+    ImGui::Text(APP_NAME " v%s", APOLLO_PATCHER_VERSION);
+    ImGui::TextDisabled("Apollo engine v%s", APOLLO_LIB_VERSION);
     ImGui::Spacing();
 
     ImGui::TextWrapped("Applies Apollo save patches - Save Wizard codes, BSD "
