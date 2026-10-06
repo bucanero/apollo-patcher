@@ -794,10 +794,11 @@ static bool splash_upload() {
 // that is actually loaded rather than guessed at, the same way every column in
 // the app is sized.
 struct SplashText {
-    char  ver[128];
-    float art, pad, gap, name_sz;
-    ImVec2 name_wh, ver_wh, copy_wh;
-    int   w, h;
+    char    ver[128];
+    ImFont *ft;
+    float   base, art, pad, gap, name_sz;
+    ImVec2  name_wh, ver_wh, copy_wh;
+    int     w, h;
 };
 // U+00A9 as a plain UTF-8 literal. It is in the atlas -- the default glyph
 // range covers Latin-1, which is also where the registered sign the game
@@ -805,10 +806,17 @@ struct SplashText {
 // mingw-gcc) reads and emits UTF-8 source by default, so the bytes survive.
 static const char* const SPLASH_COPY = "© 2020-2026 by Bucanero";
 
-static SplashText splash_measure() {
+/*
+ * Measured from the atlas, NOT from inside a frame: the splash window is
+ * created at exactly the size this returns and is never resized, because
+ * resizing a window that already owns a GL context is what broke the main one
+ * on Windows -- see the note in main(). ImFont::CalcTextSizeA needs only a
+ * built atlas, and costs no GL at all.
+ */
+static SplashText splash_measure(ImFont *ft, float base) {
     SplashText t;
-    ImFont*     ft   = ImGui::GetFont();
-    const float base = ImGui::GetFontSize();
+    t.ft   = ft;
+    t.base = base;
 
     snprintf(t.ver, sizeof t.ver, "Version %s", APOLLO_PATCHER_VERSION);
 
@@ -830,8 +838,8 @@ static SplashText splash_measure() {
 static void splash_draw(const SplashText& t, float alpha) {
     ImDrawList*          dl = ImGui::GetForegroundDrawList();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImFont*              ft = ImGui::GetFont();
-    const float          base = ImGui::GetFontSize();
+    ImFont*              ft = t.ft;
+    const float          base = t.base;
 
     const ImVec2 p0 = vp->WorkPos;
     const ImVec2 p1(p0.x + vp->WorkSize.x, p0.y + vp->WorkSize.y);
@@ -885,15 +893,11 @@ static void centre_window(GLFWwindow* window, int w, int h) {
 // Run the splash to completion in `window`, which arrives hidden, undecorated
 // and any size. Returns false if the user closed it -- quitting during the
 // splash should quit, not fall through into the main window.
-static bool splash_run(GLFWwindow* window) {
+static bool splash_run(GLFWwindow* window, const SplashText& t) {
     if (!splash_upload()) return true;
 
-    // One frame's worth of ImGui state is needed before the font can be
-    // measured, so size and place the window from inside the loop, on the
-    // first pass, and only show it once there is something to show.
-    SplashText t{};
-    bool  placed = false;
-    float t0     = 0.0f;
+    bool  started = false;
+    float t0      = 0.0f;
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -901,13 +905,7 @@ static bool splash_run(GLFWwindow* window) {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        if (!placed) {
-            t = splash_measure();
-            glfwSetWindowSize(window, t.w, t.h);
-            centre_window(window, t.w, t.h);
-            t0     = float(ImGui::GetTime());
-            placed = true;
-        }
+        if (!started) { t0 = float(ImGui::GetTime()); started = true; }
 
         const float age = float(ImGui::GetTime()) - t0;
         float alpha = age < SPLASH_HOLD ? 1.0f
@@ -6703,34 +6701,35 @@ int main(int argc, char** argv) {
     int win_w = 0, win_h = 0;
     default_window_size(&win_w, &win_h);   // needs glfwInit, for the monitor
 
-    // Born hidden and undecorated: the splash runs in this same window first,
-    // and it is grown, decorated and shown below once the splash is over. The
-    // size here is a placeholder -- splash_run() measures the real one from the
-    // loaded font. Hidden also means no empty rectangle flashes up while the
-    // font atlas and the icons are still uploading.
-    glfwWindowHint(GLFW_VISIBLE,   GLFW_FALSE);
-    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-
-    // No other context hints: GLFW's default legacy/compatibility context is
-    // what the fixed-function opengl2 backend needs, on every platform.
-    GLFWwindow* window = glfwCreateWindow(480, 420, "Apollo Save Patcher", nullptr, nullptr);
-    if (!window) {
-        fatal("Could not create an OpenGL context.\n\n"
-              "This machine's graphics driver may not support OpenGL — this is "
-              "common over Remote Desktop and in some virtual machines.\n\n"
-              "Fix: copy opengl32.dll from the \"softgl\" folder (shipped next to "
-              "this app) into the same folder as the .exe, then relaunch. See the "
-              "README for details.\n\n" + g_glfw_error);
-        glfwTerminate();
-        return 1;
-    }
-    g_window = window;
-    set_window_icon(window);   // Windows/Linux title-bar & taskbar icon
-    glfwSetDropCallback(window, drop_cb);
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
-
+    //
+    // The splash gets a window of its OWN, which is then destroyed before the
+    // real one is created. It is tempting to reuse one window -- undecorate it,
+    // run the splash, then dress it and grow it -- and that is what this did
+    // first. It is wrong on Windows.
+    //
+    // glfwSetWindowAttrib(GLFW_DECORATED) goes through updateWindowStyles(),
+    // which keeps the CLIENT rect and grows the frame around it, and
+    // glfwSetWindowSize() then resizes that client area. GLFW reports the new
+    // size correctly and so does glfwGetFramebufferSize(). What does not
+    // necessarily follow is the drawable behind a native ICD's HDC: on a
+    // Windows 7 machine with hardware OpenGL it stayed at the old size, while
+    // the viewport was set from the new one. GL's origin is bottom-left, so a
+    // viewport taller than the drawable loses the TOP of the image -- the menu
+    // bar vanished and everything sat a caption-height too high, with the mouse
+    // still landing where ImGui thought the rows were. A software opengl32.dll
+    // sizes its buffer per frame and showed nothing wrong, which is exactly the
+    // pattern a stale drawable produces.
+    //
+    // So: no window is resized or restyled after a context exists on it. The
+    // main window below is created the way it always was, at its final size and
+    // decoration, and the GL state it needs is built fresh for it.
+    //
+    //
+    // The ImGui context, and the fonts, BEFORE either window: the splash is
+    // made exactly the size its own text needs, and working that out needs the
+    // atlas and nothing else. Doing it first is what lets the splash window be
+    // created at its final size instead of being resized into it.
+    //
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -6741,35 +6740,95 @@ int main(int argc, char** argv) {
 
     ImGui::StyleColorsDark();
     apply_style();
-    ImGui_ImplGlfw_InitForOpenGL(window, true);
-    ImGui_ImplOpenGL2_Init();
-    load_type_icons();   // needs the GL context, so not with the fonts above
 
-    // The folder from last time, scanned in the background while the window
-    // comes up. Costs nothing when there is none, and means the saves screen
-    // shows a list rather than an empty one on every launch.
+    // Rasterise now rather than on the backend's first frame. It is CPU work --
+    // no GL is current yet, and none is needed.
+    io.Fonts->Build();
+    ImFont* const ui_font = io.Fonts->Fonts.empty() ? nullptr : io.Fonts->Fonts[0];
+    const SplashText splash_txt = ui_font
+        ? splash_measure(ui_font, ui_font->FontSize)
+        : SplashText{};
+
+    glfwWindowHint(GLFW_VISIBLE,   GLFW_FALSE);
+    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+
+    // No other context hints: GLFW's default legacy/compatibility context is
+    // what the fixed-function opengl2 backend needs, on every platform.
+    GLFWwindow* splash = glfwCreateWindow(splash_txt.w > 0 ? splash_txt.w : 320,
+                                          splash_txt.h > 0 ? splash_txt.h : 280,
+                                          "Apollo Save Patcher", nullptr, nullptr);
+    if (!splash) {
+        fatal("Could not create an OpenGL context.\n\n"
+              "This machine's graphics driver may not support OpenGL — this is "
+              "common over Remote Desktop and in some virtual machines.\n\n"
+              "Fix: copy opengl32.dll from the \"softgl\" folder (shipped next to "
+              "this app) into the same folder as the .exe, then relaunch. See the "
+              "README for details.\n\n" + g_glfw_error);
+        ImGui::DestroyContext();
+        glfwTerminate();
+        return 1;
+    }
+    centre_window(splash, splash_txt.w, splash_txt.h);
+    glfwMakeContextCurrent(splash);
+    glfwSwapInterval(1);
+
+    // The atlas lives in the ImGui context, which outlives both windows; only
+    // its GPU copy belongs to a context, and the backend remakes that on its
+    // next frame after each Init.
+    ImGui_ImplGlfw_InitForOpenGL(splash, true);
+    ImGui_ImplOpenGL2_Init();
+
+    // The folder from last time, scanned in the background while the splash is
+    // up. Costs nothing when there is none, and means the saves screen shows a
+    // list rather than an empty one on every launch.
     if (!g_saved.saves_root.empty() && is_dir(g_saved.saves_root))
         scan_start(g_saved.saves_root);
 
-    // The splash, alone, in this window -- the scan above and the patch
-    // database are already working behind it. Closing it quits.
-    if (!splash_run(window)) {
+    const bool carry_on = ui_font ? splash_run(splash, splash_txt) : true;
+
+    ImGui_ImplOpenGL2_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    glfwDestroyWindow(splash);
+
+    // Closing the splash quits, rather than falling through into the app.
+    if (!carry_on) {
         g_sb.cancel = true;
         scan_join();
         g_app.close();
-        ImGui_ImplOpenGL2_Shutdown();
-        ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
-        glfwDestroyWindow(window);
         glfwTerminate();
         return 0;
     }
 
-    // Now the real window: dressed, resizable, centred and visible.
-    glfwHideWindow(window);
-    glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_TRUE);
-    glfwSetWindowAttrib(window, GLFW_RESIZABLE, GLFW_TRUE);
-    glfwSetWindowSize(window, win_w, win_h);
+    // The real window, created once at the size and decoration it keeps.
+    // Hidden only so it can be centred before it is seen -- a creation hint
+    // and a move, neither of which disturbs the drawable the way a resize or
+    // a style change does.
+    glfwDefaultWindowHints();
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    GLFWwindow* window = glfwCreateWindow(win_w, win_h, "Apollo Save Patcher",
+                                          nullptr, nullptr);
+    if (!window) {
+        fatal("Could not create the application window.\n\n" + g_glfw_error);
+        ImGui::DestroyContext();
+        glfwTerminate();
+        return 1;
+    }
+    g_window = window;
+    set_window_icon(window);   // Windows/Linux title-bar & taskbar icon
+    glfwSetDropCallback(window, drop_cb);
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(1);
+
+    // A second context, so everything that lives in one is built again: the
+    // backend remakes the font texture on its next frame, and the type icons
+    // are re-uploaded here. The splash's own texture was freed before its
+    // context went away.
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL2_Init();
+    load_type_icons();   // needs the GL context, so not with the fonts above
+
     centre_window(window, win_w, win_h);
     glfwShowWindow(window);
     glfwFocusWindow(window);
