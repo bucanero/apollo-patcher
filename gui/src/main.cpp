@@ -6743,7 +6743,15 @@ int main(int argc, char** argv) {
 
     // Rasterise now rather than on the backend's first frame. It is CPU work --
     // no GL is current yet, and none is needed.
-    io.Fonts->Build();
+    //
+    // ONLY if nobody has built it already. load_mono_font() builds the atlas
+    // itself and then writes the 10x20 raster glyphs straight into the packed
+    // pixels, and a second Build() calls ClearTexData() and memsets a fresh
+    // buffer -- which silently empties all 95 of them. The hex editor and the
+    // code viewer then draw nothing at all, while the UI font, which the
+    // rebuild re-rasterises from its TTF, looks perfectly fine.
+    if (!io.Fonts->IsBuilt())
+        io.Fonts->Build();
     ImFont* const ui_font = io.Fonts->Fonts.empty() ? nullptr : io.Fonts->Fonts[0];
     const SplashText splash_txt = ui_font
         ? splash_measure(ui_font, ui_font->FontSize)
