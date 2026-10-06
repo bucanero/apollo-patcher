@@ -31,6 +31,11 @@ A native Dear ImGui + GLFW application for Windows, macOS and Linux.
   re-encrypt every file the console wrapped, resign `PARAM.SFO` / `PARAM.PFD`,
   sign the save to your account, and re-bind it to your console. Each reports
   what it did in a message box rather than only in the log.
+- **Applying runs on its own thread**, behind a dialog that names the code
+  being applied and counts them off. A code that recompresses a save takes
+  real time on an older machine, and a single-threaded apply painted nothing
+  while it worked — long enough for Windows to grey the window out. The same
+  dialog then shows the result.
 - **View and edit data.** A hex editor over the target file, the raw
   `.savepatch` text, and per-code editing, with the result writable back out as
   a `.savepatch`.

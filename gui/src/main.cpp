@@ -231,6 +231,30 @@ struct AppState {
     std::string         apply_msg;
     std::string         apply_title = "Apply";   // the caption, not the identity
 
+    // Applying runs on a thread. A Max Payne 3 code recompresses the save, and
+    // on an older machine that is many seconds during which a single-threaded
+    // apply painted nothing -- the window stopped redrawing and Windows greyed
+    // it out, so the one state the app could not show was the one it spends
+    // longest in.
+    //
+    // The worker owns the session and the engine for the duration; the UI
+    // thread reads only what is listed here, and stops drawing anything that
+    // reads a code's BODY (the viewers) until it is done. The code list itself
+    // stays on screen: its name/file pointers belong to the session and live
+    // until apctl_close(), which cannot happen while this is running.
+    std::thread         apply_worker;
+    std::atomic<bool>   applying{false};     // a worker exists and is running
+    std::atomic<bool>   apply_finished{false};
+    std::atomic<int>    apply_step{0};       // codes attempted so far
+    std::atomic<int>    apply_steps{0};      // codes to attempt, 0 = unknown
+    std::mutex          apply_mtx;           // guards apply_stage
+    std::string         apply_stage;         // what it is doing right now
+    bool                apply_want_log = false;  // worker writes, collector applies
+    // A rebuilt .PSV whose file sizes need re-reading. Deferred rather than
+    // done in the worker, because that walk crosses g_sb.saves -- which
+    // scan_collect() reassigns on the UI thread when a folder scan lands.
+    std::string         apply_rebuilt_psv;
+
     // The database patch this target's own location names, or -1. Every title
     // ID in the database is exactly 9 characters and save folders are named
     // <TITLEID><suffix> ("ULUS10391", "ULJM05500DATA00", "UCUS98751_DATA01"),
@@ -3860,8 +3884,15 @@ static void load_patch_from_db(int index) {
     adopt_session(s, label, e->name, e->platform);
 }
 
-static void apply_selected() {
-    if (!g_app.session) return;
+// The one line the busy dialog shows under its title. Set from the worker,
+// read by the UI, so it goes through a lock -- it changes a handful of times
+// per apply, where the progress counters change per code and are atomics.
+static void apply_stage(const std::string& what) {
+    std::lock_guard<std::mutex> lk(g_app.apply_mtx);
+    g_app.apply_stage = what;
+}
+
+static void apply_run() {
     const char* target = g_app.target_path.empty() ? nullptr : g_app.target_path.c_str();
 
     //
@@ -3876,16 +3907,16 @@ static void apply_selected() {
     const std::string backup_of = g_app.psvcard.found ? g_app.psvcard.path : g_app.target_path;
 
     if (g_app.backup && target) {
+        apply_stage("Backing up the target file...");
         if (backup_file(backup_of))
             g_app.append_log(("Backup written: " + backup_of + ".bak").c_str());
         else
             g_app.append_log("[!] Backup failed (target unreadable?) — aborting.");
         if (!std::ifstream(backup_of + ".bak")) {
-            g_app.show_log = true;
+            g_app.apply_want_log = true;
             g_app.apply_msg = "Could not back up the target file, so nothing was patched.\n"
                               "Check the log for details.";
-            g_app.open_apply_popup = true;
-            return;
+                return;
         }
     }
 
@@ -3893,7 +3924,7 @@ static void apply_selected() {
     // apctl_apply() for every code (apollo_free_var_list() clears it).
     const bool be = effective_big_endian();
     apctl_set_big_endian(be ? 1 : 0);
-    g_app.log.clear();
+    { std::lock_guard<std::mutex> lk(g_app.log_mtx); g_app.log.clear(); }
     g_app.append_log(be ? "=== Using big-endian data mode"
                         : "=== Using host (little-endian) data mode");
     if (g_settings.byte_order != BYTE_ORDER_AUTO && be != g_app.be_detected)
@@ -3912,7 +3943,6 @@ static void apply_selected() {
             : "This is a PS3 save and its secure file ID is not known yet, so nothing "
               "was patched.\nSupply the ID, or untick the unwrap box if the file is "
               "already decrypted.";
-        g_app.open_apply_popup = true;
         return;
     }
 
@@ -3930,27 +3960,34 @@ static void apply_selected() {
     const bool container = g_app.psvcard.found && g_app.psvcard.wrap && target;
 
     if (native) {
+        apply_stage(std::string("Removing the ") + console + "'s own encryption...");
         g_app.append_log((std::string("=== Removing the ") + console
                           + "'s own encryption").c_str());
         if (!(psp ? psp_unwrap_target() : ps3_unwrap_target())) {
-            g_app.show_log = true;
+            g_app.apply_want_log = true;
             g_app.apply_msg = std::string("The ") + console + " layer would not come off, "
                               "so nothing was patched.\nCheck the log for details.";
-            g_app.open_apply_popup = true;
-            return;
+                return;
         }
     }
 
     int applied = 0, errors = 0;
+    int wanted = 0;
+    for (size_t i = 0; i < g_app.selected.size(); ++i) if (g_app.selected[i]) wanted++;
+    g_app.apply_steps = wanted;
+    g_app.apply_step  = 0;
+
     for (int i = 0; i < apctl_code_count(g_app.session); ++i) {
         if (!g_app.selected[i]) continue;
         apctl_code_t* c = apctl_code_at(g_app.session, i);
+        apply_stage(std::string("Applying ") + (c->name ? c->name : "a code") + "...");
         char hdr[256];
         snprintf(hdr, sizeof hdr, "=== Applying code #%d: %s", c->id, c->name);
         g_app.append_log(hdr);
         bool ok = apctl_apply(g_app.session, c, target);
         g_app.append_log(ok ? "- OK" : "- ERROR!");
         ++applied;
+        g_app.apply_step = applied;
         if (!ok) ++errors;
     }
     apctl_reset_vars();
@@ -3963,6 +4000,7 @@ static void apply_selected() {
     // something the console cannot read and no obvious way back.
     bool rewrapped = true;
     if (native) {
+        apply_stage(std::string("Restoring the ") + console + "'s own encryption...");
         g_app.append_log((std::string("=== Restoring the ") + console
                           + "'s own encryption").c_str());
         rewrapped = psp ? psp_wrap_target() : ps3_wrap_target();
@@ -3975,10 +4013,11 @@ static void apply_selected() {
     // the patching appears to have done nothing at all.
     bool reboxed = true;
     if (container) {
+        apply_stage("Rebuilding the .PSV container...");
         g_app.append_log("=== Putting the file back into the .PSV container");
         reboxed = psvcard_wrap_target();
         if (!reboxed) errors++;
-        else note_container_rebuilt(g_app.psvcard.path);
+        else g_app.apply_rebuilt_psv = g_app.psvcard.path;   // see apply_collect()
     }
 
     // Result pop-up message.
@@ -3996,24 +4035,59 @@ static void apply_selected() {
         snprintf(msg, sizeof msg, "All done — %d code(s) applied successfully.%s",
                  applied, tail);
     } else if (container && !reboxed) {
-        g_app.show_log = true;
+        g_app.apply_want_log = true;
         snprintf(msg, sizeof msg,
                  "The patched file could not be put back into the .PSV, so the "
                  "container on disk is UNCHANGED.\nCheck the log for details.");
     } else if (native && !rewrapped) {
-        g_app.show_log = true;
+        g_app.apply_want_log = true;
         snprintf(msg, sizeof msg,
                  "The %s layer could not be put back, so the save on disk is "
                  "DECRYPTED.\nCheck the log, then use \"Re-encrypt\" below once the "
                  "cause is fixed.", console);
     } else {
-        g_app.show_log = true;   // a failure: the message says to look there
+        g_app.apply_want_log = true;   // a failure: the message says to look there
         snprintf(msg, sizeof msg, "%d of %d code(s) failed to apply.\nCheck the log for details.",
                  errors, applied);
     }
     g_app.apply_msg = msg;
     g_app.apply_title = "Apply";
-    g_app.open_apply_popup = true;
+}
+
+// Hand the whole of the above to a thread. Every early return in apply_run()
+// just leaves a message behind; apply_collect() is what raises the dialog, so
+// there is one place that does and no second thread touching ImGui.
+static void apply_selected() {
+    if (!g_app.session || g_app.applying) return;
+
+    g_app.apply_want_log  = false;
+    g_app.apply_rebuilt_psv.clear();
+    g_app.apply_finished  = false;
+    g_app.apply_step      = 0;
+    g_app.apply_steps     = 0;
+    g_app.apply_msg.clear();
+    g_app.apply_title = "Apply";
+    apply_stage("Starting...");
+
+    g_app.applying = true;
+    g_app.open_apply_popup = true;        // the dialog opens now, not at the end
+    g_app.apply_worker = std::thread([] {
+        apply_run();
+        g_app.apply_finished = true;      // last, so the message is already there
+    });
+}
+
+// Called once per frame from the UI thread.
+static void apply_collect() {
+    if (!g_app.applying.load() || !g_app.apply_finished.load()) return;
+
+    if (g_app.apply_worker.joinable()) g_app.apply_worker.join();
+    g_app.applying = false;
+    if (g_app.apply_want_log) g_app.show_log = true;
+    if (!g_app.apply_rebuilt_psv.empty()) {
+        note_container_rebuilt(g_app.apply_rebuilt_psv);
+        g_app.apply_rebuilt_psv.clear();
+    }
 }
 
 // ---- native file dialogs ---------------------------------------------------
@@ -6029,9 +6103,37 @@ static void draw_patch_screen() {
     if (g_app.open_apply_popup) { ImGui::OpenPopup("###result"); g_app.open_apply_popup = false; }
     if (ImGui::BeginPopupModal((g_app.apply_title + "###result").c_str(), nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted(g_app.apply_msg.c_str());
-        ImGui::Spacing();
-        if (ImGui::Button("OK", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        if (g_app.applying.load()) {
+            // The same dialog the result arrives in, before it has one. A
+            // modal, so nothing behind it can be clicked while the worker owns
+            // the session; the bar is what says the window is alive.
+            ImGui::TextUnformatted("Applying codes...");
+            ImGui::Spacing();
+
+            std::string stage;
+            { std::lock_guard<std::mutex> lk(g_app.apply_mtx); stage = g_app.apply_stage; }
+            ImGui::TextDisabled("%s", stage.c_str());
+
+            const int done  = g_app.apply_step.load();
+            const int total = g_app.apply_steps.load();
+            const float w   = ImGui::GetFontSize() * 22.0f;
+            if (total > 0) {
+                char over[64];
+                snprintf(over, sizeof over, "%d / %d", done, total);
+                ImGui::ProgressBar(float(done) / float(total), ImVec2(w, 0.0f), over);
+            } else {
+                // Nothing to count yet -- a bar that sweeps rather than fills,
+                // so the dialog still reads as working during the unwrap.
+                const float t = float(ImGui::GetTime());
+                ImGui::ProgressBar(-1.0f * t, ImVec2(w, 0.0f), "working");
+            }
+            ImGui::Spacing();
+            ImGui::TextDisabled("The log window shows each code as it runs.");
+        } else {
+            ImGui::TextUnformatted(g_app.apply_msg.c_str());
+            ImGui::Spacing();
+            if (ImGui::Button("OK", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        }
         ImGui::EndPopup();
     }
 
@@ -6377,6 +6479,7 @@ static void fatal(const std::string& msg) {
 // covers the window, and macos_open_docs.mm covers Finder on a Mac -- where a
 // .app is handed its documents through Apple Events rather than argv.
 static void drop_cb(GLFWwindow*, int count, const char** paths) {
+    if (g_app.applying.load()) return;   // the worker owns the session
     for (int i = 0; i < count; i++)
         if (paths[i] && *paths[i]) open_path(paths[i]);
 }
@@ -6846,7 +6949,15 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL2_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        apply_collect();
+
+        // Nothing that could close the session, open another patch or read a
+        // code's body while the worker is inside the engine. The dialog is
+        // modal, so this only has to cover what does not go through a click.
+        const bool busy = g_app.applying.load();
+
         // keyboard shortcuts
+        if (!busy) {
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_O, false)) do_open_patch();
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_S, false) &&
             g_app.session) do_save_patch();
@@ -6854,9 +6965,10 @@ int main(int argc, char** argv) {
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_P, false)) g_screen = SCREEN_PATCH;
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_F, false)) g_db.want_open = true;
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_Q, false)) want_quit = true;
+        }
 
         draw_main_window(&want_quit);
-        draw_code_viewers();
+        if (!busy) draw_code_viewers();
         draw_settings_window();
 
         ImGui::Render();
@@ -6876,6 +6988,10 @@ int main(int argc, char** argv) {
     // disk, so quitting mid-scan closes the window now and not in a minute.
     g_sb.cancel = true;
     scan_join();
+    // An apply cannot be cancelled -- it is inside the engine, rewriting a save
+    // -- so quitting waits for it rather than tearing the session out from
+    // under it mid-write.
+    if (g_app.apply_worker.joinable()) g_app.apply_worker.join();
     icon_drop();               // while there is still a GL context to drop it in
 
     g_app.close();
