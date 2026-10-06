@@ -191,6 +191,31 @@ struct apctl_session {
     int             n_rows;
 };
 
+/*
+ * Trim the game name, in place.
+ *
+ * Both ends pick up a space that is not part of the title:
+ *
+ *  - the leading one from the `; Name` convention every patch follows;
+ *  - the trailing one from CRLF. 1,554 of the 2,249 patches in the database
+ *    use it, and the control-character scrub above turns that '\r' into a
+ *    space rather than removing it.
+ *
+ * build-index.py strips both when it builds the browsable index, so a game
+ * opened FROM the database was already clean and only a loose .savepatch
+ * showed the padding -- in the desktop app's title, and in the web tool
+ * front-end, which names every game through apctl_game_name().
+ */
+static void trim_game_name(char *s)
+{
+    size_t n = strlen(s), lead = 0;
+
+    while (n > lead && s[n - 1] == ' ') n--;
+    while (lead < n && s[lead] == ' ') lead++;
+    if (lead) memmove(s, s + lead, n - lead);
+    s[n - lead] = '\0';
+}
+
 /* Build the synthetic header entry + flattened rows, mirroring patcher.c. */
 static apctl_session_t *build_session(char *data, size_t len, const char *name)
 {
@@ -215,6 +240,7 @@ static apctl_session_t *build_session(char *data, size_t len, const char *name)
         s->game_name[nlen] = '\0';
         for (char *p = s->game_name; p[0]; p++)
             if (*p < ' ') p[0] = ' ';
+        trim_game_name(s->game_name);
         header->name = s->game_name;
     }
 

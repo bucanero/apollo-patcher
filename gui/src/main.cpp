@@ -2959,6 +2959,14 @@ static void scan_collect() {
     g_app.append_log(("Save scan: " + g_sb.note).c_str());
 }
 
+// What a platform tag is called on screen. The tags are what the scan writes
+// and what the filter compares against, so they stay "PSV"; only the caption
+// is spelled out, because the abbreviation is the one of the six nobody reads
+// at a glance.
+static const char* platform_label(const char* tag) {
+    return strcmp(tag, "PSV") == 0 ? "PS Vita" : tag;
+}
+
 static void refilter_saves() {
     g_sb.hits.clear();
     const std::string needle = lowered(g_sb.search);
@@ -4307,8 +4315,9 @@ static void render_db_browser() {
         g_db.refilter = true;
 
     for (size_t p = 0; p < g_db.platforms.size(); ++p) {
+        const char* label = platform_label(g_db.platforms[p].c_str());
         if (p) ImGui::SameLine();
-        if (ImGui::RadioButton(g_db.platforms[p].c_str(), g_db.platform == int(p))) {
+        if (ImGui::RadioButton(label, g_db.platform == int(p))) {
             g_db.platform = int(p);
             g_db.refilter = true;
         }
@@ -4669,8 +4678,9 @@ static void draw_saves_screen() {
     };
 
     for (size_t p = 0; p < g_sb.platforms.size(); ++p) {
-        if (p) same_line_if_it_fits(g_sb.platforms[p].c_str());
-        if (ImGui::RadioButton(g_sb.platforms[p].c_str(), g_sb.platform == int(p))) {
+        const char* label = platform_label(g_sb.platforms[p].c_str());
+        if (p) same_line_if_it_fits(label);
+        if (ImGui::RadioButton(label, g_sb.platform == int(p))) {
             g_sb.platform = int(p);
             g_sb.refilter = true;
         }
