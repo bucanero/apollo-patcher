@@ -182,6 +182,16 @@ find out.
   twice.
 - **Resign** regenerates the metadata's own hashes alone, leaving every file as
   it is. It needs no key.
+- **Decrypt all files / Re-encrypt all files** walk the console's own list --
+  `SAVEDATA_FILE_LIST`, or the PFD's entry table -- and do the same to each.
+  Deliberately not all-or-nothing: the files are independent, so stopping at
+  the first failure would leave a half-done save with nothing saying how far it
+  got. The PS3 pass looks a key up per file, because the secure file ID is
+  keyed by save directory *and* file name, and skips `PARAM.SFO` by the same
+  test that keeps it out of the single-file path.
+
+  Both reuse the per-file functions the single-file buttons call, so there is
+  one implementation of each direction rather than two that can drift.
 - **Re-bind to your console** (PS3) appears once a console ID is named in
   Settings. See below.
 
