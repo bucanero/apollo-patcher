@@ -964,7 +964,6 @@ static void draw_about() {
     ImGui::Spacing();
 
     ImGui::TextDisabled("Project");
-    link_row("User guide", URL_GUIDE);
     link_row("apollo-patcher (this app)", URL_PATCHER);
     link_row("apollo-lib (the engine)", URL_LIB);
     link_row("apollo-patches (the patch database)", URL_PATCHES);
