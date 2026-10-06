@@ -24,7 +24,9 @@ A native Dear ImGui + GLFW application for Windows, macOS and Linux.
   opens a panel with the save's own icon.
 - **Patcher screen.** The save's icon and name, the target file, and the code
   list with its groups, options and per-code notes. Ticking a code pulls in any
-  code it requires; codes the patch marks `[DEFAULT:]` arrive ticked.
+  code it requires; codes the patch marks `[DEFAULT:]` arrive ticked. Each code
+  shows the interpreter it runs under — Save Wizard, Python or BSD — as a small
+  picture rather than a pair of letters.
 - **Whole-save actions**, in a grid at the top of the save header: decrypt or
   re-encrypt every file the console wrapped, resign `PARAM.SFO` / `PARAM.PFD`,
   sign the save to your account, and re-bind it to your console. Each reports
@@ -32,14 +34,18 @@ A native Dear ImGui + GLFW application for Windows, macOS and Linux.
 - **View and edit data.** A hex editor over the target file, the raw
   `.savepatch` text, and per-code editing, with the result writable back out as
   a `.savepatch`.
-- **Settings** for the saves folder, your account ID, your console ID, PSP game
-  keys and a byte-order override.
+- **Settings** in tabs — **General** for the PSN account ID and the byte-order
+  override, then **PSP**, **PS3** and **PS4** for each console's own identity,
+  so only the console a save is going to has to be filled in. A tab holding a
+  half-typed value is marked, because the warning is otherwise about a field
+  on a page you cannot see.
 - **Opening things directly**: native file pickers, drag and drop onto the
   window, and `.savepatch` / save-folder arguments on the command line. On
   macOS the app registers for `.savepatch` documents from Finder.
 - **Help menu** with the user guide, the project page and an About box.
-- A **launch screen** with the app icon, name and version while the patch
-  database opens and the previous folder is scanned behind it.
+- A **launch screen** in its own window, before the main one appears: the app
+  icon, name and version, while the patch database opens and the previous
+  folder is scanned behind it. A click or a key dismisses it early.
 - **Fonts**: Noto Sans JP covering Latin, Greek, Cyrillic and Japanese, plus a
   10×20 raster font for the hex and code views.
 - **Windows** builds static with MinGW and ships a software OpenGL fallback for
@@ -72,6 +78,14 @@ Six consoles, with the console's own encryption handled where there is any:
   and the fuse ID for the games that are console-locked.
 - **PS3**: `PARAM.PFD` parsing and re-signing, per-file secure IDs, account-ID
   re-signing, console re-binding, and a hash check over the result.
+- **PS4**: the full `param.sfo` re-sign apollo-ps4 performs on the console —
+  `ACCOUNT_ID`, the `PARAMS` hash of the console's OpenPSID (HMAC-SHA256),
+  the console-local user ID, and the title-ID copy. The account alone is
+  enough for most saves, since a PS4 checks the console hash only for a save
+  naming none; supply an OpenPSID and the save satisfies either check. Strictly
+  PS4-gated — a PS3 keeps its account where the PS4 keeps that hash, and a Vita
+  its title ID.
+- **Vita**: the account ID, which is all apollo-vita writes too.
 - **PS1 and PS2**: the signed `.PSV` container, which is how those saves reach
   a computer at all — also written by
   [apollo-ps2](https://github.com/bucanero/apollo-ps2) and
@@ -89,8 +103,6 @@ Six consoles, with the console's own encryption handled where there is any:
 - A **browser** over it with search and a per-console filter (`Ctrl+F`).
 - Byte order comes from the **database's platform** rather than being guessed
   from the title ID.
-- Game names are cleaned as the index is built: a redundant platform tag is
-  dropped, and quotation marks wrapping a whole title are removed.
 
 ### Documentation
 
