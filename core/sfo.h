@@ -112,6 +112,60 @@ int asfo_account_id(const uint8_t *sfo, size_t sfo_len, uint64_t *out);
  */
 int asfo_set_account_id(uint8_t *sfo, size_t sfo_len, uint64_t id);
 
+/*
+ * The PS4's PARAMS blob -- the console identity a save carries beside its
+ * account, and the other half of what apollo-ps4's patch_sfo() writes.
+ *
+ * Layout, which is what apollo-ps4's sfo_param_params_t declares:
+ *
+ *   0x00  u32   unknown
+ *   0x04  u32   user_id        the console-local user the save belongs to
+ *   0x08  [32]  psid_hmac      HMAC-SHA256 of the console's OpenPSID
+ *   0x28  u32   unknown
+ *   0x2C  [16]  title_id_1
+ *   0x3C  [16]  title_id_2
+ *   0x4C  u32   unknown
+ *   0x50  ...   the rest, 1024 bytes in all
+ *
+ * THESE ARE PS4 OFFSETS AND NOTHING ELSE'S. Every console writes a key called
+ * PARAMS and no two agree on what is in it: a PS3 keeps its account ID at
+ * +0x30 and a Vita its title ID at +0x28, both of which land inside the
+ * psid_hmac field above. A caller must know it has a PS4 save; there is
+ * nothing in the blob itself that says so, so these cannot check it for you.
+ *
+ * Each returns ASFO_OK, ASFO_ERR_MISSING when the save carries no PARAMS, or
+ * ASFO_ERR_FORMAT when what it carries is not a binary value long enough to
+ * hold these fields -- the same 0x50 floor apollo-ps4 guards with.
+ */
+#define ASFO_PS4_PARAMS_MIN   0x50
+#define ASFO_PSID_LEN         16
+#define ASFO_PSID_HMAC_LEN    32
+
+/*
+ * The console-local user number. Zero is "leave it alone" rather than a value
+ * to write, which is how apollo-ps4's sfo_patch_user_id() reads it too.
+ */
+int asfo_ps4_set_user_id(uint8_t *sfo, size_t sfo_len, uint32_t user_id);
+
+/*
+ * Bind the save to a console: psid_hmac = HMAC-SHA256(published key, psid),
+ * over all ASFO_PSID_LEN bytes of the console's OpenPSID.
+ *
+ * This is what a PS4 checks for a save that names NO account -- a save with an
+ * account is bound by that instead -- so writing an account is both the better
+ * fix and the one that makes this moot. It is written anyway, because
+ * apollo-ps4 writes it and a save that satisfies both checks travels further.
+ */
+int asfo_ps4_set_psid_hmac(uint8_t *sfo, size_t sfo_len,
+                           const uint8_t *psid /* ASFO_PSID_LEN bytes */);
+
+/*
+ * Copy title_id_1 over title_id_2, which is what apollo-ps4 does unconditionally
+ * before the rest. A save moved between titles' folders carries the old one in
+ * the second slot.
+ */
+int asfo_ps4_sync_title_id(uint8_t *sfo, size_t sfo_len);
+
 #ifdef __cplusplus
 }
 #endif

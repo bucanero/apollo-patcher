@@ -231,6 +231,30 @@ struct AppState {
     std::string         apply_msg;
     std::string         apply_title = "Apply";   // the caption, not the identity
 
+    // Applying runs on a thread. A Max Payne 3 code recompresses the save, and
+    // on an older machine that is many seconds during which a single-threaded
+    // apply painted nothing -- the window stopped redrawing and Windows greyed
+    // it out, so the one state the app could not show was the one it spends
+    // longest in.
+    //
+    // The worker owns the session and the engine for the duration; the UI
+    // thread reads only what is listed here, and stops drawing anything that
+    // reads a code's BODY (the viewers) until it is done. The code list itself
+    // stays on screen: its name/file pointers belong to the session and live
+    // until apctl_close(), which cannot happen while this is running.
+    std::thread         apply_worker;
+    std::atomic<bool>   applying{false};     // a worker exists and is running
+    std::atomic<bool>   apply_finished{false};
+    std::atomic<int>    apply_step{0};       // codes attempted so far
+    std::atomic<int>    apply_steps{0};      // codes to attempt, 0 = unknown
+    std::mutex          apply_mtx;           // guards apply_stage
+    std::string         apply_stage;         // what it is doing right now
+    bool                apply_want_log = false;  // worker writes, collector applies
+    // A rebuilt .PSV whose file sizes need re-reading. Deferred rather than
+    // done in the worker, because that walk crosses g_sb.saves -- which
+    // scan_collect() reassigns on the UI thread when a folder scan lands.
+    std::string         apply_rebuilt_psv;
+
     // The database patch this target's own location names, or -1. Every title
     // ID in the database is exactly 9 characters and save folders are named
     // <TITLEID><suffix> ("ULUS10391", "ULJM05500DATA00", "UCUS98751_DATA01"),
@@ -794,10 +818,11 @@ static bool splash_upload() {
 // that is actually loaded rather than guessed at, the same way every column in
 // the app is sized.
 struct SplashText {
-    char  ver[128];
-    float art, pad, gap, name_sz;
-    ImVec2 name_wh, ver_wh, copy_wh;
-    int   w, h;
+    char    ver[128];
+    ImFont *ft;
+    float   base, art, pad, gap, name_sz;
+    ImVec2  name_wh, ver_wh, copy_wh;
+    int     w, h;
 };
 // U+00A9 as a plain UTF-8 literal. It is in the atlas -- the default glyph
 // range covers Latin-1, which is also where the registered sign the game
@@ -805,10 +830,17 @@ struct SplashText {
 // mingw-gcc) reads and emits UTF-8 source by default, so the bytes survive.
 static const char* const SPLASH_COPY = "© 2020-2026 by Bucanero";
 
-static SplashText splash_measure() {
+/*
+ * Measured from the atlas, NOT from inside a frame: the splash window is
+ * created at exactly the size this returns and is never resized, because
+ * resizing a window that already owns a GL context is what broke the main one
+ * on Windows -- see the note in main(). ImFont::CalcTextSizeA needs only a
+ * built atlas, and costs no GL at all.
+ */
+static SplashText splash_measure(ImFont *ft, float base) {
     SplashText t;
-    ImFont*     ft   = ImGui::GetFont();
-    const float base = ImGui::GetFontSize();
+    t.ft   = ft;
+    t.base = base;
 
     snprintf(t.ver, sizeof t.ver, "Version %s", APOLLO_PATCHER_VERSION);
 
@@ -830,8 +862,8 @@ static SplashText splash_measure() {
 static void splash_draw(const SplashText& t, float alpha) {
     ImDrawList*          dl = ImGui::GetForegroundDrawList();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImFont*              ft = ImGui::GetFont();
-    const float          base = ImGui::GetFontSize();
+    ImFont*              ft = t.ft;
+    const float          base = t.base;
 
     const ImVec2 p0 = vp->WorkPos;
     const ImVec2 p1(p0.x + vp->WorkSize.x, p0.y + vp->WorkSize.y);
@@ -885,15 +917,11 @@ static void centre_window(GLFWwindow* window, int w, int h) {
 // Run the splash to completion in `window`, which arrives hidden, undecorated
 // and any size. Returns false if the user closed it -- quitting during the
 // splash should quit, not fall through into the main window.
-static bool splash_run(GLFWwindow* window) {
+static bool splash_run(GLFWwindow* window, const SplashText& t) {
     if (!splash_upload()) return true;
 
-    // One frame's worth of ImGui state is needed before the font can be
-    // measured, so size and place the window from inside the loop, on the
-    // first pass, and only show it once there is something to show.
-    SplashText t{};
-    bool  placed = false;
-    float t0     = 0.0f;
+    bool  started = false;
+    float t0      = 0.0f;
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -901,13 +929,7 @@ static bool splash_run(GLFWwindow* window) {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        if (!placed) {
-            t = splash_measure();
-            glfwSetWindowSize(window, t.w, t.h);
-            centre_window(window, t.w, t.h);
-            t0     = float(ImGui::GetTime());
-            placed = true;
-        }
+        if (!started) { t0 = float(ImGui::GetTime()); started = true; }
 
         const float age = float(ImGui::GetTime()) - t0;
         float alpha = age < SPLASH_HOLD ? 1.0f
@@ -966,7 +988,6 @@ static void draw_about() {
     ImGui::Spacing();
 
     ImGui::TextDisabled("Project");
-    link_row("User guide", URL_GUIDE);
     link_row("apollo-patcher (this app)", URL_PATCHER);
     link_row("apollo-lib (the engine)", URL_LIB);
     link_row("apollo-patches (the patch database)", URL_PATCHES);
@@ -1104,10 +1125,16 @@ static bool write_all(const std::string& path, const unsigned char* data, size_t
 enum ByteOrder { BYTE_ORDER_AUTO = 0, BYTE_ORDER_BIG = 1, BYTE_ORDER_LITTLE = 2 };
 
 struct Settings {
-    char fuse_hex[17]    = "";     // 16 hex digits, or empty for the default
-    char console_hex[33] = "";     // 32 hex digits, or empty for "leave alone"
-    char account_hex[17] = "";     // 16 hex digits, the PSN account ID
-    int  user_id         = 1;
+    char fuse_hex[17]    = "";     // PSP:  16 hex digits, or empty for the default
+    char console_hex[33] = "";     // PS3:  32 hex digits (IDPS), or empty
+    char psid_hex[33]    = "";     // PS4:  32 hex digits (OpenPSID), or empty
+    // The PSN account ID, and the one field here that is not per-console: the
+    // same 64-bit number identifies the account on all of them. A PS3 writes
+    // it as sixteen ASCII hex digits and a PS4 or Vita as eight raw bytes,
+    // which is a difference in the file and not in the value.
+    char account_hex[17] = "";     // 16 hex digits
+    int  user_id         = 1;      // PS3: the user number, 1..n
+    int  ps4_user_id     = 0;      // PS4: the console-local user, 0 = leave alone
     int  byte_order      = BYTE_ORDER_AUTO;
     // Where the saves are. Not a property of a console like the two above,
     // but the same kind of thing: something the person tells the app once and
@@ -1201,8 +1228,14 @@ static void settings_load() {
 
         if (key == "psp_fuse_id")    snprintf(g_settings.fuse_hex, sizeof g_settings.fuse_hex, "%s", val.c_str());
         else if (key == "ps3_console_id") snprintf(g_settings.console_hex, sizeof g_settings.console_hex, "%s", val.c_str());
-        else if (key == "ps3_account_id") snprintf(g_settings.account_hex, sizeof g_settings.account_hex, "%s", val.c_str());
+        /* account_id was written as ps3_account_id before it was shared with
+         * the PS4 and Vita. Both are read so an existing file still loads;
+         * only the new name is written back. */
+        else if (key == "account_id" || key == "ps3_account_id")
+            snprintf(g_settings.account_hex, sizeof g_settings.account_hex, "%s", val.c_str());
         else if (key == "ps3_user_id")    g_settings.user_id = atoi(val.c_str());
+        else if (key == "ps4_psid")       snprintf(g_settings.psid_hex, sizeof g_settings.psid_hex, "%s", val.c_str());
+        else if (key == "ps4_user_id")    g_settings.ps4_user_id = atoi(val.c_str());
         else if (key == "saves_root")     g_settings.saves_root = val;
         else if (key == "byte_order")
             /* Named rather than numbered, so the file stays readable and an
@@ -1233,8 +1266,10 @@ static bool settings_store() {
         << "# Both are optional; blank keeps whatever a save already says.\n"
         << "psp_fuse_id=" << g_saved.fuse_hex << "\n"
         << "ps3_console_id=" << g_saved.console_hex << "\n"
-        << "ps3_account_id=" << g_saved.account_hex << "\n"
         << "ps3_user_id=" << g_saved.user_id << "\n"
+        << "ps4_psid=" << g_saved.psid_hex << "\n"
+        << "ps4_user_id=" << g_saved.ps4_user_id << "\n"
+        << "account_id=" << g_saved.account_hex << "\n"
         << "saves_root=" << g_saved.saves_root << "\n"
         << "byte_order=" << (g_saved.byte_order == BYTE_ORDER_BIG    ? "big"
                            : g_saved.byte_order == BYTE_ORDER_LITTLE ? "little"
@@ -2167,6 +2202,27 @@ static bool ps3_account_resign() {
 // offset is undone by signing the save back, and a stray param.sfo.bak inside
 // sce_sys is worse than the thing it guards against.
 //
+/*
+ * What the last sfo_account_resign() wrote. The account always; the three PS4
+ * PARAMS fields only when the save is a PS4's and Settings names them. The
+ * message afterwards reports what happened rather than what was attempted,
+ * because "signed to your account" and "signed and bound to your console" are
+ * different outcomes and the person needs to know which they got.
+ */
+// apfd_sfid_from_hex() fills APFD_SFID_LEN bytes; the PSID buffer below is
+// sized ASFO_PSID_LEN. They are both 16 and come from different headers, so
+// the compiler is asked to keep saying so.
+static_assert(APFD_SFID_LEN == ASFO_PSID_LEN,
+              "the 16-byte hex reader and the OpenPSID field have diverged");
+
+struct SfoResignResult {
+    bool psid  = false;   // the console hash
+    bool user  = false;   // the console-local user ID
+    bool title = false;   // title_id_1 copied over title_id_2
+    bool ps4   = false;   // was this the console those three apply to?
+};
+static SfoResignResult g_sfo_resign;
+
 static bool sfo_account_resign() {
     std::vector<unsigned char> sfo;
 
@@ -2204,6 +2260,36 @@ static bool sfo_account_resign() {
             : "[!] This save's ACCOUNT_ID is not the eight-byte kind a PS4 or Vita writes");
         return false;
     }
+
+    // The rest of what apollo-ps4's patch_sfo() writes, and PS4 ONLY.
+    //
+    // Every console calls a key PARAMS and none of them agree on what is in
+    // it: the PS4 fields written here land on a Vita's title ID and a PS3's
+    // account. apollo-vita leaves them alone for that reason -- its own
+    // patch_sfo() has these two calls commented out -- so this follows it.
+    //
+    // All three are best-effort. A save with no PARAMS at all is an ordinary
+    // thing rather than a failure, and the account above is the part that
+    // matters; a console that cannot be named simply is not written.
+    int wrote_psid = 0, wrote_user = 0, wrote_title = 0;
+    g_sfo_resign = SfoResignResult{};
+    g_sfo_resign.ps4 = (g_app.save.platform_id == ASAVE_PS4);
+    if (g_app.save.platform_id == ASAVE_PS4) {
+        wrote_title = asfo_ps4_sync_title_id(sfo.data(), sfo.size()) == ASFO_OK;
+
+        // apfd_sfid_from_hex() is the 16-byte hex reader this app already uses
+        // for things that are not secure file IDs -- the disc hash key goes
+        // through it too. An OpenPSID is the same shape: 32 digits, all or
+        // nothing, NUL-terminated.
+        uint8_t psid[ASFO_PSID_LEN];
+        if (apfd_sfid_from_hex(g_saved.psid_hex, psid) == APFD_OK)
+            wrote_psid = asfo_ps4_set_psid_hmac(sfo.data(), sfo.size(), psid) == ASFO_OK;
+
+        if (g_saved.ps4_user_id > 0)
+            wrote_user = asfo_ps4_set_user_id(sfo.data(), sfo.size(),
+                                              (uint32_t)g_saved.ps4_user_id) == ASFO_OK;
+    }
+
     if (!write_all(path, sfo.data(), sfo.size())) {
         g_app.append_log(("[!] Could not write " + path).c_str());
         return false;
@@ -2214,14 +2300,44 @@ static bool sfo_account_resign() {
     g_app.save.account = now;
     note_account_change(g_app.save.path, now);
 
-    char msg[256];
-    if (had && was)
-        snprintf(msg, sizeof msg, "param.sfo signed to account %s (was %016llx)",
-                 now, (unsigned long long)was);
-    else
-        snprintf(msg, sizeof msg, "param.sfo signed to account %s (it named none before)", now);
+    g_sfo_resign.psid  = wrote_psid  != 0;
+    g_sfo_resign.user  = wrote_user  != 0;
+    g_sfo_resign.title = wrote_title != 0;
+
+    char msg[320];
+    int n = had && was
+          ? snprintf(msg, sizeof msg, "param.sfo signed to account %s (was %016llx)",
+                     now, (unsigned long long)was)
+          : snprintf(msg, sizeof msg, "param.sfo signed to account %s (it named none before)",
+                     now);
+    if (n > 0 && n < (int)sizeof msg && (wrote_psid || wrote_user || wrote_title))
+        snprintf(msg + n, sizeof msg - n, "; also wrote%s%s%s",
+                 wrote_psid  ? " the console hash" : "",
+                 wrote_user  ? " the user ID"     : "",
+                 wrote_title ? " the title ID"    : "");
     g_app.append_log(msg);
     return true;
+}
+
+// Spelled out afterwards, from g_sfo_resign.
+static std::string sfo_resign_summary() {
+    std::string m = "This save is now signed to your account.";
+
+    if (g_sfo_resign.psid)
+        m += "\n\nIt is also bound to the console in Settings: param.sfo's\n"
+             "hash of that console's OpenPSID has been recomputed.";
+    else if (g_sfo_resign.ps4)
+        m += "\n\nparam.sfo also carries a hash binding the save to a console,\n"
+             "and that is left as it was - a PS4 checks it only for a save\n"
+             "naming no account, which this one no longer is. Fill in the\n"
+             "OpenPSID on the PS4 tab in Settings to write it as well.";
+
+    if (g_sfo_resign.user)
+        m += "\nThe console-local user ID was written too.";
+    if (g_sfo_resign.title)
+        m += "\nThe save's second title ID was brought into step with its first.";
+
+    return m;
 }
 
 static bool ps3_rebind() {
@@ -3768,8 +3884,15 @@ static void load_patch_from_db(int index) {
     adopt_session(s, label, e->name, e->platform);
 }
 
-static void apply_selected() {
-    if (!g_app.session) return;
+// The one line the busy dialog shows under its title. Set from the worker,
+// read by the UI, so it goes through a lock -- it changes a handful of times
+// per apply, where the progress counters change per code and are atomics.
+static void apply_stage(const std::string& what) {
+    std::lock_guard<std::mutex> lk(g_app.apply_mtx);
+    g_app.apply_stage = what;
+}
+
+static void apply_run() {
     const char* target = g_app.target_path.empty() ? nullptr : g_app.target_path.c_str();
 
     //
@@ -3784,16 +3907,16 @@ static void apply_selected() {
     const std::string backup_of = g_app.psvcard.found ? g_app.psvcard.path : g_app.target_path;
 
     if (g_app.backup && target) {
+        apply_stage("Backing up the target file...");
         if (backup_file(backup_of))
             g_app.append_log(("Backup written: " + backup_of + ".bak").c_str());
         else
             g_app.append_log("[!] Backup failed (target unreadable?) — aborting.");
         if (!std::ifstream(backup_of + ".bak")) {
-            g_app.show_log = true;
+            g_app.apply_want_log = true;
             g_app.apply_msg = "Could not back up the target file, so nothing was patched.\n"
                               "Check the log for details.";
-            g_app.open_apply_popup = true;
-            return;
+                return;
         }
     }
 
@@ -3801,7 +3924,7 @@ static void apply_selected() {
     // apctl_apply() for every code (apollo_free_var_list() clears it).
     const bool be = effective_big_endian();
     apctl_set_big_endian(be ? 1 : 0);
-    g_app.log.clear();
+    { std::lock_guard<std::mutex> lk(g_app.log_mtx); g_app.log.clear(); }
     g_app.append_log(be ? "=== Using big-endian data mode"
                         : "=== Using host (little-endian) data mode");
     if (g_settings.byte_order != BYTE_ORDER_AUTO && be != g_app.be_detected)
@@ -3820,7 +3943,6 @@ static void apply_selected() {
             : "This is a PS3 save and its secure file ID is not known yet, so nothing "
               "was patched.\nSupply the ID, or untick the unwrap box if the file is "
               "already decrypted.";
-        g_app.open_apply_popup = true;
         return;
     }
 
@@ -3838,27 +3960,34 @@ static void apply_selected() {
     const bool container = g_app.psvcard.found && g_app.psvcard.wrap && target;
 
     if (native) {
+        apply_stage(std::string("Removing the ") + console + "'s own encryption...");
         g_app.append_log((std::string("=== Removing the ") + console
                           + "'s own encryption").c_str());
         if (!(psp ? psp_unwrap_target() : ps3_unwrap_target())) {
-            g_app.show_log = true;
+            g_app.apply_want_log = true;
             g_app.apply_msg = std::string("The ") + console + " layer would not come off, "
                               "so nothing was patched.\nCheck the log for details.";
-            g_app.open_apply_popup = true;
-            return;
+                return;
         }
     }
 
     int applied = 0, errors = 0;
+    int wanted = 0;
+    for (size_t i = 0; i < g_app.selected.size(); ++i) if (g_app.selected[i]) wanted++;
+    g_app.apply_steps = wanted;
+    g_app.apply_step  = 0;
+
     for (int i = 0; i < apctl_code_count(g_app.session); ++i) {
         if (!g_app.selected[i]) continue;
         apctl_code_t* c = apctl_code_at(g_app.session, i);
+        apply_stage(std::string("Applying ") + (c->name ? c->name : "a code") + "...");
         char hdr[256];
         snprintf(hdr, sizeof hdr, "=== Applying code #%d: %s", c->id, c->name);
         g_app.append_log(hdr);
         bool ok = apctl_apply(g_app.session, c, target);
         g_app.append_log(ok ? "- OK" : "- ERROR!");
         ++applied;
+        g_app.apply_step = applied;
         if (!ok) ++errors;
     }
     apctl_reset_vars();
@@ -3871,6 +4000,7 @@ static void apply_selected() {
     // something the console cannot read and no obvious way back.
     bool rewrapped = true;
     if (native) {
+        apply_stage(std::string("Restoring the ") + console + "'s own encryption...");
         g_app.append_log((std::string("=== Restoring the ") + console
                           + "'s own encryption").c_str());
         rewrapped = psp ? psp_wrap_target() : ps3_wrap_target();
@@ -3883,10 +4013,11 @@ static void apply_selected() {
     // the patching appears to have done nothing at all.
     bool reboxed = true;
     if (container) {
+        apply_stage("Rebuilding the .PSV container...");
         g_app.append_log("=== Putting the file back into the .PSV container");
         reboxed = psvcard_wrap_target();
         if (!reboxed) errors++;
-        else note_container_rebuilt(g_app.psvcard.path);
+        else g_app.apply_rebuilt_psv = g_app.psvcard.path;   // see apply_collect()
     }
 
     // Result pop-up message.
@@ -3904,24 +4035,59 @@ static void apply_selected() {
         snprintf(msg, sizeof msg, "All done — %d code(s) applied successfully.%s",
                  applied, tail);
     } else if (container && !reboxed) {
-        g_app.show_log = true;
+        g_app.apply_want_log = true;
         snprintf(msg, sizeof msg,
                  "The patched file could not be put back into the .PSV, so the "
                  "container on disk is UNCHANGED.\nCheck the log for details.");
     } else if (native && !rewrapped) {
-        g_app.show_log = true;
+        g_app.apply_want_log = true;
         snprintf(msg, sizeof msg,
                  "The %s layer could not be put back, so the save on disk is "
                  "DECRYPTED.\nCheck the log, then use \"Re-encrypt\" below once the "
                  "cause is fixed.", console);
     } else {
-        g_app.show_log = true;   // a failure: the message says to look there
+        g_app.apply_want_log = true;   // a failure: the message says to look there
         snprintf(msg, sizeof msg, "%d of %d code(s) failed to apply.\nCheck the log for details.",
                  errors, applied);
     }
     g_app.apply_msg = msg;
     g_app.apply_title = "Apply";
-    g_app.open_apply_popup = true;
+}
+
+// Hand the whole of the above to a thread. Every early return in apply_run()
+// just leaves a message behind; apply_collect() is what raises the dialog, so
+// there is one place that does and no second thread touching ImGui.
+static void apply_selected() {
+    if (!g_app.session || g_app.applying) return;
+
+    g_app.apply_want_log  = false;
+    g_app.apply_rebuilt_psv.clear();
+    g_app.apply_finished  = false;
+    g_app.apply_step      = 0;
+    g_app.apply_steps     = 0;
+    g_app.apply_msg.clear();
+    g_app.apply_title = "Apply";
+    apply_stage("Starting...");
+
+    g_app.applying = true;
+    g_app.open_apply_popup = true;        // the dialog opens now, not at the end
+    g_app.apply_worker = std::thread([] {
+        apply_run();
+        g_app.apply_finished = true;      // last, so the message is already there
+    });
+}
+
+// Called once per frame from the UI thread.
+static void apply_collect() {
+    if (!g_app.applying.load() || !g_app.apply_finished.load()) return;
+
+    if (g_app.apply_worker.joinable()) g_app.apply_worker.join();
+    g_app.applying = false;
+    if (g_app.apply_want_log) g_app.show_log = true;
+    if (!g_app.apply_rebuilt_psv.empty()) {
+        note_container_rebuilt(g_app.apply_rebuilt_psv);
+        g_app.apply_rebuilt_psv.clear();
+    }
 }
 
 // ---- native file dialogs ---------------------------------------------------
@@ -5288,63 +5454,120 @@ static void draw_settings_window() {
          "none of them changes how a save is READ - only what is written back. "
          "Left blank, a save keeps whatever it already says.");
 
-    ImGui::SeparatorText("Save data");
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
-    const char* ORDERS[] = { "Auto (detect from the patch)", "Big-endian", "Little-endian" };
-    bool order_changed = ImGui::Combo("Byte order", &g_settings.byte_order,
-                                      ORDERS, IM_ARRAYSIZE(ORDERS));
-    hint("Auto is right for every patch in the database. Force one only for a "
-         "loose patch file for a console the database does not cover.");
-    if (g_settings.byte_order != BYTE_ORDER_AUTO) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.65f, 0.35f, 1.0f));
-        ImGui::TextWrapped("Remembered across runs and applied to every save. The "
-                           "patcher screen says so when it disagrees with the patch "
-                           "you have open.");
-        ImGui::PopStyleColor();
-    }
-
-    ImGui::SeparatorText("PSP");
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
-    bool changed = order_changed;
-    changed |= ImGui::InputText("Fuse ID", g_settings.fuse_hex, sizeof g_settings.fuse_hex,
-                                    ImGuiInputTextFlags_CharsHexadecimal |
-                                    ImGuiInputTextFlags_CharsUppercase);
-    hint("16 hex digits, identifying one specific PSP. Most games load a save "
-         "whose value differs, but console-locked titles check the hashes it "
-         "derives and flag the save when they do not match - Gran Turismo does "
-         "- so those need the fuse ID of the console that will play the save. "
-         "Blank = FFFFFFFFFFFFFFFF.");
-
-    ImGui::SeparatorText("PS3");
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
-    changed |= ImGui::InputText("Console ID (IDPS)", g_settings.console_hex,
-                                sizeof g_settings.console_hex,
-                                ImGuiInputTextFlags_CharsHexadecimal |
-                                ImGuiInputTextFlags_CharsUppercase);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
-    changed |= ImGui::InputInt("User number", &g_settings.user_id);
-    if (g_settings.user_id < 1) g_settings.user_id = 1;
-
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
-    changed |= ImGui::InputText("Account ID (PSN)", g_settings.account_hex,
-                                sizeof g_settings.account_hex,
-                                ImGuiInputTextFlags_CharsHexadecimal);
-
-    hint("Two ways to re-sign a save, and the account is usually the one to "
-         "reach for: 16 hex digits, written into the save's own PARAM.SFO, so it "
-         "loads on ANY PS3 that account has signed in to. The console ID is 32 "
-         "hex digits and binds a save to one machine; the user number reaches "
-         "only a trophy folder's hashes. Name either and the PS3 section offers "
-         "the matching action.");
-
-    // The fields are all-or-nothing: a half-typed value is not "no value", it
-    // is one that would bind a save to the wrong machine, or the wrong account.
+    // The lengths every hex field must have when it is not empty, worked out
+    // before the tabs so a tab can be marked when something inside it is
+    // half-typed -- otherwise the warning at the foot of the window would
+    // point at a field on a page nobody can see.
+    //
+    // All-or-nothing on purpose: a half-typed value is not "no value", it is
+    // one that would bind a save to the wrong machine, or the wrong account.
     const size_t fuse_len = strlen(g_settings.fuse_hex);
     const size_t cid_len  = strlen(g_settings.console_hex);
+    const size_t psid_len = strlen(g_settings.psid_hex);
     const size_t acct_len = strlen(g_settings.account_hex);
-    const bool   ok = (fuse_len == 0 || fuse_len == 16)
-                   && (cid_len  == 0 || cid_len  == 32)
-                   && (acct_len == 0 || acct_len == APFD_ACCT_ID_LEN);
+    const bool   psp_ok   = fuse_len == 0 || fuse_len == 16;
+    const bool   ps3_ok   = cid_len  == 0 || cid_len  == 32;
+    const bool   ps4_ok   = psid_len == 0 || psid_len == 32;
+    const bool   gen_ok   = acct_len == 0 || acct_len == APFD_ACCT_ID_LEN;
+    const bool   ok       = psp_ok && ps3_ok && ps4_ok && gen_ok;
+
+    // "PSP" when the page is fine and "PSP !" when it is not, with the ID
+    // pinned by ### so the tab keeps its identity either way and does not
+    // reset to the first page as somebody types.
+    auto tab_label = [](const char* name, const char* id, bool fine) {
+        static char buf[4][32];
+        static int  n = 0;
+        char* b = buf[n = (n + 1) & 3];
+        snprintf(b, sizeof buf[0], "%s%s###%s", name, fine ? "" : " !", id);
+        return (const char*)b;
+    };
+
+    bool changed = false, order_changed = false;
+
+    if (ImGui::BeginTabBar("##settabs")) {
+
+        if (ImGui::BeginTabItem(tab_label("General", "gen", gen_ok))) {
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
+            changed |= ImGui::InputText("Account ID (PSN)", g_settings.account_hex,
+                                        sizeof g_settings.account_hex,
+                                        ImGuiInputTextFlags_CharsHexadecimal);
+            hint("16 hex digits, and the one setting here that is not tied to a "
+                 "single console: the same account ID is written into a PS3, PS4 "
+                 "or Vita save, and signing a save to it is what makes it load "
+                 "for you on any machine that account has signed in to. Usually "
+                 "the only field anybody needs.");
+
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+            const char* ORDERS[] = { "Auto (detect from the patch)", "Big-endian", "Little-endian" };
+            order_changed = ImGui::Combo("Byte order", &g_settings.byte_order,
+                                         ORDERS, IM_ARRAYSIZE(ORDERS));
+            changed |= order_changed;
+            hint("Auto is right for every patch in the database. Force one only for a "
+                 "loose patch file for a console the database does not cover.");
+            if (g_settings.byte_order != BYTE_ORDER_AUTO) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.65f, 0.35f, 1.0f));
+                ImGui::TextWrapped("Remembered across runs and applied to every save. The "
+                                   "patcher screen says so when it disagrees with the patch "
+                                   "you have open.");
+                ImGui::PopStyleColor();
+            }
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem(tab_label("PSP", "psp", psp_ok))) {
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+            changed |= ImGui::InputText("Fuse ID", g_settings.fuse_hex, sizeof g_settings.fuse_hex,
+                                        ImGuiInputTextFlags_CharsHexadecimal |
+                                        ImGuiInputTextFlags_CharsUppercase);
+            hint("16 hex digits, identifying one specific PSP. Most games load a save "
+                 "whose value differs, but console-locked titles check the hashes it "
+                 "derives and flag the save when they do not match - Gran Turismo does "
+                 "- so those need the fuse ID of the console that will play the save. "
+                 "Blank = FFFFFFFFFFFFFFFF.");
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem(tab_label("PS3", "ps3", ps3_ok))) {
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
+            changed |= ImGui::InputText("Console ID (IDPS)", g_settings.console_hex,
+                                        sizeof g_settings.console_hex,
+                                        ImGuiInputTextFlags_CharsHexadecimal |
+                                        ImGuiInputTextFlags_CharsUppercase);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+            changed |= ImGui::InputInt("User number", &g_settings.user_id);
+            if (g_settings.user_id < 1) g_settings.user_id = 1;
+            hint("32 hex digits binding a save to one PS3, for when the account on "
+                 "the General tab is not the answer. The user number reaches only a "
+                 "trophy folder's hashes. Name the console and the save header "
+                 "offers Re-bind to your console.");
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem(tab_label("PS4", "ps4", ps4_ok))) {
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
+            changed |= ImGui::InputText("OpenPSID", g_settings.psid_hex,
+                                        sizeof g_settings.psid_hex,
+                                        ImGuiInputTextFlags_CharsHexadecimal |
+                                        ImGuiInputTextFlags_CharsUppercase);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+            changed |= ImGui::InputInt("User ID", &g_settings.ps4_user_id);
+            if (g_settings.ps4_user_id < 0) g_settings.ps4_user_id = 0;
+            hint("32 hex digits identifying one PS4. param.sfo carries a hash of it, "
+                 "and the console checks that hash only for a save naming NO account "
+                 "- so the account on the General tab is still the thing to set "
+                 "first. Fill these in and signing a save writes them too, which is "
+                 "what apollo-ps4 does on the console itself. The user ID is that "
+                 "console's local user number; 0 leaves whatever the save says.");
+            ImGui::EndTabItem();
+        }
+
+        ImGui::EndTabBar();
+    }
 
     /* The order alone: apply just the byte order, not settings_apply(), which
      * would also push whatever half-typed hex is in the fields. */
@@ -5376,8 +5599,9 @@ static void draw_settings_window() {
     ImGui::SameLine();
     if (ImGui::Button("Clear all")) {
         g_settings.fuse_hex[0] = g_settings.console_hex[0] = '\0';
-        g_settings.account_hex[0] = '\0';
+        g_settings.psid_hex[0] = g_settings.account_hex[0] = '\0';
         g_settings.user_id = 1;
+        g_settings.ps4_user_id = 0;
         g_settings.byte_order = BYTE_ORDER_AUTO;
         settings_apply();
         g_saved = g_settings;
@@ -5388,9 +5612,10 @@ static void draw_settings_window() {
     if (!ok) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.35f, 1.0f), "%s",
-                           fuse_len && fuse_len != 16 ? "the Fuse ID needs 16 hex digits"
-                           : cid_len && cid_len != 32  ? "the console ID needs 32 hex digits"
-                                                       : "the account ID needs 16 hex digits");
+                           !gen_ok ? "General: the account ID needs 16 hex digits"
+                           : !psp_ok ? "PSP: the fuse ID needs 16 hex digits"
+                           : !ps3_ok ? "PS3: the console ID needs 32 hex digits"
+                                     : "PS4: the OpenPSID needs 32 hex digits");
     } else if (!g_settings.status.empty()) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.55f, 1.0f), "%s", g_settings.status.c_str());
@@ -5654,16 +5879,25 @@ static void draw_save_header() {
         }
         if (sfo_account && know_account && mine <= 0) {
             ImGui::SameLine();
-            if (ImGui::SmallButton("Sign to your account"))
-                report_action("Sign to your account", sfo_account_resign(),
-                              "This save is now signed to your account. Exactly the\n"
-                              "eight bytes of ACCOUNT_ID changed - there is no\n"
-                              "signature here to keep in step.");
+            if (ImGui::SmallButton("Sign to your account")) {
+                const bool ok = sfo_account_resign();
+                report_action("Sign to your account", ok,
+                              sfo_resign_summary().c_str());
+            }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Write account %s into this save's sce_sys/param.sfo,\n"
-                                  "so the console treats it as yours. Nothing else in the\n"
-                                  "save changes - there is no signature to keep in step.",
-                                  g_saved.account_hex);
+                                  "so the console treats it as yours.%s",
+                                  g_saved.account_hex,
+                                  s.platform_id != ASAVE_PS4
+                                  ? "" :
+                                  strlen(g_saved.psid_hex) == 32
+                                  ? "\nThe PS4 fields from Settings go in as well: the hash\n"
+                                    "of your console's OpenPSID, and the user ID. That is\n"
+                                    "the same set apollo-ps4 writes on the console."
+                                  : "\nparam.sfo also holds a hash binding the save to one\n"
+                                    "console. A PS4 checks it only for a save that names no\n"
+                                    "account, so it is left alone - name an OpenPSID on the\n"
+                                    "PS4 tab in Settings to have it written too.");
         }
     }
 
@@ -5869,9 +6103,43 @@ static void draw_patch_screen() {
     if (g_app.open_apply_popup) { ImGui::OpenPopup("###result"); g_app.open_apply_popup = false; }
     if (ImGui::BeginPopupModal((g_app.apply_title + "###result").c_str(), nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted(g_app.apply_msg.c_str());
-        ImGui::Spacing();
-        if (ImGui::Button("OK", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        if (g_app.applying.load()) {
+            // The same dialog the result arrives in, before it has one. A
+            // modal, so nothing behind it can be clicked while the worker owns
+            // the session; the bar is what says the window is alive.
+            ImGui::TextUnformatted("Applying codes...");
+            ImGui::Spacing();
+
+            std::string stage;
+            { std::lock_guard<std::mutex> lk(g_app.apply_mtx); stage = g_app.apply_stage; }
+            ImGui::TextDisabled("%s", stage.c_str());
+
+            // The bar SWEEPS rather than fills, and carries the count as its
+            // overlay instead.
+            //
+            // A filled bar measures the wrong thing here. One code routinely
+            // takes longer than all the others together -- Max Payne 3's last
+            // code recompresses the save -- so the bar reaches 3/4 in a moment
+            // and then holds, perfectly still, for as long as the job actually
+            // takes. A still bar during the slow part is the exact impression
+            // this dialog exists to dispel. ImGui draws the overlay text in
+            // indeterminate mode too, so nothing is lost but the proportion,
+            // which was not worth much.
+            char over[64];
+            const int done  = g_app.apply_step.load();
+            const int total = g_app.apply_steps.load();
+            if (total > 0) snprintf(over, sizeof over, "%d / %d", done, total);
+            else           snprintf(over, sizeof over, "working");
+
+            ImGui::ProgressBar(-1.0f * float(ImGui::GetTime()),
+                               ImVec2(ImGui::GetFontSize() * 22.0f, 0.0f), over);
+            ImGui::Spacing();
+            ImGui::TextDisabled("The log window shows each code as it runs.");
+        } else {
+            ImGui::TextUnformatted(g_app.apply_msg.c_str());
+            ImGui::Spacing();
+            if (ImGui::Button("OK", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        }
         ImGui::EndPopup();
     }
 
@@ -6217,6 +6485,7 @@ static void fatal(const std::string& msg) {
 // covers the window, and macos_open_docs.mm covers Finder on a Mac -- where a
 // .app is handed its documents through Apple Events rather than argv.
 static void drop_cb(GLFWwindow*, int count, const char** paths) {
+    if (g_app.applying.load()) return;   // the worker owns the session
     for (int i = 0; i < count; i++)
         if (paths[i] && *paths[i]) open_path(paths[i]);
 }
@@ -6540,34 +6809,35 @@ int main(int argc, char** argv) {
     int win_w = 0, win_h = 0;
     default_window_size(&win_w, &win_h);   // needs glfwInit, for the monitor
 
-    // Born hidden and undecorated: the splash runs in this same window first,
-    // and it is grown, decorated and shown below once the splash is over. The
-    // size here is a placeholder -- splash_run() measures the real one from the
-    // loaded font. Hidden also means no empty rectangle flashes up while the
-    // font atlas and the icons are still uploading.
-    glfwWindowHint(GLFW_VISIBLE,   GLFW_FALSE);
-    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-
-    // No other context hints: GLFW's default legacy/compatibility context is
-    // what the fixed-function opengl2 backend needs, on every platform.
-    GLFWwindow* window = glfwCreateWindow(480, 420, "Apollo Save Patcher", nullptr, nullptr);
-    if (!window) {
-        fatal("Could not create an OpenGL context.\n\n"
-              "This machine's graphics driver may not support OpenGL — this is "
-              "common over Remote Desktop and in some virtual machines.\n\n"
-              "Fix: copy opengl32.dll from the \"softgl\" folder (shipped next to "
-              "this app) into the same folder as the .exe, then relaunch. See the "
-              "README for details.\n\n" + g_glfw_error);
-        glfwTerminate();
-        return 1;
-    }
-    g_window = window;
-    set_window_icon(window);   // Windows/Linux title-bar & taskbar icon
-    glfwSetDropCallback(window, drop_cb);
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
-
+    //
+    // The splash gets a window of its OWN, which is then destroyed before the
+    // real one is created. It is tempting to reuse one window -- undecorate it,
+    // run the splash, then dress it and grow it -- and that is what this did
+    // first. It is wrong on Windows.
+    //
+    // glfwSetWindowAttrib(GLFW_DECORATED) goes through updateWindowStyles(),
+    // which keeps the CLIENT rect and grows the frame around it, and
+    // glfwSetWindowSize() then resizes that client area. GLFW reports the new
+    // size correctly and so does glfwGetFramebufferSize(). What does not
+    // necessarily follow is the drawable behind a native ICD's HDC: on a
+    // Windows 7 machine with hardware OpenGL it stayed at the old size, while
+    // the viewport was set from the new one. GL's origin is bottom-left, so a
+    // viewport taller than the drawable loses the TOP of the image -- the menu
+    // bar vanished and everything sat a caption-height too high, with the mouse
+    // still landing where ImGui thought the rows were. A software opengl32.dll
+    // sizes its buffer per frame and showed nothing wrong, which is exactly the
+    // pattern a stale drawable produces.
+    //
+    // So: no window is resized or restyled after a context exists on it. The
+    // main window below is created the way it always was, at its final size and
+    // decoration, and the GL state it needs is built fresh for it.
+    //
+    //
+    // The ImGui context, and the fonts, BEFORE either window: the splash is
+    // made exactly the size its own text needs, and working that out needs the
+    // atlas and nothing else. Doing it first is what lets the splash window be
+    // created at its final size instead of being resized into it.
+    //
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -6578,35 +6848,103 @@ int main(int argc, char** argv) {
 
     ImGui::StyleColorsDark();
     apply_style();
-    ImGui_ImplGlfw_InitForOpenGL(window, true);
-    ImGui_ImplOpenGL2_Init();
-    load_type_icons();   // needs the GL context, so not with the fonts above
 
-    // The folder from last time, scanned in the background while the window
-    // comes up. Costs nothing when there is none, and means the saves screen
-    // shows a list rather than an empty one on every launch.
+    // Rasterise now rather than on the backend's first frame. It is CPU work --
+    // no GL is current yet, and none is needed.
+    //
+    // ONLY if nobody has built it already. load_mono_font() builds the atlas
+    // itself and then writes the 10x20 raster glyphs straight into the packed
+    // pixels, and a second Build() calls ClearTexData() and memsets a fresh
+    // buffer -- which silently empties all 95 of them. The hex editor and the
+    // code viewer then draw nothing at all, while the UI font, which the
+    // rebuild re-rasterises from its TTF, looks perfectly fine.
+    if (!io.Fonts->IsBuilt())
+        io.Fonts->Build();
+    ImFont* const ui_font = io.Fonts->Fonts.empty() ? nullptr : io.Fonts->Fonts[0];
+    const SplashText splash_txt = ui_font
+        ? splash_measure(ui_font, ui_font->FontSize)
+        : SplashText{};
+
+    glfwWindowHint(GLFW_VISIBLE,   GLFW_FALSE);
+    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+
+    // No other context hints: GLFW's default legacy/compatibility context is
+    // what the fixed-function opengl2 backend needs, on every platform.
+    GLFWwindow* splash = glfwCreateWindow(splash_txt.w > 0 ? splash_txt.w : 320,
+                                          splash_txt.h > 0 ? splash_txt.h : 280,
+                                          "Apollo Save Patcher", nullptr, nullptr);
+    if (!splash) {
+        fatal("Could not create an OpenGL context.\n\n"
+              "This machine's graphics driver may not support OpenGL — this is "
+              "common over Remote Desktop and in some virtual machines.\n\n"
+              "Fix: copy opengl32.dll from the \"softgl\" folder (shipped next to "
+              "this app) into the same folder as the .exe, then relaunch. See the "
+              "README for details.\n\n" + g_glfw_error);
+        ImGui::DestroyContext();
+        glfwTerminate();
+        return 1;
+    }
+    centre_window(splash, splash_txt.w, splash_txt.h);
+    glfwMakeContextCurrent(splash);
+    glfwSwapInterval(1);
+
+    // The atlas lives in the ImGui context, which outlives both windows; only
+    // its GPU copy belongs to a context, and the backend remakes that on its
+    // next frame after each Init.
+    ImGui_ImplGlfw_InitForOpenGL(splash, true);
+    ImGui_ImplOpenGL2_Init();
+
+    // The folder from last time, scanned in the background while the splash is
+    // up. Costs nothing when there is none, and means the saves screen shows a
+    // list rather than an empty one on every launch.
     if (!g_saved.saves_root.empty() && is_dir(g_saved.saves_root))
         scan_start(g_saved.saves_root);
 
-    // The splash, alone, in this window -- the scan above and the patch
-    // database are already working behind it. Closing it quits.
-    if (!splash_run(window)) {
+    const bool carry_on = ui_font ? splash_run(splash, splash_txt) : true;
+
+    ImGui_ImplOpenGL2_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    glfwDestroyWindow(splash);
+
+    // Closing the splash quits, rather than falling through into the app.
+    if (!carry_on) {
         g_sb.cancel = true;
         scan_join();
         g_app.close();
-        ImGui_ImplOpenGL2_Shutdown();
-        ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
-        glfwDestroyWindow(window);
         glfwTerminate();
         return 0;
     }
 
-    // Now the real window: dressed, resizable, centred and visible.
-    glfwHideWindow(window);
-    glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_TRUE);
-    glfwSetWindowAttrib(window, GLFW_RESIZABLE, GLFW_TRUE);
-    glfwSetWindowSize(window, win_w, win_h);
+    // The real window, created once at the size and decoration it keeps.
+    // Hidden only so it can be centred before it is seen -- a creation hint
+    // and a move, neither of which disturbs the drawable the way a resize or
+    // a style change does.
+    glfwDefaultWindowHints();
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    GLFWwindow* window = glfwCreateWindow(win_w, win_h, "Apollo Save Patcher",
+                                          nullptr, nullptr);
+    if (!window) {
+        fatal("Could not create the application window.\n\n" + g_glfw_error);
+        ImGui::DestroyContext();
+        glfwTerminate();
+        return 1;
+    }
+    g_window = window;
+    set_window_icon(window);   // Windows/Linux title-bar & taskbar icon
+    glfwSetDropCallback(window, drop_cb);
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(1);
+
+    // A second context, so everything that lives in one is built again: the
+    // backend remakes the font texture on its next frame, and the type icons
+    // are re-uploaded here. The splash's own texture was freed before its
+    // context went away.
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL2_Init();
+    load_type_icons();   // needs the GL context, so not with the fonts above
+
     centre_window(window, win_w, win_h);
     glfwShowWindow(window);
     glfwFocusWindow(window);
@@ -6617,7 +6955,15 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL2_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        apply_collect();
+
+        // Nothing that could close the session, open another patch or read a
+        // code's body while the worker is inside the engine. The dialog is
+        // modal, so this only has to cover what does not go through a click.
+        const bool busy = g_app.applying.load();
+
         // keyboard shortcuts
+        if (!busy) {
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_O, false)) do_open_patch();
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_S, false) &&
             g_app.session) do_save_patch();
@@ -6625,9 +6971,10 @@ int main(int argc, char** argv) {
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_P, false)) g_screen = SCREEN_PATCH;
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_F, false)) g_db.want_open = true;
         if (ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyPressed(ImGuiKey_Q, false)) want_quit = true;
+        }
 
         draw_main_window(&want_quit);
-        draw_code_viewers();
+        if (!busy) draw_code_viewers();
         draw_settings_window();
 
         ImGui::Render();
@@ -6647,6 +6994,10 @@ int main(int argc, char** argv) {
     // disk, so quitting mid-scan closes the window now and not in a minute.
     g_sb.cancel = true;
     scan_join();
+    // An apply cannot be cancelled -- it is inside the engine, rewriting a save
+    // -- so quitting waits for it rather than tearing the session out from
+    // under it mid-write.
+    if (g_app.apply_worker.joinable()) g_app.apply_worker.join();
     icon_drop();               // while there is still a GL context to drop it in
 
     g_app.close();

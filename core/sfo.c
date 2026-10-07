@@ -1,6 +1,8 @@
 /* See sfo.h. */
 #include <string.h>
 
+#include <mbedtls/md.h>
+
 #include "sfo.h"
 
 #define SFO_MAGIC    0x46535000u   /* "\0PSF", little-endian */
@@ -198,5 +200,106 @@ int asfo_set_account_id(uint8_t *sfo, size_t sfo_len, uint64_t id)
 
     for (i = 0; i < ASFO_ACCT_BIN_LEN; i++)
         sfo[off + i] = (uint8_t)(id >> (8 * i));
+    return ASFO_OK;
+}
+
+
+/* ------------------------------------------------------------------------
+ * The PS4's PARAMS blob
+ *
+ * Offsets and the key are apollo-ps4's: source/sfo.c, sfo_param_params_t and
+ * PSID_HMAC_KEY. Kept in step with it deliberately -- a save this app writes
+ * and one that app writes have to be the same save.
+ * ---------------------------------------------------------------------- */
+
+/* https://www.psdevwiki.com/ps4/Keys#param.sfo_OpenPSID_HMAC-SHA256_Key */
+static const uint8_t PSID_HMAC_KEY[16] = {
+    0x13, 0xD1, 0xDF, 0x06, 0x75, 0xC9, 0xFD, 0x95,
+    0x0A, 0x17, 0xE5, 0x64, 0xC2, 0x77, 0x7F, 0x2C
+};
+
+#define PARAMS_USER_ID    0x04
+#define PARAMS_PSID_HMAC  0x08
+#define PARAMS_TITLE_ID_1 0x2C
+#define PARAMS_TITLE_ID_2 0x3C
+#define PARAMS_TITLE_LEN  0x10
+
+/*
+ * Find the PARAMS blob and check it is long enough to hold the PS4's fields.
+ * Nothing here can tell a PS4's blob from a PS3's or a Vita's -- see the
+ * warning in sfo.h -- so this only establishes that writing within 0x50 of
+ * `off` stays inside the value.
+ */
+static int ps4_params(const uint8_t *sfo, size_t sfo_len, size_t *off)
+{
+    uint32_t used;
+    unsigned fmt;
+    int      rc;
+
+    rc = asfo_find(sfo, sfo_len, "PARAMS", off, &used, NULL, &fmt);
+    if (rc != ASFO_OK)
+        return rc;
+    if (fmt != ASFO_FMT_BIN || used < ASFO_PS4_PARAMS_MIN)
+        return ASFO_ERR_FORMAT;
+    return ASFO_OK;
+}
+
+int asfo_ps4_set_user_id(uint8_t *sfo, size_t sfo_len, uint32_t user_id)
+{
+    size_t off;
+    int    rc, i;
+
+    /* Zero is "leave it alone", matching sfo_patch_user_id(). A save whose
+     * user is genuinely 0 is not something to write, and not something a
+     * console reports. */
+    if (!user_id)
+        return ASFO_OK;
+
+    rc = ps4_params(sfo, sfo_len, &off);
+    if (rc != ASFO_OK)
+        return rc;
+
+    for (i = 0; i < 4; i++)
+        sfo[off + PARAMS_USER_ID + i] = (uint8_t)(user_id >> (8 * i));
+    return ASFO_OK;
+}
+
+int asfo_ps4_set_psid_hmac(uint8_t *sfo, size_t sfo_len, const uint8_t *psid)
+{
+    const mbedtls_md_info_t *md;
+    size_t off;
+    int    rc;
+
+    if (!psid)
+        return ASFO_ERR_FORMAT;
+
+    rc = ps4_params(sfo, sfo_len, &off);
+    if (rc != ASFO_OK)
+        return rc;
+
+    md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (!md)
+        return ASFO_ERR_FORMAT;
+
+    /* Straight into the blob: SHA-256 is 32 bytes and so is the field. */
+    if (mbedtls_md_hmac(md, PSID_HMAC_KEY, sizeof PSID_HMAC_KEY,
+                        psid, ASFO_PSID_LEN,
+                        sfo + off + PARAMS_PSID_HMAC) != 0)
+        return ASFO_ERR_FORMAT;
+
+    return ASFO_OK;
+}
+
+int asfo_ps4_sync_title_id(uint8_t *sfo, size_t sfo_len)
+{
+    size_t off;
+    int    rc;
+
+    rc = ps4_params(sfo, sfo_len, &off);
+    if (rc != ASFO_OK)
+        return rc;
+
+    memcpy(sfo + off + PARAMS_TITLE_ID_2,
+           sfo + off + PARAMS_TITLE_ID_1, PARAMS_TITLE_LEN);
     return ASFO_OK;
 }

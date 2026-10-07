@@ -467,6 +467,128 @@ static size_t vita_dlc_sfo(uint8_t *out, size_t cap)
     return build_sfo(out, cap, kv, (int)(sizeof kv / sizeof *kv));
 }
 
+/*
+ * A PS4 save whose PARAMS blob has telltale contents, so a write into one
+ * field can be shown NOT to have touched the others.
+ *
+ *   0x04  user_id      0x11111111
+ *   0x08  psid_hmac    0x22 x32
+ *   0x2C  title_id_1   "CUSA28770"
+ *   0x3C  title_id_2   "OLDTITLE0"   -- what sync_title_id must overwrite
+ *   rest               0x33
+ */
+static size_t ps4_sfo_params(uint8_t *out, size_t cap, uint32_t params_used)
+{
+    static uint8_t params[1024];
+    const kv_t kv[] = {
+        { "ACCOUNT_ID",         ASFO_FMT_BIN, params, 8, 8 },
+        { "CATEGORY",           ASFO_FMT_STR, "sd", 0, 4 },
+        { "PARAMS",             ASFO_FMT_BIN, params, params_used, params_used },
+        { "SAVEDATA_DIRECTORY", ASFO_FMT_STR, "JOJOASB.S", 0, 32 },
+        { "TITLE_ID",           ASFO_FMT_STR, "CUSA28770", 0, 12 },
+    };
+
+    memset(params, 0x33, sizeof params);
+    params[0x04] = params[0x05] = params[0x06] = params[0x07] = 0x11;
+    memset(params + 0x08, 0x22, 32);
+    memcpy(params + 0x2C, "CUSA28770", 9);
+    memcpy(params + 0x3C, "OLDTITLE0", 9);
+    return build_sfo(out, cap, kv, (int)(sizeof kv / sizeof *kv));
+}
+
+/*
+ * The PS4's PARAMS blob: the console identity, beside the account.
+ *
+ * These offsets belong to the PS4 and to nothing else -- a PS3 keeps its
+ * account at PARAMS+0x30 and a Vita its title ID at PARAMS+0x28, both inside
+ * what is psid_hmac here. The writers cannot tell which console wrote a blob,
+ * so what is checked below is that each writes its OWN field and leaves every
+ * other byte alone; keeping them off a Vita save is the caller's job.
+ */
+static void check_ps4_params(void)
+{
+    uint8_t  buf[4096], before[4096];
+    size_t   len, off;
+    uint32_t used;
+
+    static const uint8_t PSID[16] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
+    };
+    /* HMAC-SHA256(PSID_HMAC_KEY, PSID), computed with Python's hmac/hashlib
+       rather than by the code under test -- an independent oracle, so a
+       writer and a reader that agreed with each other and with nothing else
+       would still fail here. */
+    static const uint8_t WANT[32] = {
+        0x64, 0xB4, 0x2A, 0x1C, 0x85, 0xD7, 0x77, 0x35,
+        0xB4, 0x52, 0xD5, 0x0C, 0x42, 0x37, 0xE6, 0xEA,
+        0xAB, 0x08, 0x59, 0x4A, 0x2E, 0x7A, 0xBD, 0x85,
+        0xC7, 0x8A, 0xE6, 0x8A, 0xAC, 0x26, 0x9B, 0xE7,
+    };
+
+    printf("\nPARAMS (PS4: user_id, psid_hmac, title_id)\n");
+
+    /* ---- the console binding ---- */
+    len = ps4_sfo_params(buf, sizeof buf, 1024);
+    CHECK("PARAMS is found at all",
+          asfo_find(buf, len, "PARAMS", &off, &used, NULL, NULL) == ASFO_OK);
+    memcpy(before, buf, len);
+
+    CHECK("the PSID HMAC is written",
+          asfo_ps4_set_psid_hmac(buf, len, PSID) == ASFO_OK);
+    CHECK("...and matches an independently computed HMAC-SHA256",
+          memcmp(buf + off + 0x08, WANT, 32) == 0);
+    CHECK("...the file neither grew nor moved", len == ps4_sfo_params(before, sizeof before, 1024));
+
+    /* Everything outside the 32 bytes it owns is untouched. */
+    len = ps4_sfo_params(before, sizeof before, 1024);
+    CHECK("...nothing before the field changed", memcmp(buf, before, off + 0x08) == 0);
+    CHECK("...nothing after the field changed",
+          memcmp(buf + off + 0x28, before + off + 0x28, len - off - 0x28) == 0);
+
+    CHECK("a NULL PSID is refused", asfo_ps4_set_psid_hmac(buf, len, NULL) == ASFO_ERR_FORMAT);
+
+    /* ---- the console-local user ---- */
+    len = ps4_sfo_params(buf, sizeof buf, 1024);
+    CHECK("the user id is written", asfo_ps4_set_user_id(buf, len, 0x01020304) == ASFO_OK);
+    CHECK("...little-endian, in its own four bytes",
+          buf[off + 0x04] == 0x04 && buf[off + 0x05] == 0x03 &&
+          buf[off + 0x06] == 0x02 && buf[off + 0x07] == 0x01);
+
+    len = ps4_sfo_params(buf, sizeof buf, 1024);
+    CHECK("a user id of zero is left alone rather than written",
+          asfo_ps4_set_user_id(buf, len, 0) == ASFO_OK &&
+          buf[off + 0x04] == 0x11 && buf[off + 0x07] == 0x11);
+
+    /* ---- the title ID copy ---- */
+    len = ps4_sfo_params(buf, sizeof buf, 1024);
+    CHECK("the second title ID starts out different",
+          memcmp(buf + off + 0x3C, "OLDTITLE0", 9) == 0);
+    CHECK("syncing succeeds", asfo_ps4_sync_title_id(buf, len) == ASFO_OK);
+    CHECK("...and copies the first over the second",
+          memcmp(buf + off + 0x3C, "CUSA28770", 9) == 0);
+    CHECK("...leaving the first as it was",
+          memcmp(buf + off + 0x2C, "CUSA28770", 9) == 0);
+
+    /* ---- what is refused ---- */
+    len = game_sfo(buf, sizeof buf);                    /* no PARAMS at all */
+    CHECK("a param.sfo with no PARAMS is reported missing, not written",
+          asfo_ps4_set_psid_hmac(buf, len, PSID) == ASFO_ERR_MISSING);
+    CHECK("...for the user id too",
+          asfo_ps4_set_user_id(buf, len, 7) == ASFO_ERR_MISSING);
+    CHECK("...and for the title copy",
+          asfo_ps4_sync_title_id(buf, len) == ASFO_ERR_MISSING);
+
+    /* A blob too short to hold these fields. The PS4's own guard is 0x50, and
+       the point is that a Vita's shorter PARAMS cannot be half-written. */
+    len = ps4_sfo_params(buf, sizeof buf, 0x20);
+    CHECK("a PARAMS shorter than the PS4's fields is refused",
+          asfo_ps4_set_psid_hmac(buf, len, PSID) == ASFO_ERR_FORMAT);
+    CHECK("...and nothing was written into it",
+          asfo_blob(buf, len, "PARAMS", 0x08, before, 4) == ASFO_OK &&
+          before[0] == 0x22 && before[3] == 0x22);
+}
+
 /* A PS4 save with CATEGORY replaced, for testing that field on its own. */
 static size_t ps4_sfo_category(uint8_t *out, size_t cap, const char *cat, uint32_t used)
 {
@@ -1138,6 +1260,7 @@ int main(int argc, char **argv)
     check_reader();
     check_bounds();
     check_account_id();
+    check_ps4_params();
     check_category();
     check_identify();
     check_title_ids();
