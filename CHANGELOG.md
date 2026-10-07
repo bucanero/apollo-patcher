@@ -6,7 +6,7 @@ patch data its own in [apollo-patches](https://github.com/bucanero/apollo-patche
 
 This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## 2.5.0 — unreleased
+## 2.5.0 — 2026-10-10
 
 The first release of this repository. The desktop GUI was split out of
 apollo-lib and a WebAssembly front-end was added beside it, so everything below
@@ -103,8 +103,8 @@ Six consoles, with the console's own encryption handled where there is any:
 
 ### Patch database
 
-- **Bundled offline** with the desktop app: 2,249 patches — PS3 1,801, PS4 253,
-  Vita 123, PSP 70, PS2 2.
+- **Bundled offline** with the desktop app: 2,252 patches — PS3 1,801, PS4 253,
+  Vita 123, PSP 73, PS2 2.
 - A **browser** over it with search and a per-console filter (`Ctrl+F`).
 - Byte order comes from the **database's platform** rather than being guessed
   from the title ID.
