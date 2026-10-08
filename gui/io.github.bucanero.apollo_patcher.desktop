@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Apollo Save Patcher
+Comment=Apply save patches to PlayStation save data
+Exec=apollo_patcher_gui %F
+Icon=apollo-patcher
+Terminal=false
+Categories=Utility;

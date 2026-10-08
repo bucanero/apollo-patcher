@@ -55,6 +55,10 @@ A native Dear ImGui + GLFW application for Windows, macOS and Linux.
   10×20 raster font for the hex and code views.
 - **Windows** builds static with MinGW and ships a software OpenGL fallback for
   machines with no usable driver — Remote Desktop and some VMs.
+- **Installers**: a Windows setup for x64 and x86 (Start menu entry, `.savepatch`
+  opening in the app, the software renderer as an optional component), a
+  macOS `.dmg`, and a Linux AppImage. The Windows executable now carries its
+  own icon and version details. All three are unsigned for now.
 
 ### Web front-end
 

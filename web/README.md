@@ -232,5 +232,5 @@ arrive already decrypted from the console-side Apollo app, and there is no
 layer here to remove.
 
 For a folder of saves rather than one file at a time, and for PS1/PS2 `.PSV`
-containers, use the [desktop app](../gui/README.md).
+containers, use the [desktop app](../README.md#desktop-gui).
 
