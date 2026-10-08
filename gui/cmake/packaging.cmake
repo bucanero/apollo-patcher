@@ -36,8 +36,10 @@ else()
     include(GNUInstallDirs)
     set(_bin_dest ${CMAKE_INSTALL_BINDIR})
     install(TARGETS apollo_patcher_gui RUNTIME DESTINATION ${_bin_dest} COMPONENT app)
-    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/apollo-patcher.desktop"
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/io.github.bucanero.apollo_patcher.desktop"
             DESTINATION ${CMAKE_INSTALL_DATADIR}/applications COMPONENT app)
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/io.github.bucanero.apollo_patcher.appdata.xml"
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo COMPONENT app)
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-256.png"
             DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps
             RENAME apollo-patcher.png COMPONENT app)

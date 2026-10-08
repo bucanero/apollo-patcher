@@ -9,7 +9,6 @@ name: Release installers
 # All four are unsigned. docs/user-guide.md tells people what that means.
 
 on:
-  push:
   workflow_dispatch:
 
 jobs:
@@ -101,10 +100,12 @@ jobs:
         repository: bucanero/apollo-patches
         path: apollo-patches
 
+    # appstream: appimagetool validates gui/*.appdata.xml with appstreamcli
+    # when it is present, and only warns that it is missing when it is not.
     - name: Install requirements
       run: |
         sudo apt-get update
-        sudo apt-get -y install zlib1g-dev libgl1-mesa-dev xorg-dev
+        sudo apt-get -y install zlib1g-dev libgl1-mesa-dev xorg-dev appstream
 
     - name: Install mbedTLS
       working-directory: apollo-lib
@@ -136,7 +137,7 @@ jobs:
         mkdir -p packages
         out="packages/ApolloSavePatcher-${ver}-linux-x86_64.AppImage"
         LDAI_OUTPUT="$out" ./linuxdeploy --appdir AppDir --output appimage \
-          --desktop-file AppDir/usr/share/applications/apollo-patcher.desktop
+          --desktop-file AppDir/usr/share/applications/io.github.bucanero.apollo_patcher.desktop
         # The packaged binary runs and finds its libraries: --open lists a
         # patch without opening a window.
         "$out" --open apollo-lib/tests/fixtures/BLUS30490.savepatch | tail -3

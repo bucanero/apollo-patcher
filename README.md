@@ -109,7 +109,8 @@ gui/      src/main.cpp     — Dear ImGui desktop app (file pickers, save list,
           cmake/           — the installers (packaging.cmake), and the mingw-w64
                              toolchain for the 32-bit Windows build
           app.rc.in        — the Windows executable's icon and version block
-          apollo-patcher.desktop — the Linux desktop entry
+          io.github.bucanero.apollo_patcher.desktop, .appdata.xml
+                         — the Linux desktop entry and AppStream metadata
 web/      WebAssembly build + static site
 tools/    build-index.py   — patch index, for both front-ends; also the
                              tool catalog (--format=tools)
