@@ -1,0 +1,311 @@
+name: Release installers
+
+# The installers for a release, on demand only: Actions ▸ Release installers ▸
+# Run workflow. The per-push checks live in build.yml and build-win.yml and
+# produce plain builds; this builds the same app and packages it with
+# gui/cmake/packaging.cmake, then gathers every installer into one artifact,
+# ApolloSavePatcher-<version>, to attach to a GitHub Release by hand.
+#
+# All four are unsigned. docs/user-guide.md tells people what that means.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    name: macOS .dmg
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Checkout apollo-lib
+      uses: actions/checkout@v4
+      with:
+        repository: bucanero/apollo-lib
+        path: apollo-lib
+
+    - name: Checkout apollo-patches
+      uses: actions/checkout@v4
+      with:
+        repository: bucanero/apollo-patches
+        path: apollo-patches
+
+    # Universal2 with a macOS 11.0 floor, as build.yml does it -- see there.
+    - name: Install mbedTLS
+      working-directory: apollo-lib
+      run: |
+        curl -fsSL https://src.fedoraproject.org/repo/pkgs/mbedtls/mbedtls-2.16.12.tar.gz/sha512/8d96d8cd906cc0999134320e4e1f550631426d166eab5da6e65469ee7286093810fcc6ac4bd5500ee55972d159f8bef7f9e53245f7f0eec72f72c35265b4313b/mbedtls-2.16.12.tar.gz | tar xz -C ./
+        cmake -S mbedtls-2.16.12 -B mbedtls-2.16.12/build \
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_C_COMPILER="$(xcrun --find clang)" \
+          -DCMAKE_OSX_SYSROOT="$(xcrun --sdk macosx --show-sdk-path)" \
+          -DCMAKE_OSX_ARCHITECTURES='x86_64;arm64' \
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+          -DUSE_STATIC_MBEDTLS_LIBRARY=ON \
+          -DUSE_SHARED_MBEDTLS_LIBRARY=OFF \
+          -DENABLE_PROGRAMS=OFF \
+          -DENABLE_TESTING=OFF
+        cmake --build mbedtls-2.16.12/build --target mbedcrypto --parallel
+
+    - name: Build
+      run: |
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_C_COMPILER="$(xcrun --find clang)" \
+          -DCMAKE_CXX_COMPILER="$(xcrun --find clang++)" \
+          -DCMAKE_OSX_SYSROOT="$(xcrun --sdk macosx --show-sdk-path)" \
+          -DCMAKE_OSX_ARCHITECTURES='x86_64;arm64' \
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+        cmake --build build -j
+        # A release with an empty game browser is a broken release: CMake only
+        # warns when it cannot build the database, so check here.
+        test -f build/gui/apollo_patcher_gui.app/Contents/Resources/apollo-patches.zip
+        test -f build/gui/apollo_patcher_gui.app/Contents/Resources/NotoSansJP-Medium.otf
+        lipo build/gui/apollo_patcher_gui.app/Contents/MacOS/apollo_patcher_gui \
+          -verify_arch x86_64 arm64
+
+    # hdiutil on the hosted runners fails now and then with "Resource busy".
+    - name: Package
+      working-directory: build
+      run: |
+        for i in 1 2 3; do
+          cpack -G DragNDrop && break
+          [ "$i" = 3 ] && exit 1
+          echo "cpack failed, retrying"; sleep 15
+        done
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: installer-macos
+        path: build/packages/*.dmg
+        if-no-files-found: error
+
+  linux:
+    name: Linux AppImage
+    # 22.04 rather than -latest: an AppImage runs on any distro whose glibc is
+    # at least the build machine's, so the older runner reaches further.
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Checkout apollo-lib
+      uses: actions/checkout@v4
+      with:
+        repository: bucanero/apollo-lib
+        path: apollo-lib
+
+    - name: Checkout apollo-patches
+      uses: actions/checkout@v4
+      with:
+        repository: bucanero/apollo-patches
+        path: apollo-patches
+
+    - name: Install requirements
+      run: |
+        sudo apt-get update
+        sudo apt-get -y install zlib1g-dev libgl1-mesa-dev xorg-dev
+
+    - name: Install mbedTLS
+      working-directory: apollo-lib
+      run: |
+        curl -fsSL https://src.fedoraproject.org/repo/pkgs/mbedtls/mbedtls-2.16.12.tar.gz/sha512/8d96d8cd906cc0999134320e4e1f550631426d166eab5da6e65469ee7286093810fcc6ac4bd5500ee55972d159f8bef7f9e53245f7f0eec72f72c35265b4313b/mbedtls-2.16.12.tar.gz | tar xz -C ./
+        cmake -S mbedtls-2.16.12 -B mbedtls-2.16.12/build -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        cmake --build mbedtls-2.16.12/build --target mbedcrypto --parallel
+
+    - name: Build
+      run: |
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        cmake --build build -j
+        test -f build/apollo-patches.zip
+        test -f build/gui/NotoSansJP-Medium.otf
+
+    # The install rules lay out a usr/ tree (the binary with the database and
+    # font beside it, where the app looks, plus a desktop entry and an icon);
+    # linuxdeploy wraps it. Pinned rather than "continuous" so a release is
+    # reproducible. Extract-and-run because the runner has no FUSE.
+    - name: Package
+      env:
+        APPIMAGE_EXTRACT_AND_RUN: 1
+      run: |
+        ver=$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt)
+        cmake --install build --prefix AppDir/usr --strip
+        curl -fsSL -o linuxdeploy \
+          https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
+        chmod +x linuxdeploy
+        mkdir -p packages
+        out="packages/ApolloSavePatcher-${ver}-linux-x86_64.AppImage"
+        LDAI_OUTPUT="$out" ./linuxdeploy --appdir AppDir --output appimage \
+          --desktop-file AppDir/usr/share/applications/apollo-patcher.desktop
+        # The packaged binary runs and finds its libraries: --open lists a
+        # patch without opening a window.
+        "$out" --open apollo-lib/tests/fixtures/BLUS30490.savepatch | tail -3
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: installer-linux
+        path: packages/*.AppImage
+        if-no-files-found: error
+
+  windows-x64:
+    name: Windows x64 setup
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: bash.exe --login -eo pipefail "{0}"
+    env:
+      MSYSTEM: MINGW64
+      CHERE_INVOKING: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout apollo-lib
+        uses: actions/checkout@v4
+        with:
+          repository: bucanero/apollo-lib
+          path: apollo-lib
+
+      - name: Checkout apollo-patches
+        uses: actions/checkout@v4
+        with:
+          repository: bucanero/apollo-patches
+          path: apollo-patches
+
+      - name: Set up shell
+        run: echo "C:\msys64\usr\bin\" >> $GITHUB_PATH
+        shell: pwsh
+
+      - name: Install mbedTLS
+        working-directory: apollo-lib
+        run: |
+          curl -sL https://src.fedoraproject.org/repo/pkgs/mbedtls/mbedtls-2.16.12.tar.gz/sha512/8d96d8cd906cc0999134320e4e1f550631426d166eab5da6e65469ee7286093810fcc6ac4bd5500ee55972d159f8bef7f9e53245f7f0eec72f72c35265b4313b/mbedtls-2.16.12.tar.gz | tar xz -C ./
+          cd mbedtls-2.16.12/library
+          mkdir -p ../build/library
+          CC=gcc make static
+          cp libmbedcrypto.a ../build/library
+
+      # The software OpenGL fallback the installer carries (see the README's
+      # "Known limitations"). Mesa 17.2.6 is a single self-contained DLL.
+      - name: Fetch Mesa software OpenGL (x64)
+        run: |
+          curl -sL -o mesa.exe \
+            "https://github.com/pal1000/mesa-dist-win/releases/download/17.2.6.500-1/mesa-17.2.6.500-1-sfx.exe"
+          7z x -y -omesa mesa.exe
+
+      # Python3_EXECUTABLE handed over as build-win.yml does -- see there.
+      # cygpath -m so a native Windows CMake gets D:/a/..., not /d/a/....
+      - name: Build
+        run: |
+          py=$(command -v python3 || command -v python)
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DPython3_EXECUTABLE="$py" \
+            -DAPOLLO_SOFTGL_DLL="$(cygpath -m "$PWD/mesa/x64/opengl32.dll")"
+          cmake --build build
+          test -f build/apollo-patches.zip
+          test -f build/gui/NotoSansJP-Medium.otf
+
+      # The runner image has NSIS in Program Files, which a login shell's PATH
+      # leaves out; MSYS2's own package is the fallback.
+      - name: Package
+        run: |
+          export PATH="$PATH:/c/Program Files (x86)/NSIS"
+          command -v makensis || pacman -S --noconfirm --needed mingw-w64-x86_64-nsis
+          cd build && cpack -G NSIS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows-x64
+          path: build/packages/*.exe
+          if-no-files-found: error
+
+  windows-x86:
+    name: Windows x86 setup (Linux cross)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout apollo-lib
+        uses: actions/checkout@v4
+        with:
+          repository: bucanero/apollo-lib
+          path: apollo-lib
+
+      - name: Checkout apollo-patches
+        uses: actions/checkout@v4
+        with:
+          repository: bucanero/apollo-patches
+          path: apollo-patches
+
+      - name: Install i686 mingw cross toolchain and NSIS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-mingw-w64-i686 g++-mingw-w64-i686 \
+            libz-mingw-w64-dev cmake ninja-build p7zip-full nsis
+
+      - name: Cross-build mbedcrypto (i686)
+        run: |
+          curl -sL https://src.fedoraproject.org/repo/pkgs/mbedtls/mbedtls-2.16.12.tar.gz/sha512/8d96d8cd906cc0999134320e4e1f550631426d166eab5da6e65469ee7286093810fcc6ac4bd5500ee55972d159f8bef7f9e53245f7f0eec72f72c35265b4313b/mbedtls-2.16.12.tar.gz | tar xz -C apollo-lib
+          cmake -S apollo-lib/mbedtls-2.16.12 -B apollo-lib/mbedtls-2.16.12/build \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/gui/cmake/mingw-i686.cmake" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF
+          cmake --build apollo-lib/mbedtls-2.16.12/build --target mbedcrypto -j
+
+      - name: Fetch Mesa software OpenGL (x86)
+        run: |
+          curl -sL -o mesa.exe \
+            "https://github.com/pal1000/mesa-dist-win/releases/download/17.2.6.500-1/mesa-17.2.6.500-1-sfx.exe"
+          7z x -y -omesa mesa.exe
+
+      - name: Cross-build
+        run: |
+          py=$(command -v python3 || command -v python)
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/gui/cmake/mingw-i686.cmake" \
+            -DPython3_EXECUTABLE="$py" \
+            -DAPOLLO_SOFTGL_DLL="$PWD/mesa/x86/opengl32.dll"
+          cmake --build build
+          test -f build/apollo-patches.zip
+          test -f build/gui/NotoSansJP-Medium.otf
+
+      # CPack drives makensis the same way on a Linux host.
+      - name: Package
+        working-directory: build
+        run: cpack -G NSIS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows-x86
+          path: build/packages/*.exe
+          if-no-files-found: error
+
+  bundle:
+    name: Gather the release
+    needs: [macos, linux, windows-x64, windows-x86]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the version
+        run: |
+          ver=$(sed -n 's/^project(apollo_patcher VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          test -n "$ver"
+          echo "version=$ver" >> $GITHUB_ENV
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          path: release
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: release
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ApolloSavePatcher-${{ env.version }}
+          path: release
+          if-no-files-found: error

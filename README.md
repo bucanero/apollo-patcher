@@ -106,7 +106,10 @@ gui/      src/main.cpp     — Dear ImGui desktop app (file pickers, save list,
           src/imgui_memory_editor.h — hex editor, vendored from
                              ocornut/imgui_club (MIT)
           assets/          — the app icon and the vendored UI font
-          cmake/           — the mingw-w64 toolchain for the 32-bit Windows build
+          cmake/           — the installers (packaging.cmake), and the mingw-w64
+                             toolchain for the 32-bit Windows build
+          app.rc.in        — the Windows executable's icon and version block
+          apollo-patcher.desktop — the Linux desktop entry
 web/      WebAssembly build + static site
 tools/    build-index.py   — patch index, for both front-ends; also the
                              tool catalog (--format=tools)
@@ -114,6 +117,7 @@ tools/    build-index.py   — patch index, for both front-ends; also the
           make-bundle.py   — apollo-patches.zip, for the desktop app
           make-font.py     — the hex editor's fixed-pitch font, as a header
           make-guide.py    — docs/user-guide.md, rendered onto the web site
+          make-ico.py      — gui/assets/icon.ico, from PNGs
 ```
 
 Both front-ends let you search the ~2250 patches in
@@ -188,16 +192,40 @@ checkout of the real-save database — see
 
 #### Packaging
 
-| OS      | Tooling                                             |
-|---------|-----------------------------------------------------|
-| macOS   | `MACOSX_BUNDLE` → `.app`, `cpack -G DragNDrop` (dmg) |
-| Windows | MSYS2/MinGW (same as `build-win.yml`), `cpack -G NSIS` |
-| Linux   | `cpack -G AppImage` / `.deb`                         |
+Installers come from CPack, configured in `gui/cmake/packaging.cmake`. Run it
+from the build directory after a Release build:
 
-CI is already wired: `.github/workflows/build.yml` (macOS + Linux) and
-`build-win.yml` build the GUI and upload it as an
-`apollo-gui-<sha>-<os>` artifact (`.app` on macOS, `apollo_patcher_gui.exe`
-elsewhere). Turn those artifacts into installers with CPack when you're ready.
+| OS      | command | produces |
+|---------|---------|----------|
+| macOS   | `cpack -G DragNDrop` | `ApolloSavePatcher-<ver>-macOS.dmg`: the app, renamed `Apollo Save Patcher.app` and signed ad hoc, plus an `Applications` link |
+| Windows | `cpack -G NSIS` (needs `makensis`) | `ApolloSavePatcher-<ver>-windows-<x64\|x86>-setup.exe`: Program Files, a Start menu entry, `.savepatch` opening in the app, and an uninstaller |
+| Linux   | `cmake --install build --prefix AppDir/usr`, then [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) `--appdir AppDir --output appimage` | `ApolloSavePatcher-<ver>-linux-x86_64.AppImage` |
+
+The packages land in `build/packages/`. The version is `project(VERSION)` in
+the root `CMakeLists.txt`. None of them are signed, and the
+[user guide](docs/user-guide.md#the-first-time-you-open-it) tells people how to
+get past the warning that causes.
+
+The Windows installer carries the [software OpenGL fallback](#known-limitations-that-affect-packaging)
+when configure is given one with `-DAPOLLO_SOFTGL_DLL=path/to/opengl32.dll`.
+It always goes into `softgl\`. An optional component, unticked by default,
+also puts it beside the `.exe`. Without that component, someone on Remote
+Desktop would need administrator rights to copy it into Program Files
+themselves.
+
+In CI, `build.yml` and `build-win.yml` build and test on every push and
+upload the plain builds as `apollo-gui-<sha>-<os>`. They make no installers.
+The installers come from `.github/workflows/release.yml`, which runs only when
+started by hand (**Actions ▸ Release installers ▸ Run workflow**). It builds
+all four in parallel (the Linux one on Ubuntu 22.04, to keep the AppImage's
+glibc floor low) and gathers them, with a `SHA256SUMS.txt`, into one artifact
+named `ApolloSavePatcher-<version>`. Attach that artifact's files to a GitHub
+Release.
+
+`gui/assets/icon.ico` (the `.exe`'s and the installer's icon, bound into the
+executable by `gui/app.rc.in` along with its version block) and
+`gui/assets/icon-256.png` (the AppImage's) are derived from `icon.png`, like
+the other icon files below.
 
 **Windows architectures.** The `msys` job (MSYS2 MINGW64) produces the **x64**
 build. The **x86 (32-bit)** build is cross-compiled on Linux with mingw-w64
@@ -290,6 +318,11 @@ image decoder at runtime):
   Regenerate by resizing `gui/assets/icon.png` to 256×256, decoding to raw
   RGBA, `compress2()`-ing at `Z_BEST_COMPRESSION`, and `xxd -i`-ing the
   deflated bytes into this header.
+- `gui/assets/icon.ico`: the Windows icon, 16 to 256px. Regenerate with
+  `sips -z N N` (or any resizer) for each of 16, 24, 32, 48, 64, 128 and 256,
+  then `tools/make-ico.py gui/assets/icon.ico icon-*.png`.
+- `gui/assets/icon-256.png`: the Linux desktop icon, at the 256×256 size
+  linuxdeploy accepts. `sips -z 256 256`.
 
 ### Web
 

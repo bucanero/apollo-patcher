@@ -31,6 +31,8 @@ FetchContent_Declare(glfw
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+# Or its headers and static library end up in the installers (packaging.cmake).
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 # X11 only: GLFW 3.4 builds the Wayland backend too by default, which needs
 # wayland-scanner + Wayland dev packages we don't install (and Wayland has no
 # window-icon protocol anyway). Keeps the Linux build's deps to xorg-dev.
@@ -86,6 +88,15 @@ if(MINGW)
     # -mwindows: build as a GUI-subsystem app so no console window opens
     #   behind the GUI. MinGW's WinMain shim still calls our main().
     target_link_options(apollo_patcher_gui PRIVATE -static -mwindows)
+endif()
+
+if(WIN32)
+    # The .exe's own icon and version block -- see app.rc.in. Without it,
+    # Explorer and the installer's Start menu shortcut show a generic one.
+    enable_language(RC)
+    set(APOLLO_APP_ICO "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.ico")
+    configure_file(app.rc.in "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
+    target_sources(apollo_patcher_gui PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
 endif()
 
 # The patch database, put where patchdb.c looks for it (see locate()): inside
@@ -248,3 +259,5 @@ if(APPLE)
 
     target_link_libraries(apollo_patcher_gui PRIVATE "-framework AppKit")
 endif()
+
+include(cmake/packaging.cmake)

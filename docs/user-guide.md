@@ -70,18 +70,38 @@ already decrypted by the console-side Apollo app. See
 
 ## Installing it
 
-Download the build for your platform, unpack it, and run it. There is no
-installer step and nothing is written outside your own user folders.
+Download the installer for your platform:
 
-| | what you get | notes |
+| | download | then |
 |---|---|---|
-| **Windows** | `apollo_patcher_gui.exe` plus a `softgl\` folder | Take the **32-bit (x86)** build if your CPU is older than about 2011 — see [troubleshooting](#the-app-will-not-start-on-windows) |
-| **macOS** | `Apollo Save Patcher.app` | |
-| **Linux** | the executable | Needs a dialog helper for the file pickers: `zenity`, `kdialog`, `matedialog` or `qarma`. Install whichever your desktop already uses |
+| **Windows** | `ApolloSavePatcher-<version>-windows-x64-setup.exe`, or `-x86-setup.exe` | Run it. Take the **32-bit (x86)** one if your CPU is older than about 2011 — see [troubleshooting](#the-app-will-not-start-on-windows). It adds a Start menu entry and opens `.savepatch` files on a double-click. Leave **Software OpenGL renderer** unticked unless you are on Remote Desktop or in a virtual machine |
+| **macOS** | `ApolloSavePatcher-<version>-macOS.dmg` | Open it and drag **Apollo Save Patcher** into **Applications**. macOS 11 or later, Intel or Apple Silicon |
+| **Linux** | `ApolloSavePatcher-<version>-linux-x86_64.AppImage` | Make it executable (`chmod +x`, or the file's Properties) and run it. Needs a dialog helper for the file pickers: `zenity`, `kdialog`, `matedialog` or `qarma`. Install whichever your desktop already uses |
 
-Keep the folder together. The app looks beside itself for the patch database
-(`apollo-patches.zip`) and the font, so moving just the executable somewhere
-else will leave you with no codes and the wrong typeface.
+Uninstalling is the usual way for each: **Apps** in Windows Settings, dragging
+the app to the Bin on macOS, deleting the AppImage on Linux. Your settings are
+kept in your own user folder (see [where settings are kept](#where-settings-are-kept))
+and are not removed with it.
+
+### The first time you open it
+
+The installers are not signed, so both Windows and macOS warn about them once.
+
+- **Windows** shows *Windows protected your PC*. Choose **More info**, then
+  **Run anyway**.
+- **macOS** says it cannot verify the app. Open **System Settings ▸ Privacy &
+  Security**, scroll down to the message about Apollo Save Patcher, and press
+  **Open Anyway**. On macOS 14 and earlier, right-clicking the app and choosing
+  **Open** does the same.
+
+After that it opens like any other app.
+
+### If you have the plain build instead
+
+The builds are also available as plain folders with no installer. Unpack one
+anywhere and run the executable inside it, but keep the folder together. The
+app looks beside itself for the patch database (`apollo-patches.zip`) and the
+font. If you move only the executable, you get no codes and the wrong typeface.
 
 ### First run
 
@@ -552,14 +572,16 @@ at all — **Remote Desktop exposes no OpenGL whatsoever**, and neither do some
 VMs and GPU-less machines. You will get a message box saying the window could
 not be created.
 
-**The fix ships with the app.** There is a software renderer in the `softgl`
-folder next to the executable:
+**The fix ships with the app.** It is a software renderer:
 
-1. Copy `softgl\opengl32.dll` **up into the same folder as
-   `apollo_patcher_gui.exe`**.
-2. Start the app again.
+- **If you used the installer**, run it again and tick **Software OpenGL
+  renderer**.
+- **Otherwise**, copy `softgl\opengl32.dll` from the app's folder **up into
+  the same folder as `apollo_patcher_gui.exe`**. Doing this in Program Files
+  asks for administrator rights.
 
-It then renders in software, which works over Remote Desktop.
+Start the app again. It now renders in software, which works over Remote
+Desktop.
 
 **If the app instead dies instantly with `0xC000001D`
 (`STATUS_ILLEGAL_INSTRUCTION`), use the 32-bit build.** The 64-bit software
@@ -572,6 +594,14 @@ machine, not a workaround.
 
 The file pickers need a helper program present: `zenity`, `kdialog`,
 `matedialog` or `qarma`. Install whichever suits your desktop.
+
+### The AppImage will not start on Linux
+
+If running it from a terminal mentions **FUSE** or `libfuse.so.2`, your system
+lacks the library AppImages use to mount themselves. Recent Ubuntu releases
+no longer install it by default. Either install it (`libfuse2` on most
+distributions, `libfuse2t64` on Ubuntu 24.04 and later), or run the AppImage
+with `--appimage-extract-and-run`, which needs no FUSE.
 
 ### My game has no codes
 

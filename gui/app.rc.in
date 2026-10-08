@@ -1,0 +1,33 @@
+// The Windows executable's resources: the icon Explorer, the taskbar pin and
+// the Start menu shortcut show (the title-bar icon is set at run time from
+// src/icon_rgba_z.h, which is a separate thing), and the version block the
+// file's Properties > Details tab reads. Configured by gui/CMakeLists.txt so
+// the version comes from project(VERSION) like everywhere else.
+#include <winver.h>
+
+1 ICON "@APOLLO_APP_ICO@"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+PRODUCTVERSION  @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription",  "Apollo Save Patcher"
+            VALUE "FileVersion",      "@PROJECT_VERSION@"
+            VALUE "InternalName",     "apollo_patcher_gui"
+            VALUE "OriginalFilename", "apollo_patcher_gui.exe"
+            VALUE "ProductName",      "Apollo Save Patcher"
+            VALUE "ProductVersion",   "@PROJECT_VERSION@"
+            VALUE "LegalCopyright",   "Copyright (C) 2020-2026 Damian Parrino. GPLv3."
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
