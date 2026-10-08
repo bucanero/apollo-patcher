@@ -243,15 +243,28 @@ static int run_edit(const char *path)
         CHECK("apply edit B", run_one(s, sw, path, "20000004 000000FF", other2, sizeof other2));
         CHECK("a different edit -> different bytes", memcmp(first, other2, sizeof first) != 0);
 
-        /* The type decides which interpreter reads the body: the same Save
-         * Wizard line means nothing to the BSD parser, so the write goes away
-         * and comes back when the type does. */
-        uint8_t as_bsd[32], as_sw[32];
+        /* The type decides which interpreter reads the body. A Save Wizard
+         * line is no longer a way to show it: since apollo-lib 3.0's BSD
+         * scripts run Save Wizard lines themselves, so that body writes the
+         * same bytes either way -- checked here too, since the front-ends'
+         * type switch now relies on it. A BSD command is still BSD-only, so
+         * it is what proves the switch: it writes as BSD, and as Save Wizard
+         * it is not a code at all. Its bytes are spelled in the order the
+         * Save Wizard write above lands them in, which for this session is
+         * little-endian: a BSD write puts down exactly the bytes it is
+         * given. */
+        const char *bsd_body = "write at 0x04:78563412";
+        uint8_t as_bsd[32], bsd_cmd[32], as_sw[32], bsd_as_sw[32];
         apctl_set_code_type(sw, APOLLO_CODE_BSD);
-        CHECK("apply as BSD", run_one(s, sw, path, "20000004 12345678", as_bsd, sizeof as_bsd));
-        CHECK("a SW line means nothing as BSD", memcmp(as_bsd, first, sizeof first) != 0);
+        CHECK("apply SW line as BSD", run_one(s, sw, path, "20000004 12345678", as_bsd, sizeof as_bsd));
+        CHECK("BSD runs a SW line too", memcmp(as_bsd, first, sizeof first) == 0);
+        CHECK("apply BSD command", run_one(s, sw, path, bsd_body, bsd_cmd, sizeof bsd_cmd));
+        CHECK("BSD command -> same write", memcmp(bsd_cmd, first, sizeof first) == 0);
 
         apctl_set_code_type(sw, APOLLO_CODE_SAVEWIZARD);
+        memset(bsd_as_sw, 0, sizeof bsd_as_sw);
+        run_one(s, sw, path, bsd_body, bsd_as_sw, sizeof bsd_as_sw);
+        CHECK("a BSD command means nothing as SW", memcmp(bsd_as_sw, first, sizeof first) != 0);
         CHECK("apply as Save Wizard again", run_one(s, sw, path, "20000004 12345678", as_sw, sizeof as_sw));
         CHECK("type back -> the write is back", memcmp(as_sw, first, sizeof first) == 0);
 
