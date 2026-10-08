@@ -8,7 +8,7 @@ drive the same `libapollo` engine the console apps use.
 
 | Front-end | What it is |
 |-----------|------------|
-| [`gui/`](gui/README.md) | Native desktop app (Dear ImGui + GLFW) for Windows, macOS and Linux — **opens on your saves**: point it at a folder, pick a game by name, patch it. The patch database is bundled offline |
+| [`gui/`](#desktop-gui) | Native desktop app (Dear ImGui + GLFW) for Windows, macOS and Linux — **opens on your saves**: point it at a folder, pick a game by name, patch it. The patch database is bundled offline |
 | [`web/`](web/README.md) | The engine compiled to WebAssembly, running in a browser tab — the patcher, with the patch database searchable in-page and **PSP and PS3 savedata panels** for the consoles' own encryption, plus a **tools page** offering one decrypt / re-encrypt pair per game |
 
 The command-line tools (`patcher`, `dumper`) and the engine itself live in
@@ -101,7 +101,12 @@ core/     apollo_ctrl.[ch] — stdio-free engine facade, shared by both front-en
                              modes that re-sign, rebuild and patch real ones
 docs/     user-guide.md    — using the desktop app
           internals/       — how and why the above works the way it does
-gui/      Dear ImGui desktop app
+gui/      src/main.cpp     — Dear ImGui desktop app (file pickers, save list,
+                             code list, option combos, log)
+          src/imgui_memory_editor.h — hex editor, vendored from
+                             ocornut/imgui_club (MIT)
+          assets/          — the app icon and the vendored UI font
+          cmake/           — the mingw-w64 toolchain for the 32-bit Windows build
 web/      WebAssembly build + static site
 tools/    build-index.py   — patch index, for both front-ends; also the
                              tool catalog (--format=tools)
@@ -181,6 +186,111 @@ The test binaries' `--corpus`, `--scan` and `--accounts` modes all expect a
 checkout of the real-save database — see
 [docs/internals/corpus.md](docs/internals/corpus.md).
 
+#### Packaging
+
+| OS      | Tooling                                             |
+|---------|-----------------------------------------------------|
+| macOS   | `MACOSX_BUNDLE` → `.app`, `cpack -G DragNDrop` (dmg) |
+| Windows | MSYS2/MinGW (same as `build-win.yml`), `cpack -G NSIS` |
+| Linux   | `cpack -G AppImage` / `.deb`                         |
+
+CI is already wired: `.github/workflows/build.yml` (macOS + Linux) and
+`build-win.yml` build the GUI and upload it as an
+`apollo-gui-<sha>-<os>` artifact (`.app` on macOS, `apollo_patcher_gui.exe`
+elsewhere). Turn those artifacts into installers with CPack when you're ready.
+
+**Windows architectures.** The `msys` job (MSYS2 MINGW64) produces the **x64**
+build. The **x86 (32-bit)** build is cross-compiled on Linux with mingw-w64
+(`win32-cross` job) using the toolchain file `gui/cmake/mingw-i686.cmake` —
+MSYS2 dropped its 32-bit toolchain, so its MINGW32 target silently emitted x64
+binaries. To reproduce the 32-bit build locally on Linux:
+
+```bash
+sudo apt-get install -y gcc-mingw-w64-i686 g++-mingw-w64-i686 libz-mingw-w64-dev ninja-build
+# build mbedcrypto into ../apollo-lib/mbedtls-2.16.12/build/library with the same
+# toolchain file, then from the repository root:
+cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=$PWD/gui/cmake/mingw-i686.cmake
+cmake --build build
+```
+
+#### The bundled patch database
+
+The database is `apollo-patches.zip` (3.3MB, 2269 entries), built by
+`tools/make-bundle.py`. **The CMake build makes it for you**, from the same
+`apollo-patches` checkout the web build uses (`./apollo-patches`, then
+`../apollo-patches`, or `-DAPOLLO_PATCHES=...`), and copies it into the app —
+`Contents/Resources` for a macOS `.app`, beside the executable elsewhere. It
+lands at `build/apollo-patches.zip` too, which is next to `apollo_ctrl_test`,
+so `--db` works with no environment variable.
+
+It is optional and never fails a build: with no patch checkout, or no Python,
+configuring says what is missing and carries on. The app then opens
+`.savepatch` files by hand as before, and the browser explains itself.
+
+Rebuilds are tracked — the glob over the patch files is `CONFIGURE_DEPENDS`, so
+pulling new patches rebuilds the zip and refreshes the app's copy on the next
+build. A build with nothing changed does neither.
+
+Besides the patches, the zip carries three generated or copied tables:
+`index.tsv` (game names per patch), the two console key databases
+(`PSP/gamekeys.txt`, `PS3/games.conf`), and **`titles.tsv`** — game names by
+title ID, normalised by `make-bundle.py` from apollo-patches' four title
+catalogues. That last one is what names a save the patch database has never
+heard of:
+
+| source | platform | titles |
+|---|---|---|
+| `psptitleid.txt` | PSP | 4,306 |
+| `psvtitleid.txt` | PSV (Vita) | 4,477 |
+| `ps1titleid.txt` | PS1 | 10,048 |
+| `ps2titleid.txt` | PS2 | 14,339 |
+
+33,170 rows, about 387KB compressed. `TITLE_DBS` in `make-bundle.py` is the
+list, and carries a per-file encoding because the PS1 and PS2 catalogues are
+Windows-1252 rather than UTF-8.
+
+Where it looks, in order: `$APOLLO_PATCHES_ZIP`, next to the executable,
+`../Resources/` (so a macOS `.app` is self-contained), then the working
+directory.
+
+#### Known limitations that affect packaging
+
+These are in the [user guide](docs/user-guide.md#when-something-goes-wrong)
+in the form a user needs them, but they shape what has to ship:
+
+- **The Windows artifacts carry a software OpenGL fallback** at
+  `softgl\opengl32.dll` — Mesa 17.2.6, old enough to be a single
+  self-contained file. It is deliberately in a subfolder so the app uses the
+  system GPU driver by default; a user with no usable OpenGL (Remote Desktop
+  exposes none at all) copies it up beside the exe. `main` sets
+  `GALLIUM_DRIVER=llvmpipe` to select it, unless the user has set that variable
+  themselves.
+- **The x64 software renderer needs AVX**, which is not by design: every
+  mesa-dist-win x64 build before Mesa 22.0 carries the `swr` driver, which
+  [leaks AVX into common code](https://github.com/pal1000/mesa-dist-win#known-issues).
+  On an older CPU the app dies at launch with `0xC000001D` before a window
+  appears. The x86 artifact is unaffected, which is why **both architectures
+  are shipped** and the 32-bit one is the supported answer for such a machine.
+  Tested: on a Windows 7 x64 host with a Pentium 4, the x64 software renderer
+  dies and the x86 one runs normally, while the same host runs the x64 build
+  fine on its GPU driver.
+- **Linux file dialogs** need `zenity`, `kdialog`, `matedialog` or `qarma`
+  present at runtime.
+
+#### App icon
+
+Source art: `gui/assets/icon.png`. Derived files (checked in; the app needs no
+image decoder at runtime):
+- `gui/assets/icon.icns` — macOS bundle icon (Dock/Finder), wired via CMake
+  `MACOSX_BUNDLE_ICON_FILE`. Regenerate from the PNG with `sips`/`iconutil`.
+- `gui/src/icon_rgba_z.h` — the icon **pre-decoded to 256×256 RGBA and
+  zlib-deflated** (262 KB → ~51 KB). Inflated at startup with zlib (already
+  linked) and passed to `glfwSetWindowIcon()` for the Windows/Linux title-bar &
+  taskbar (no-op on macOS — the whole path is behind `#ifndef __APPLE__`).
+  Regenerate by resizing `gui/assets/icon.png` to 256×256, decoding to raw
+  RGBA, `compress2()`-ing at `Z_BEST_COMPRESSION`, and `xxd -i`-ing the
+  deflated bytes into this header.
+
 ### Web
 
 See [web/README.md](web/README.md).
@@ -197,6 +307,42 @@ python3 tools/build-index.py /path/to/apollo-patches tools.json --format=tools
 
 See [docs/internals/frontends.md](docs/internals/frontends.md#the-tool-catalog)
 for what it does and does not promise.
+
+## Credits
+
+The consoles' own savedata encryption, the layer under every patch, rests on
+other people's reverse engineering:
+
+- **KIRK engine** by **Draan**, with help from coyotebean, Davee, hitchhikr,
+  kgsws, liquidzigong, Mathieulh, Proxima and SilverSpring — an open-source
+  implementation of the PSP's crypto engine (GPLv3). Vendored at `core/psp/`
+  by way of [apollo-psp](https://github.com/bucanero/apollo-psp), and what
+  takes the PSP's wrapper off a save.
+- **pfdtool** by **flatz** — the PS3's `PARAM.PFD` format, its hashing and the
+  console keys. `core/ps3/` is derived from it by way of
+  [pfd_sfo_tools](https://github.com/bucanero/pfd_sfo_tools) and
+  [apollo-ps3](https://github.com/bucanero/apollo-ps3).
+
+Third-party pieces in the desktop app:
+
+- [Dear ImGui](https://github.com/ocornut/imgui) and
+  [GLFW](https://github.com/glfw/glfw) — fetched at configure time via CMake.
+- [imgui_club](https://github.com/ocornut/imgui_club)'s memory editor — the
+  hex editor, vendored at `gui/src/imgui_memory_editor.h` (MIT).
+- [portable-file-dialogs](https://github.com/samhocevar/portable-file-dialogs)
+  by Sam Hocevar — native file dialogs (WTFPL). Vendored at
+  `gui/src/portable-file-dialogs.h`; update by replacing that file from
+  upstream. Carries one **LOCAL PATCH** (search that string in the file): a
+  32-bit-only fix in `pfd::notify` where a capture-less lambda wouldn't bind to
+  the `__stdcall ENUMRESNAMEPROC` on x86 — re-apply if you refresh the header.
+- [Noto Sans JP](https://fonts.google.com/noto) — the UI font, vendored at
+  `gui/assets/fonts/` under the SIL Open Font License. See
+  [Text](docs/internals/text.md#the-ui-font).
+- [raster-fonts](https://github.com/idispatch/raster-fonts) by idispatch — the
+  10×20 console font the hex editor and code viewers draw with, the same one
+  `apollo-ps3`, `apollo-ps4` and `apollo-vita` use. Converted to
+  `gui/src/font10x20.h` by `tools/make-font.py`; regenerate from upstream's
+  `font-10x20.c` rather than editing the header.
 
 ## License
 
