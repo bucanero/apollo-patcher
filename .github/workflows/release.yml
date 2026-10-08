@@ -9,6 +9,7 @@ name: Release installers
 # All four are unsigned. docs/user-guide.md tells people what that means.
 
 on:
+  push:
   workflow_dispatch:
 
 jobs:
