@@ -5,7 +5,7 @@
  * dist/. All engine work happens in worker.js; this file is only state + DOM.
  */
 
-import { CDN } from './cdn.js';
+import { CDN, INDEX_URL } from './cdn.js';
 import { initSettings, loadSettings, updateSettings, effectiveBigEndian,
          byteOrderForced, BYTE_ORDERS } from './settings.js';
 import { initPsp } from './psp.js';
@@ -811,13 +811,26 @@ const MAX_ROWS = 200;   /* rendering all 2200 is pointless; refine instead */
 
 const db = { rows: null, loading: null, platform: null, generated: null };
 
+/* The live index first (see INDEX_URL), then the one built into this site. */
+async function fetchIndex() {
+    let status = 'unreachable';
+    for (const url of [INDEX_URL, './patches.json']) {
+        try {
+            const res = await fetch(url);
+            if (res.ok) return await res.json();
+            status = res.status;
+        } catch {
+            /* offline, blocked, or not valid JSON: try the next one */
+        }
+    }
+    throw new Error(`index unavailable (${status})`);
+}
+
 async function loadIndex() {
     if (db.rows) return db.rows;
     if (!db.loading) {
         db.loading = (async () => {
-            const res = await fetch('./patches.json');
-            if (!res.ok) throw new Error(`index unavailable (${res.status})`);
-            const doc = await res.json();
+            const doc = await fetchIndex();
             db.rows = doc.patches.map(([platform, id, name]) => ({
                 platform, id, name,
                 /* precomputed once: the filter runs on every keystroke */
@@ -933,12 +946,52 @@ async function dbPick(row) {
         /* row.platform is the database directory — authoritative, so the
          * title-ID fallback is never consulted for these. */
         await loadPatch(new File([buffer], `${row.id}.savepatch`), row.name, row.platform);
+        return true;
     } catch (err) {
         $('db-status').textContent =
             `Could not fetch ${row.id} (${err.message}). It may have been renamed ` +
             `upstream since this index was built — dropping the file still works.`;
+        return false;
     } finally {
         db.fetching = false;
+    }
+}
+
+/*
+ * Deep links, which the apollo-patches site uses for every patch page:
+ *
+ *   ?patch=PS3/BLUS30490   open that patch, as if picked in the browser
+ *   ?browse                open the browser itself
+ *
+ * The value only ever becomes a CDN path, so it is held to the shape the
+ * database uses: a platform directory and a plain title ID.
+ */
+async function openFromUrl() {
+    const params = new URLSearchParams(location.search);
+    const want = params.get('patch');
+
+    if (!want) {
+        if (params.has('browse')) openDb();
+        return;
+    }
+
+    const m = /^(PS[234]|PSP|PSV)\/([A-Za-z0-9_-]{4,16})$/i.exec(want);
+    if (!m) return;
+    const platform = m[1].toUpperCase();
+    const id = m[2];
+
+    /* The name is only for display; a missing index must not stop the patch. */
+    let name = id;
+    try {
+        const rows = await loadIndex();
+        name = rows.find((r) => r.platform === platform && r.id === id)?.name || id;
+    } catch { /* keep the title ID */ }
+
+    if (!(await dbPick({ platform, id, name }))) {
+        /* Not there: show the browser on that ID instead of failing silently. */
+        await openDb();
+        $('db-search').value = id;
+        dbRender();
     }
 }
 
@@ -1007,6 +1060,8 @@ initSettings(call, (res) => {
 /* Show the stored byte order before anything is loaded, so the select is never
  * out of step with what Apply would do. */
 renderByteOrder();
+
+openFromUrl();
 
 call('version').then(({ version }) => {
     if (version) $('version').textContent = `Apollo engine ${version}`;

@@ -13,6 +13,16 @@
 export const CDN = 'https://cdn.jsdelivr.net/gh/bucanero/apollo-patches@main';
 
 /*
+ * The patch index, as apollo-patches' own Pages workflow publishes it on every
+ * push (tools/build-site.py's site, next to the console update packs). Read
+ * before the copy built into dist/, which is only as new as this site's last
+ * deploy -- so a patch added upstream is listed without redeploying here.
+ * GitHub Pages answers `access-control-allow-origin: *`, and the built-in
+ * copy stays the fallback for when it does not answer at all.
+ */
+export const INDEX_URL = 'https://bucanero.github.io/apollo-patches/patches.json';
+
+/*
  * Save-game icons, by title ID: <PLATFORM>/<TITLEID>/<icon0>. Mind the case —
  * PS3 and PSP store ICON0.PNG, everything else icon0.png (see ICON_FILE in
  * tools.js).

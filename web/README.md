@@ -23,7 +23,8 @@ and how the tools page proves what it offers.
 ```
 src/apollo_wasm.c    Emscripten binding over core/apollo_ctrl.[ch]
 ../tools/            build-index.py generates the browsable patch index and
-                     the tools catalog; verify-tools.mjs proves the latter
+                     the tools catalog; verify-tools.mjs proves the latter;
+                     build-site.py builds the apollo-patches Pages site
 public/index.html    the patcher page
 public/app.js        UI: state + DOM, no framework
 public/tools.html    the tools page — one decrypt/re-encrypt pair per game

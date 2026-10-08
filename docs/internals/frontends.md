@@ -555,9 +555,48 @@ The split between build time and run time is deliberate:
   `raw.githubusercontent.com`, which answers 503 to cross-origin requests from
   the Pages origin.
 
-The consequence to keep in mind: a patch added upstream is not listed until this
-site is rebuilt. A listed patch that has since been renamed 404s, which the
-dialog reports while pointing at the drop zone as the fallback.
+The built-in index is only as new as this site's last deploy, so the page first
+asks for the one apollo-patches publishes itself
+(`bucanero.github.io/apollo-patches/patches.json`, `INDEX_URL` in `cdn.js`),
+which its Pages workflow rebuilds on every push. GitHub Pages sends
+`access-control-allow-origin: *`; if that copy does not answer, the built-in one
+is used. A listed patch that has since been renamed 404s, which the dialog
+reports while pointing at the drop zone as the fallback. One gap remains: the
+patch itself still comes from jsDelivr, which can take up to 12 hours to see a
+file pushed to `@main`, so a brand-new patch can be listed before it can be
+fetched.
+
+Two deep links open the browser from outside, and every page of the
+apollo-patches site uses them:
+
+- `?patch=PS3/BLUS30490` loads that patch as if it had been picked. An ID the
+  database does not have opens the dialog with the ID already typed in.
+- `?browse` opens the dialog.
+
+### The apollo-patches site
+
+`bucanero.github.io/apollo-patches` used to be a Jekyll site built from 2200
+markdown pages that someone had to regenerate (`parser -d`) and commit. It is
+now built on every push by apollo-patches' own workflow, which checks this repo
+out and runs two scripts from `tools/`:
+
+- `build-index.py`, for the `patches.json` above;
+- `build-site.py`, for one static page per patch (codes, groups, types,
+  targets and bodies), one listing per platform, a landing page, a sitemap and a
+  404.
+
+The static pages are there for search engines and for readers without
+JavaScript. Each one links to `?patch=` for the real, interactive view. They
+share `build-index.py`'s file reading, and their code list follows
+`source/loader.c` closely enough that every patch lists the same codes as the
+engine: titles, groups, `[GROUP:\]` closers and the trailing-`]` cut. That was
+checked against the engine's own listing for all 2252 patches. The pages are
+still only a listing: what a code does is decided by the engine alone.
+
+They are written at `<PLATFORM>/<TITLEID>.html`, the same path Jekyll gave the
+old `.md` pages, so old links keep working without a redirect. The console
+update packs (`<PLATFORM>/apollo-*-update.zip`, the apps' `ONLINE_PATCH_URL`)
+sit next to them, built by the same workflow as before.
 
 The same script builds the desktop app's index (as TSV, inside
 `apollo-patches.zip`), so the parsing quirks below are handled once for both.
