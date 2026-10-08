@@ -127,7 +127,11 @@ elseif(WIN32)
         set(CPACK_COMPONENT_SOFTGL_DISABLED ON)
     endif()
 
-    set(CPACK_NSIS_PACKAGE_NAME "Apollo Save Patcher ${PROJECT_VERSION}")
+    # No version here: the Start menu page has no default folder of its own
+    # and falls back to this name, so a versioned one would give every
+    # release its own Start menu group. Windows' installed-apps list shows
+    # the version in a column of its own anyway.
+    set(CPACK_NSIS_PACKAGE_NAME "Apollo Save Patcher")
     set(CPACK_NSIS_DISPLAY_NAME "Apollo Save Patcher")
     set(CPACK_NSIS_MUI_ICON   "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.ico")
     set(CPACK_NSIS_MUI_UNIICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.ico")
