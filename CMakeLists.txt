@@ -199,6 +199,7 @@ if(_patches_found AND Python3_Interpreter_FOUND)
     # added there and not here means its patches stop triggering a rebuild,
     # not that they are left out of the zip.
     file(GLOB APOLLO_BUNDLE_INPUTS CONFIGURE_DEPENDS
+        "${_patches_found}/PS1/*.savepatch"
         "${_patches_found}/PS2/*.savepatch"
         "${_patches_found}/PS3/*.savepatch"
         "${_patches_found}/PS4/*.savepatch"

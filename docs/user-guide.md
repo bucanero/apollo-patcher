@@ -388,8 +388,8 @@ about the save, not just about the picture.
 
 ### Patch coverage is thin here
 
-Not a limitation of the app but of the database, which today has two PS2
-patches and no PS1 directory at all. Browsing, identifying, icons, editing by
+Not a limitation of the app but of the database, which has only a handful of
+PS1 and PS2 patches so far. Browsing, identifying, icons, editing by
 hand and re-signing all work for every save regardless.
 
 ---
@@ -610,8 +610,8 @@ title ID. That is a fact about the database, not about your save — everything
 else still works, and you can open a `.savepatch` from elsewhere with **File ▸
 Open .savepatch...**.
 
-PS1 and PS2 coverage is especially thin: two PS2 patches, and no PS1 patches at
-all, at the time of writing.
+PS1 and PS2 coverage is especially thin: only a handful of patches for either
+console so far.
 
 If the game is listed but under the wrong name, or not listed at all, check the
 title ID looks right — a save folder somebody renamed will not be matched

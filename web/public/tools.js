@@ -23,7 +23,7 @@ import { initPs3, ps3SettingsChanged, ps3PfdInfo, ps3KeyFor, ps3ListedFor, ps3Ne
          ps3NativeDecrypt, ps3NativeEncrypt, ps3FolderFromSfo, ps3Verify,
          ensurePs3KeyDb } from './ps3.js';
 
-const PLATFORM_LABEL = { PS3: 'PS3', PS4: 'PS4', PSV: 'PS Vita', PSP: 'PSP', PS2: 'PS2' };
+const PLATFORM_LABEL = { PS3: 'PS3', PS4: 'PS4', PSV: 'PS Vita', PSP: 'PSP', PS2: 'PS2', PS1: 'PS1' };
 
 /* Is this the same GAME, spelled differently? Patch titles are written by
  * hand, so the regions of one game disagree about trademark glyphs, case,

@@ -35,7 +35,7 @@ _spec.loader.exec_module(build_index)
 PLATFORMS = build_index.PLATFORMS
 PLATFORM_NAMES = {"PS3": "PlayStation 3", "PS4": "PlayStation 4",
                   "PSV": "PlayStation Vita", "PSP": "PlayStation Portable",
-                  "PS2": "PlayStation 2"}
+                  "PS2": "PlayStation 2", "PS1": "PlayStation"}
 # What each console app downloads (ONLINE_PATCH_URL in its settings.c). The
 # workflow builds these next to the pages; PS2 patches ride in PS3's and PS4's.
 UPDATE_PACKS = {"PS3": "apollo-ps3-update.zip", "PS4": "apollo-ps4-update.zip",
@@ -333,7 +333,7 @@ def render_home(counts, cfg):
     body = f"""<h1>Apollo Save Database</h1>
 <p class="meta">{total} save game patches for
 <a href="https://github.com/bucanero/apollo-ps3">Apollo Save Tool</a> on
-PS2, PS3, PS4, PSP and PS Vita.</p>
+PS1, PS2, PS3, PS4, PSP and PS Vita.</p>
 <p class="actions">
 <a class="btn primary" href="{E(cfg["patcher"])}?browse">Search and apply patches in the browser</a>
 <a class="btn" href="{REPO}">Contribute on GitHub</a>
@@ -342,7 +342,7 @@ PS2, PS3, PS4, PSP and PS Vita.</p>
 {"".join(cards)}
 </div>"""
     return page("Apollo Save Database", body,
-                f"{total} save game patches for Apollo Save Tool on PS2, PS3, PS4, PSP and PS Vita",
+                f"{total} save game patches for Apollo Save Tool on PS1, PS2, PS3, PS4, PSP and PS Vita",
                 f'{cfg["base"]}/', "./")
 
 

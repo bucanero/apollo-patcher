@@ -32,7 +32,7 @@ import subprocess
 import sys
 import zipfile
 
-PLATFORMS = ["PS2", "PS3", "PS4", "PSP", "PSV"]
+PLATFORMS = ["PS1", "PS2", "PS3", "PS4", "PSP", "PSV"]
 
 #
 # Game names by title ID -- (platform, file in the checkout, separator,

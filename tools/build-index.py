@@ -47,11 +47,11 @@ import re
 import sys
 from datetime import datetime, timezone
 
-PLATFORMS = ["PS3", "PS4", "PSV", "PSP", "PS2"]
+PLATFORMS = ["PS3", "PS4", "PSV", "PSP", "PS2", "PS1"]
 
 # Some names carry a redundant platform tag ("PS4 Grand Theft Auto V") — the UI
 # shows the platform in its own column, so drop it.
-PLATFORM_TAG = re.compile(r"^(PS2|PS3|PS4|PSP|PSV|PS Vita|VITA)\b[\s:-]*", re.I)
+PLATFORM_TAG = re.compile(r"^(PS1|PS2|PS3|PS4|PSP|PSV|PS Vita|VITA)\b[\s:-]*", re.I)
 
 
 def read_game_name(path):
